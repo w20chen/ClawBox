@@ -1,6 +1,6 @@
 # Host KB and Full-1280 continuation handoff
 
-Continuation resumed at the user's request on 2026-11-01. Updated 2026-11-01 20:05 Asia/Shanghai (12:05 UTC). Full-1280 acceptance remains incomplete.
+Continuation resumed at the user's request on 2026-11-01. Updated after the real pair-learning gate, approximately 21:50 Asia/Shanghai. Full-1280 acceptance remains incomplete.
 This is an operational handoff; the requirements remain in
 `HOST_KB_REDESIGN_HANDOFF_20261030.md`.
 
@@ -11,10 +11,67 @@ are substantially complete, but the large-run acceptance and final measurements
 are incomplete. Do not describe the redesign as fully verified.
 
 The latest Full run is terminal **failed**, with cleanup verified. No replacement
-Full run has been launched. One four-case capacity diagnostic is running; inspect
-it before doing any further work. The user has now requested continuation. Preserve the completed work and keep further changes scoped to consequential acceptance gaps.
+Full run has been launched. Capacity and pair-learning diagnostics are now terminal.
+The user requested a plan and execution through completion, with careful gates to
+avoid repeated Full runs. Preserve 160 CPUs and 1,000 GiB across NUMA0/1.
+
+## Latest continuation results (supersede earlier interim notes)
+
+- The four 8 GiB cases completed. Final validators passed, but 3477 had guest
+  OOM, 3024 had one extra segfault, and 3057/5407 had consequential package-install
+  differences. Saved detail: `capacity-checks/divergence-detail-1793537534768321244.json`.
+  Some recorded timeouts were misclassified because importer advice followed
+  the exit marker; commit `20aa2fa` corrects that parser without weakening comparisons.
+- The 16 GiB 3477 candidate completed all 115 calls with no replay divergences;
+  cleanup passed. Use `tpl-4fb84c3c9cb347f98b28d59e`, unchanged image/two vCPUs.
+  Evidence: `capacity-checks/pennylane-3477-16g/final-audit-1793538344187811938.json`.
+  No OOM/worker-crash markers were found in its actual outputs; sampled dmesg
+  is not continuous proof. Do not repeat this trajectory.
+- Native commit `6811a0d` writes large contiguous disk-backed COLD ranges in
+  16 MiB batches with the existing sync/cache-discard helper. WARM and snapshot
+  format/mechanism are unchanged. Native source is `native-stream-v1/CubeSandbox`
+  below the remote project home; installed binaries/provenance are in
+  `host/cold-stream-v2/`, backups `/data/clawbox-backend-backups/cold-stream-v2-20261101`.
+  Prepared source repeat-check and release build passed. Bounded pressure writing
+  preserved SHA256 and reduced direct reclaim; real first/incremental snapshots
+  preserved a live 128 MiB buffer, nonce and PID through restore, with cleanup:
+  `checkpoint-pressure/vm-pressure-streaming-healthy-365c11635a/result.json`.
+  These checks do not prove Full-1280 pressure acceptance.
+- Real two-pair testing found and corrected two learning defects: the query used
+  the seed memory domain after receiving guest memory (`20aa2fa`), and observations
+  described the external launcher instead of payload commands (`5af9163`). The
+  standard injected SSH shim now uses builtin environment setup; no guest image
+  rebuild. Linux shell-equivalence and host tests passed (40 tests).
+  `pair-learning-launcher-fixed-20261101`, attempt `attempt-6b334be4752e4aa3`,
+  succeeded with all eight observations accepted and cleanup. The fourth memory
+  prediction was 74.51 MiB for A and 12.12 MiB for B after different measured
+  allocations. Real-journal replay proved every update leaves the other pair's
+  predictions unchanged: `pair-learning-gate/isolation-journal-replay-1793540811369778052.json`.
+- Commit `ae55222` bumps the maintained qualification contract to 16 for the
+  changed learning/execution integration. Do not reuse an old full receipt as
+  current execution proof. Reuse unchanged physical-template sharing evidence.
+  ClawTune is still clean/pinned at `4a6d0af66e76b377bfc957baf84a5f414c6d8bf5`.
+- Storage preflight found the native CoW directory on the root filesystem,
+  distinct from the custom COLD mount. Thirty-two old immutable distribution-cache
+  directories were copied to the existing spill filesystem, SHA256 checked,
+  symlinked at their original paths, then only verified source duplicates removed.
+  Preserve `host/cache-relocation-plan-1793539739976515256{.json,.applied.jsonl}`.
+  Root margin before Cube's 85% threshold is now about 448.9 GB versus the
+  conservative 386.5 GB Full requirement. No VM/template storage or anns data removed.
+- Package preflight in progress: `host/check-capacity-packages.py` verifies the
+  16 PennyLane wheel URLs seen in saved outputs against index SHA256 values.
+  Evidence `network-check/capacity-package-integrity-1793540768324400323.jsonl`.
+  The 3057 failure was a truncated 0.35.0 wheel download; 5407 timed out during
+  dependency resolution/download. A two-install-only CLI gate is prepared at
+  `package-install-gate/experiment.yaml`; do not repeat their long trajectories.
+- Remaining: finish package gate; freeze corrected workload/shapes, sharing proof
+  and exact current qualification; launch one Full-1280; audit section 21 metrics.
+  Isolated clean-machine install and actual host-reboot recovery remain unproven;
+  do not reboot/reinstall the shared host to claim them.
 
 ## Continuation milestones
+
+The following are earlier interim notes; use the latest results above for status.
 
 - Restore-route real-VM gate passed with cleanup:
   `restore-route-gate/restore-admit-58353ac4dbd4/result.json`. The restored Tool
@@ -267,6 +324,26 @@ or a new run ID.
   Do not delete arbitrary large files or automatically prune Docker volumes.
 
 ## Ordered remaining work
+
+Execution plan (2026-11-01 continuation): preserve 160 CPUs and 500 GiB per
+compute NUMA node, the 448/480 GiB watermarks and the existing shared pool.
+Use the following gates to avoid repeating expensive runs:
+
+- Finish the already-running 16 GiB case and classify the saved four-case
+  command divergences. Require evidence for each affected template choice;
+  a successful final validator alone does not establish absence of guest OOM.
+- Identify and reproduce the checkpoint failure mechanism in a bounded
+  diagnostic. Apply only a demonstrated correction, then verify snapshot
+  contents and restore under pressure before changing the Full baseline.
+- Close the real two-pair learning-isolation check and inventory remaining
+  acceptance evidence. Record isolated-install/reboot prerequisites explicitly;
+  do not reboot the shared host or call worker recovery a host reboot test.
+- Freeze one new Full specification and code/native provenance after those
+  gates pass. Preflight network, disk margin, unchanged-template receipts,
+  resource placement and collection of required metrics before launch.
+- Run Full-1280 once against that frozen baseline, audit all session outcomes,
+  consequential divergences, measurements and cleanup, then commit/push the
+  verified milestone. A failed gate blocks dependent work, not unrelated checks.
 
 1. Inspect the existing four-case replay and the queued one-case 16 GiB helper; preserve terminal results,
    validation, OOM messages and cleanup. Decide final guest capacities from its
