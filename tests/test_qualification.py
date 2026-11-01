@@ -23,6 +23,16 @@ from clawbox.experiments.spec import (
 EXAMPLE = Path("examples/experiments/getting-started.yaml")
 
 
+def test_worker_gc_changes_run_identity_without_invalidating_vm_capability():
+    deferred = load_experiment(EXAMPLE)
+    assert deferred.execution.worker_cyclic_gc_enabled is False
+    automatic = deferred.model_copy(update={
+        'execution': deferred.execution.model_copy(update={'worker_cyclic_gc_enabled': True}),
+    })
+    assert spec_digest(deferred) != spec_digest(automatic)
+    assert qualification_contract_digest(deferred) == qualification_contract_digest(automatic)
+
+
 def test_sandbox_mapping_aggregation_does_not_double_first_process(monkeypatch):
     identity = ("00:01", 7)
     monkeypatch.setattr(qualification_module, "_sandbox_pids", lambda _sandbox: [11, 12])

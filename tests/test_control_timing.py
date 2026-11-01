@@ -66,6 +66,41 @@ def test_gc_intervals_are_scoped_and_correlated_without_logging_in_gc():
     assert all(s['end_ns'] >= s['start_ns'] for s in events[0]['gc_intervals'])
 
 
+def test_worker_defers_cycles_and_collects_them_after_execution():
+    import gc
+    import weakref
+    from clawbox.experiments.control_timing import worker_cyclic_gc
+
+    class Cycle:
+        pass
+
+    previous = gc.isenabled()
+    with pytest.raises(ValueError, match='worker failed'):
+        with worker_cyclic_gc(False):
+            assert not gc.isenabled()
+            value = Cycle()
+            value.self = value
+            retained = weakref.ref(value)
+            del value
+            assert retained() is not None
+            raise ValueError('worker failed')
+    assert retained() is None
+    assert gc.isenabled() == previous
+
+
+def test_worker_automatic_gc_restores_the_prior_disabled_setting():
+    import gc
+    from clawbox.experiments.control_timing import worker_cyclic_gc
+    previous = gc.isenabled()
+    gc.disable()
+    try:
+        with worker_cyclic_gc(True):
+            assert gc.isenabled()
+        assert not gc.isenabled()
+    finally:
+        (gc.enable if previous else gc.disable)()
+
+
 def test_condition_reacquisition_is_separate_from_condition_sleep():
     from threading import Condition
     from clawbox.experiments.admission_lock import AdmissionLock

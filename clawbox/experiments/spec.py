@@ -217,6 +217,7 @@ class ExecutionSpec(StrictFrozenModel):
     )
     worker_thread_switch_interval_seconds: float = Field(
         default=0.001, gt=0, le=0.1, allow_inf_nan=False)
+    worker_cyclic_gc_enabled: bool = False
     randomized_order: bool = True
     random_seed: int = 0
     # Every supported run is supervised at the process boundary.  An

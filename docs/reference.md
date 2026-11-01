@@ -306,6 +306,7 @@ Fields are under `execution`:
 | `policy_progress_timeout_seconds` | 30 | Total deadline in seconds for each Tool start/end acknowledgement; at most three idempotent notification attempts share it. Commands are never retried and policy rejection remains fatal. Requires the matching Runtime shim and Tool bridge images; a changed value needs a new run ID. |
 | `cube_create_capacity_retry_seconds` | 60 | Retry window for definite Cube `130597` rejection; 0 disables retries |
 | `worker_thread_switch_interval_seconds` | 0.001 | Python handoff interval, `(0,0.1]` seconds |
+| `worker_cyclic_gc_enabled` | false | Host worker only: defer automatic cyclic garbage collection until the worker finishes. Reference-counted objects are still released immediately; unreachable cycles may use extra host memory during the run. Set true to use Python's automatic cyclic collector. Changes require a new run ID, but no host apply, image rebuild, retraining, or repeated template qualification. |
 | `randomized_order`, `random_seed` | `true`, 0 | Arm-order randomization and reproducible seed |
 | `arm_timeout_seconds` | 3600 | Arm execution deadline, seconds |
 | `arm_finalization_timeout_seconds` | 300 | Additional supervisor allowance for cleanup/results, seconds |

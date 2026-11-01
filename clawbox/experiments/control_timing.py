@@ -27,6 +27,21 @@ def timing_details(enabled):
 
 
 @contextmanager
+def worker_cyclic_gc(enabled):
+    """Keep cyclic-heap scans outside the worker's latency-sensitive run."""
+    previous = gc.isenabled()
+    (gc.enable if enabled else gc.disable)()
+    try:
+        yield
+    finally:
+        try:
+            if not enabled:
+                gc.collect()
+        finally:
+            (gc.enable if previous else gc.disable)()
+
+
+@contextmanager
 def monitor_gc():
     """Record runtime pauses without tracing, logging, or locks inside GC."""
     if not _details_enabled:

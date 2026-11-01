@@ -60,7 +60,7 @@ from .openclaw_driver import (
 )
 from .policy import PolicyCoordinator, PolicyEventExecutor
 from .congestion import locate_cgroup
-from .control_timing import monitor_gc, span, timed_lock, trace_callback, trace_scope, operation, timing_details
+from .control_timing import monitor_gc, span, timed_lock, trace_callback, trace_scope, operation, timing_details, worker_cyclic_gc
 from .pressure import PressureControl
 from .prediction_records import PredictionRecordBuffer
 from .priority import PriorityDomain, c2_applies
@@ -2100,7 +2100,7 @@ class ExperimentWorker:
             write_summary: bool = True) -> list[ResultEnvelope]:
         self._run_entered_monotonic = time.monotonic()
         self._run_entered_process_cpu = time.process_time()
-        with timing_details(self.spec.execution.control_timing_details), monitor_gc(), worker_thread_scheduling(
+        with worker_cyclic_gc(self.spec.execution.worker_cyclic_gc_enabled), timing_details(self.spec.execution.control_timing_details), monitor_gc(), worker_thread_scheduling(
                 self.spec.execution.worker_thread_switch_interval_seconds):
             return self._run(arm_ids=arm_ids, write_summary=write_summary)
 

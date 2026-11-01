@@ -302,6 +302,14 @@ the deadline retries notifications only. Changes to images, replay behavior or
 sampling settings require a new run ID and fresh qualification when requested
 by `launch`.
 
+For high-concurrency runs, leave `execution.worker_cyclic_gc_enabled: false`
+(the default) to defer host-worker cyclic garbage collection until execution
+and cleanup finish. This avoids whole-worker pauses while callbacks are due.
+Reference counting remains active; unreachable cycles can retain extra host
+memory until worker exit. Set the field to `true` to restore automatic cyclic
+collection. Use a new run ID after changing it; host apply, image rebuild,
+retraining, and template requalification are unnecessary.
+
 An explicit `--qualification FILE` must pass the receipt coverage checks. Omit it
 for automatic receipt management, or use `--force-qualify` to replace it. Receipt
 reuse checks implementation, input hashes, image identities, target node, case

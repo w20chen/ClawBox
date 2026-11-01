@@ -220,6 +220,7 @@ def qualification_contract_digest(spec: ExperimentSpec) -> str:
         "poisson_arrival_window_seconds",
         "sandbox_create_concurrency",
         "dependency_install_concurrency",
+        "worker_cyclic_gc_enabled",
     ):
         execution.pop(key, None)
     configuration = (raw.get("inference") or {}).get("configuration") or {}
