@@ -758,8 +758,9 @@ class ProcessRSSReader:
 class _SandboxSamplingLoop:
     """One timer thread for all execution-window counter readers in a worker.
 
-    Sampling and removal share the condition lock: removal cannot return while
-    a read is in flight, so stop() can safely take its final sample and close FDs.
+    Reads run outside the registry lock. Removal waits only for its own in-flight
+    read, so stop() can safely take its final sample and close FDs without waiting
+    for every other VM's counters.
     Each reader keeps its own interval; overdue samples are never fabricated.
     """
 
@@ -767,6 +768,7 @@ class _SandboxSamplingLoop:
         self._condition = Condition()
         self._samplers = {}
         self._thread = None
+        self._reading = None
 
     def add(self, sampler):
         with self._condition:
@@ -780,15 +782,28 @@ class _SandboxSamplingLoop:
         with self._condition:
             self._samplers.pop(sampler, None)
             self._condition.notify()
+            while self._reading is sampler:
+                self._condition.wait()
 
     def _run(self):
-        with self._condition:
-            while True:
+        while True:
+            with self._condition:
                 now = time.monotonic()
-                for sampler, due in tuple(self._samplers.items()):
-                    if due <= now:
-                        sampler._sample()
-                        self._samplers[sampler] = time.monotonic() + sampler.interval_s
+                ready = [sampler for sampler, due in self._samplers.items() if due <= now]
+            for sampler in ready:
+                with self._condition:
+                    if sampler not in self._samplers:
+                        continue
+                    self._reading = sampler
+                try:
+                    sampler._sample()
+                finally:
+                    with self._condition:
+                        self._reading = None
+                        if sampler in self._samplers:
+                            self._samplers[sampler] = time.monotonic() + sampler.interval_s
+                        self._condition.notify_all()
+            with self._condition:
                 deadline = min(self._samplers.values(), default=None)
                 self._condition.wait(
                     None if deadline is None else max(0, deadline - time.monotonic())

@@ -326,6 +326,44 @@ def test_shared_sampler_removal_waits_for_inflight_read():
     assert removed.is_set()
 
 
+def test_slow_counter_read_does_not_block_unrelated_sampler_lifecycle():
+    from threading import Event, Thread
+    from clawbox.experiments.memory import _SandboxSamplingLoop
+
+    entered, release, unrelated_done = Event(), Event(), Event()
+
+    class SlowReader:
+        interval_s = 0.001
+
+        def _sample(self):
+            entered.set()
+            release.wait(3)
+
+    class OtherReader:
+        interval_s = 60
+
+        def _sample(self):
+            pytest.fail('removed reader must not be sampled')
+
+    loop, slow, other = _SandboxSamplingLoop(), SlowReader(), OtherReader()
+    loop.add(slow)
+    assert entered.wait(2)
+
+    def unrelated_lifecycle():
+        loop.add(other)
+        loop.remove(other)
+        unrelated_done.set()
+
+    thread = Thread(target=unrelated_lifecycle)
+    thread.start()
+    try:
+        assert unrelated_done.wait(0.5), 'a different VM read blocked registration/removal'
+    finally:
+        release.set()
+        thread.join(3)
+        loop.remove(slow)
+
+
 def test_rss_reader_rejects_replaced_process_and_closes_files(tmp_path):
     from clawbox.experiments.memory import ProcessRSSReader
     process = tmp_path/'123'; process.mkdir()
