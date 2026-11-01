@@ -2252,6 +2252,8 @@ class ExperimentWorker:
                 run_id=self.run_id, attempt_id=self.attempt_id, arm_id=arm.arm_id,
                 clawtune_revision=source_revision(tune_root),
                 processes=arm.execution.kb_processes, queue_capacity=arm.execution.kb_queue_capacity,
+                cyclic_gc_enabled=arm.execution.worker_cyclic_gc_enabled,
+                thread_switch_interval_seconds=arm.execution.worker_thread_switch_interval_seconds,
                 metadata=AdmissionMetadata(str(arm.resources.prediction_artifact),
                     {repo: provider.evaluation_sandbox_identity for repo, provider in by_repo.items()}))
             if self.policy_control is None:

@@ -1,6 +1,6 @@
 # Host KB and Full-1280 continuation handoff
 
-Continuation resumed at the user's request on 2026-11-01. Updated approximately 22:50 Asia/Shanghai after the qualified Full launch. Full-1280 acceptance remains incomplete.
+Updated 2026-11-02 (Asia/Shanghai) after the host-KB concurrency implementation and real-VM gate. Full-1280 acceptance remains incomplete.
 This is an operational handoff; the requirements remain in
 `HOST_KB_REDESIGN_HANDOFF_20261030.md`.
 
@@ -10,13 +10,30 @@ This is an operational handoff; the requirements remain in
 are substantially complete, but the large-run acceptance and final measurements
 are incomplete. Do not describe the redesign as fully verified.
 
-The replacement Full run **`full-c1280-hostkb-verified-20261101` is running**;
-do not launch another run. Its attempt is `attempt-65351564b5f146c5`, arm
-`16a2612b32bf4f09e4353520`, worker PID 2315727 (verify identity before use).
-The previous Full is terminal failed with cleanup verified. Capacity, package
-installation, pair-learning and final qualification gates are now terminal.
-The user requested a plan and execution through completion, with careful gates to
-avoid repeated Full runs. Preserve 160 CPUs and 1,000 GiB across NUMA0/1.
+The Full run **`full-c1280-hostkb-verified-20261101` was cancelled after platform
+failures; cleanup is verified**. Its attempt is `attempt-65351564b5f146c5`, arm
+`16a2612b32bf4f09e4353520`. The former worker is gone. Captures show native COLD
+buffered writes stalled in memory reclamation; that issue is not fixed by the
+KB concurrency changes. Terminal in-memory KB timing aggregates were lost at
+abort; retained client logs and journals have narrower coverage.
+
+The user subsequently set further platform fixing aside, requested the KB
+concurrency redesign, and authorized its implementation. Commit `f178874`
+implements fixed pair ownership in four host processes, async control HTTP,
+separate durable journal I/O, private sample copy-on-write, incremental postings,
+and removal of redundant tool-class prediction work. A follow-up preserves
+configured worker scheduling in child processes and orders shutdown submissions.
+Resource-admission callbacks retain the existing blocking policy in a separate
+pool. Preserve 160 CPUs and 1,000 GiB across NUMA0/1. No new Full run was started.
+
+Verification is under `/data/full1280-hostkb-pagemap-bit61-20261101/kb-owners-20261102/`:
+`verification.json`, exact prediction differential, and host-only concurrency
+results. A 1280-scope/128-active-pair diagnostic improved from 18.69s to 3.64s,
+with identical predictions and process-family PSS increasing from 308 to 608 MiB.
+This is not Full-1280 VM throughput evidence. `kb-owners-vm-gate-20261102`, attempt
+`attempt-731736029da0447b`, completed five real Tool calls, five committed updates,
+no raw clause files, verified cleanup, and no surviving KB owner processes.
+Its frozen source is `/home/weitianc/clawbox-hostkb-20261101/source/ClawBox-kb-owners-f178874`.
 
 ## Latest continuation results (supersede earlier interim notes)
 
@@ -33,15 +50,15 @@ avoid repeated Full runs. Preserve 160 CPUs and 1,000 GiB across NUMA0/1.
   The normal CLI launched the new Full at 14:45 UTC; `full-ready/launch.json`
   retains both host preflight and launch identity. Resource envelope remains
   160 CPUs, 500 GiB/node, 448/480 GiB watermarks, unchanged shared pool.
-- Read-only observers are active: `host/full-ready-host-samples.jsonl`,
+- Retained read-only observer evidence: `host/full-ready-host-samples.jsonl`,
   `host/full-ready-progress.json`, `host/full-ready-progress-timeline-v2.jsonl`,
   and `host/checkpoint-watch-full-c1280-hostkb-verified-20261101/`.
   The progress observer's first attempt failed on string timestamp conversion;
   its corrected second attempt reads the same immutable event stream. The
   experiment itself was not restarted or changed.
-- Continue by monitoring this run, auditing terminal evidence and cleanup,
-  and recording the section 21 acceptance limits. Do not rerun completed gates,
-  rebuild images, or launch Full-2560 automatically. The older bullets below
+- No Full run remains active. Further Full acceptance still depends on resolving
+  the demonstrated native pressure failure and completing the section 21 audit.
+  Do not rerun completed gates, rebuild images, or launch Full-2560 automatically. The older bullets below
   retain provenance; their pending launch/install instructions are superseded.
 - The four 8 GiB cases completed. Final validators passed, but 3477 had guest
   OOM, 3024 had one extra segfault, and 3057/5407 had consequential package-install

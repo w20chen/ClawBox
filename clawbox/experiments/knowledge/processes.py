@@ -30,12 +30,12 @@ class AdmissionMetadata:
         return self.providers[repository]._metadata({'models': models}, command, digest)
 
 
-def _owner(connection, options):
+def _owner(connection, options, scheduling):
     from clawbox.experiments.host_kb import HostKnowledgeManager
     import gc
     import sys
-    gc.disable()
-    sys.setswitchinterval(.001)
+    (gc.enable if scheduling['cyclic_gc_enabled'] else gc.disable)()
+    sys.setswitchinterval(scheduling['thread_switch_interval_seconds'])
     inbox = queue.Queue()
     pending = defaultdict(deque)
     busy = set()
@@ -145,7 +145,7 @@ def _owner(connection, options):
 
 
 class _Owner:
-    def __init__(self, context, options, limit):
+    def __init__(self, context, options, limit, scheduling):
         self.connection, child = context.Pipe()
         self.lock = threading.Lock()
         self.outbox = queue.Queue()
@@ -153,7 +153,8 @@ class _Owner:
         self.pending = {}
         self.sequence = 0
         self.error = None
-        self.process = context.Process(target=_owner, args=(child, options), name='clawbox-kb', daemon=True)
+        self.closing = False
+        self.process = context.Process(target=_owner, args=(child, options, scheduling), name='clawbox-kb', daemon=True)
         self.process.start()
         child.close()
         if not self.connection.poll(120):
@@ -219,10 +220,15 @@ class _Owner:
             if self.error:
                 self.capacity.release()
                 raise self.error
+            if self.closing:
+                self.capacity.release()
+                raise RuntimeError('KB owner is closing')
+            if operation == 'close':
+                self.closing = True
             self.sequence += 1
             ident = self.sequence
             self.pending[ident] = future
-        self.outbox.put_nowait((ident, operation, args, time.monotonic()))
+            self.outbox.put_nowait((ident, operation, args, time.monotonic()))
         return future
 
     def close(self):
@@ -242,7 +248,8 @@ class _Owner:
 
 class ProcessKnowledgeManager:
     """The existing manager interface; only compact requests cross processes."""
-    def __init__(self, *, processes=4, queue_capacity=1024, **options):
+    def __init__(self, *, processes=4, queue_capacity=1024, cyclic_gc_enabled=False,
+                 thread_switch_interval_seconds=.001, **options):
         if os.name != 'nt':
             os.environ['CLAWBOX_KB_PRELOAD_SEED'] = str(Path(options['seed_path']).resolve())
             multiprocessing.set_forkserver_preload(['clawbox.experiments.knowledge.preload'])
@@ -253,7 +260,9 @@ class ProcessKnowledgeManager:
         try:
             # One manifest writer completes initialization before the next opens it.
             for _ in range(processes):
-                self.owners.append(_Owner(context, options, queue_capacity))
+                self.owners.append(_Owner(context, options, queue_capacity, dict(
+                    cyclic_gc_enabled=cyclic_gc_enabled,
+                    thread_switch_interval_seconds=thread_switch_interval_seconds)))
         except BaseException:
             self.close()
             raise

@@ -15,6 +15,27 @@ def metadata(repo, models, command, digest):
     return {'models': models}
 
 
+def configured_metadata(repo, models, command, digest):
+    import gc
+    import sys
+    assert gc.isenabled()
+    assert abs(sys.getswitchinterval()-.005)<1e-8
+    return metadata(repo, models, command, digest)
+
+
+def test_owner_honors_worker_scheduling_configuration(tmp_path):
+    setup_manager(tmp_path)
+    manager = ProcessKnowledgeManager(seed_path=tmp_path/'seed',root=tmp_path/'configured',
+        run_id='run',attempt_id='attempt',arm_id='arm',clawtune_revision='test',
+        metadata=configured_metadata,processes=1,cyclic_gc_enabled=True,
+        thread_switch_interval_seconds=.005)
+    try:
+        manager.reserve('a','repo')
+        assert manager.predict('a',prediction_payload())['scope_generation']==0
+    finally:
+        manager.close()
+
+
 def manager_at(tmp_path, **kwargs):
     return ProcessKnowledgeManager(seed_path=tmp_path/'seed', root=tmp_path/'process-kb',
         run_id='run', attempt_id='attempt', arm_id='arm', clawtune_revision='test',

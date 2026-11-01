@@ -190,6 +190,8 @@ after its journal is durable and its new generation is published. Host process
 count changes require a new run ID, not host apply, image rebuilding or retraining.
 Linux uses forkserver seed preloading; physical sharing depends on copy-on-write.
 Windows loads a seed per owner. Include child processes when assessing memory.
+KB owners honor `worker_cyclic_gc_enabled` and
+`worker_thread_switch_interval_seconds`, just like the experiment worker.
 Measured guest memory keeps its own measurement identity. Enable telemetry
 artifact retention only when the full clause diagnostic file is needed; normal
 learning and result validation use compact records. Changing these settings
