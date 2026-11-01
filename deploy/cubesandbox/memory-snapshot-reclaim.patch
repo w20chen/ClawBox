@@ -35,6 +35,31 @@ index 4ae7e24..6a49085 100644
  			return err
  		}
  	}
+diff --git a/Cubelet/plugins/cube/internals/cgroup/pool.go b/Cubelet/plugins/cube/internals/cgroup/pool.go
+index e682a20..3a4f271 100644
+--- a/Cubelet/plugins/cube/internals/cgroup/pool.go
++++ b/Cubelet/plugins/cube/internals/cgroup/pool.go
+@@ -236,6 +236,20 @@ func (p *cgPool) Get(ctx context.Context, sandboxID string, usePoolV2 bool, numa
+ 		return nil, fmt.Errorf("failed to create cgroup %v in slow path: %w", cg, err)
+ 	}
+ 
++	// A Cubelet restart reconstructs the allocator but keeps the pool's cgroup
++	// directories. Reset controls when a free group is allocated as well as
++	// when it is returned, so settings left by an older process cannot leak
++	// into the first VM that reuses the group after restart.
++	group := MakeCgroupPathByID(fullCgID)
++	if usePoolV2 {
++		err = p.poolV2Handle.RemoveLimit(ctx, group)
++	} else {
++		err = p.poolV1Handle.RemoveLimit(ctx, group)
++	}
++	if err != nil {
++		p.allocatorReleaseCgroup(fullCgID)
++		return nil, fmt.Errorf("failed to reset cgroup %v for allocation: %w", cg, err)
++	}
+ 	return &fullCgID, nil
+ 
+ }
 diff --git a/Cubelet/services/cubebox/incremental_memory_reclaim.go b/Cubelet/services/cubebox/incremental_memory_reclaim.go
 new file mode 100644
 index 0000000..5144552
