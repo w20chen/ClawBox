@@ -136,6 +136,7 @@ class ModelGateway:
         self._process_sessions: dict[str, dict[str, str]] = {}
         self._lock = threading.Lock()
         self._changed = threading.Condition(self._lock)
+        self._cancelled = threading.Event()
         self._flush_lock = threading.Lock()
         self._persistence_revision = 0
         self._persisted_revision = -1
@@ -195,6 +196,7 @@ class ModelGateway:
         return f"http://{host}:{self._server.server_port}/v1"
 
     def close(self) -> None:
+        self.cancel_pending()
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -203,6 +205,24 @@ class ModelGateway:
             self._thread.join(timeout=2)
             self._thread = None
         self.flush()
+
+    def cancel_pending(self) -> None:
+        """End an abandoned session without releasing a synthetic model reply."""
+        with self._changed:
+            self._cancelled.set()
+            now = time.time()
+            for request in self._requests.values():
+                if request.ready:
+                    continue
+                request.status_code = int(HTTPStatus.SERVICE_UNAVAILABLE)
+                request.content_type = "application/json"
+                request.response_b64 = ""
+                request.error = "model gateway session closed before response completed"
+                request.ready = True
+                request.response_released_unix_s = now
+                request.completed_unix_s = now
+                self._persist()
+            self._changed.notify_all()
 
     def complete(self, payload: dict[str, Any]) -> tuple[int, str, bytes]:
         status, content_type, body, _request_id = self._complete_with_identity(
@@ -245,6 +265,8 @@ class ModelGateway:
         fingerprint = hashlib.sha256(canonical_json.encode()).hexdigest()
         started_event: dict[str, Any] | None = None
         with self._changed:
+            if self._cancelled.is_set():
+                raise RuntimeError("model gateway session is closed")
             if self._replay_failure is not None:
                 raise ValueError(
                     f"replay session already diverged: {self._replay_failure}"
@@ -598,7 +620,8 @@ class ModelGateway:
                 action = replace(action, output=rebind_process_sessions(
                     action.output, request.replay_process_sessions,
                 ))
-                time.sleep(action.duration_s * self.time_scale)
+                if self._cancelled.wait(action.duration_s * self.time_scale):
+                    return
                 status, content_type, body = _replay_response(action, bool(payload.get("stream")))
             else:
                 forwarded = dict(payload)
@@ -623,6 +646,8 @@ class ModelGateway:
             model_generated = time.time()
             with self._changed:
                 request = self._requests[request_id]
+                if request.ready:
+                    return
                 request.model_generated_unix_s = model_generated
                 self._persist()
             admission = {}

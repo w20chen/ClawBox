@@ -31,10 +31,16 @@ Verification artifacts on Kunpeng are under
 `recovery-gate/same-attempt-verification.json`,
 `recovery-gate/cold-attempt-verification.json`, and
 `recovery-gate/live-vm-filesystem-inspection.json`.
-The active acceptance run is `full-c1280-hostkb-freshssh-20261101`, attempt
-`attempt-3146d1cb1e5045a5`, under `runs/`. Check its process and terminal evidence
-before any restart. Earlier failed runs are preserved and are not acceptance
-results. Do not refresh the templates again for host-only changes.
+The latest acceptance attempt, `full-c1280-hostkb-freshssh-20261101`, attempt
+`attempt-3146d1cb1e5045a5`, failed after a pause API HTTP 408 aborted the shared
+policy controller. Its worker then needed explicit abort to finish exiting;
+cleanup is verified. Evidence is `host/freshssh-terminal-audit.json` and
+`host/freshssh-failed-checkpoint-phases.jsonl`. No Full run is active.
+The failed-session replay cancellation fix passed 36 tests on Windows and
+Kunpeng (`host/gateway-cancel-linux-tests.txt`); it has not had another Full run.
+Resolve the checkpoint stall and assess the package-install queue before another
+attempt. Earlier failed runs remain failure evidence. Do not refresh the
+templates again for host-only changes.
 
 Remaining: complete Full-1280 and audit coverage, errors, cleanup, and the
 measurements in section 21. Worker interruption recovery is verified; a host

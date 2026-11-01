@@ -151,6 +151,40 @@ def test_timed_out_drain_flushes_partial_then_final_evidence(tmp_path: Path) -> 
         assert flushes == ["flush", "flush"]
 
 
+def test_failed_session_cancels_long_replay_and_releases_http_handler(tmp_path):
+    trace = tmp_path / "slow.jsonl"
+    payload = {"messages": [{"role": "user", "content": "slow"}]}
+    write_spans(trace, llm_spans(payload["messages"], {"content": "reply"}, duration_ms=600_000))
+    started = threading.Event()
+    callbacks = []
+    with ManagedModelGateway(
+        advertise_host="127.0.0.1", advertised_port=0, bind_host="127.0.0.1", bind_port=0,
+    ) as gateway:
+        session = gateway.register(
+            session_id="cancelled", store_path=tmp_path / "cancelled.json",
+            mode="replay", trace=trace, time_scale=1,
+            on_request_started=lambda event: started.set(),
+            before_response_ready=lambda *args: callbacks.append(args),
+        )
+        peer = gateway.register(session_id="peer", store_path=tmp_path / "peer.json",
+                                mode="replay", trace=trace, time_scale=0)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            request = pool.submit(post, gateway.url, session.token, payload)
+            try:
+                assert started.wait(2)
+                assert gateway.unregister(session.token, timeout=0) is False
+                with pytest.raises(urllib.error.HTTPError):
+                    request.result(timeout=2)
+            finally:
+                session.gateway.cancel_pending()
+        assert callbacks == []
+        record = session.records()[0]
+        assert record["error"] == "model gateway session closed before response completed"
+        assert not record["delivered"]
+        assert record["model_generated_unix_s"] == 0.0
+        assert post(gateway.url, peer.token, payload)["choices"][0]["message"]["content"] == "reply"
+
+
 def test_managed_gateway_forwards_session_request_timeout(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
     write_trace(trace)

@@ -118,6 +118,8 @@ class SessionGatewayState:
                         drained = False
                         break
                     self._condition.wait(remaining)
+        if not drained:
+            self.gateway.cancel_pending()
         # Successful sessions write their complete evidence once. Failed
         # sessions still retain a consistent partial snapshot immediately;
         # release() refreshes it if the last in-flight request later exits.

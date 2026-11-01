@@ -309,7 +309,7 @@ Fields are under `execution`:
 | `worker_cyclic_gc_enabled` | false | Host worker only: defer automatic cyclic garbage collection until the worker finishes. Reference-counted objects are still released immediately; unreachable cycles may use extra host memory during the run. Set true to use Python's automatic cyclic collector. Changes require a new run ID, but no host apply, image rebuild, retraining, or repeated template qualification. |
 | `randomized_order`, `random_seed` | `true`, 0 | Arm-order randomization and reproducible seed |
 | `arm_timeout_seconds` | 3600 | Arm execution deadline, seconds |
-| `arm_finalization_timeout_seconds` | 300 | Additional supervisor allowance for cleanup/results, seconds |
+| `arm_finalization_timeout_seconds` | 300 | Additional supervisor allowance for cleanup/results, seconds. Failed-session cleanup cancels pending model responses/replay waits and preserves their error records. |
 | `command_timeout_seconds` | 300 | Tool command deadline, seconds. Each admitted invocation uses a fresh SSH connection so earlier calls cannot consume its connection lifetime. Changing the deadline requires a new run ID, not an image rebuild. |
 | `replay_tool_timeout_multiplier` | 1.0 | Unitless multiplier, 1.0–100.0, applied only to recorded replay Tool deadlines after admission. Fast commands do not wait longer; only expiry is extended. Use a new run ID after changing it. |
 | `arrival_schedule` | `poisson` | `burst`, `fixed_stagger`, or `poisson` |

@@ -347,6 +347,8 @@ bash scripts/clawbox experiment status eval-01
 
 `abort` stops the supervisor and cleans up its owned VMs. After verified cleanup,
 pending/running arms become `cancelled`; already-terminal outcomes are retained.
+Failed-session cleanup cancels pending model responses and replay waits, retaining
+them as errors instead of waiting for the recorded model delay to finish.
 `destroy` performs
 owned-VM cleanup without deleting result files. Both default to 8 concurrent
 delete requests and a 180-second deadline; use `--cleanup-workers` and
