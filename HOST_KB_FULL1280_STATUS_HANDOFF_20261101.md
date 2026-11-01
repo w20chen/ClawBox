@@ -1,6 +1,6 @@
 # Host KB and Full-1280 continuation handoff
 
-Continuation resumed at the user's request on 2026-11-01. Latest verified milestones below; Full-1280 acceptance remains incomplete.
+Continuation resumed at the user's request on 2026-11-01. Updated 2026-11-01 20:05 Asia/Shanghai (12:05 UTC). Full-1280 acceptance remains incomplete.
 This is an operational handoff; the requirements remain in
 `HOST_KB_REDESIGN_HANDOFF_20261030.md`.
 
@@ -22,7 +22,9 @@ it before doing any further work. The user has now requested continuation. Prese
   the first callback waited for memory. The earlier probe used the wrong SSH
   user (`root` instead of `executor`). Explicitly preserve `PYTHONPATH` through
   sudo; `sudo -E` alone selected the old editable checkout in this environment.
-- The 8 GiB four-case replay is still active. Case 3024 completed with its final
+- The 8 GiB four-case replay is still active. Cases 3024, 3477 and 3057 have
+  completed; 5407 remains active. Final validators passed for completed cases,
+  but do not imply command parity or absence of guest OOM. Case 3024 completed with its final
   validator passing, but a replayed pytest invocation segfaulted (139), so this
   is not complete trajectory parity. Case 3477 has multiple confirmed guest OOM
   kills at 8 GiB. Preserve `capacity-checks/guest-processes-1793533530872820830.json`.
@@ -30,23 +32,41 @@ it before doing any further work. The user has now requested continuation. Prese
   two vCPUs unchanged: `tpl-4fb84c3c9cb347f98b28d59e`. Its input, provenance and
   one-case specification are in `capacity-checks/pennylane-3477-16g/`.
   Sharing/qualification correctly refused while the existing replay populated
-  the physical VM domain. Wait for its terminal result and cleanup; no bypass.
+  the physical VM domain. A bounded continuation helper now waits for the
+  existing run's terminal result and verified cleanup, then performs the normal
+  sharing proof and `experiment launch` for this candidate:
+  `host/launch-capacity16g-after-current-v2.sh`, log
+  `host/capacity16g-wait-launch-v2.log`, launcher PID 1868860 (recheck identity).
+  Planned unique run ID: `capacity-c1-pl3477-16g-20261101t1158z`, under
+  `capacity-checks/pennylane-3477-16g/runs`. It uses the frozen source
+  `/home/weitianc/clawbox-hostkb-20261101/source/ClawBox-client-timing-cd7f27a`
+  with explicit `CLAWBOX_REVISION=cd7f27ab6717a5ae07b26b076ac0ab9c1be827c4`.
+  Do not launch a duplicate helper or reuse the original four-case run ID.
 - Native captures quantify NUMA1 at approximately 503.382 GiB total and
   8.016-8.071 GiB free, with about 34 GiB slab/page tables/kernel stacks outside
   the zero-valued VM kernel counters. Evidence:
   `host/checkpoint-node-headroom-1793533442449561068.json`.
   A proposal to use 448 GiB capacity and 400/432 GiB low/high watermarks per
   compute node is awaiting user decision. It changes the memory baseline;
-  it is **not applied or a proven timeout fix**.
-- The per-run Runtime launcher now records compact client prediction timings
+  it is **not applied or a proven timeout fix**. The syntax-validated budget-only
+  draft is `input-corrections/numa448-proposal/experiment-budget-only-draft.yaml`;
+  it still needs the corrected workload and verified guest shapes before launch.
+- Implementation milestone `cd7f27a` is committed and pushed. The per-run
+  Runtime launcher now records compact client prediction timings
   without an image rebuild. Windows and Linux each passed 56 focused tests.
   Real Runtime-to-host success, repeated prediction, rejected credentials and
   cleanup passed: `host/client-timing-5b562f09bc82/result.json`.
 - Additional failed-Full audit:
   `host/failed-full-additional-audit-1793534003424045416.json` records output size,
   operation CPU attribution and listener queues. These remain failed-run data.
-  A separate isolated committed-KB replay measurement is in progress; its RSS
-  excludes live prediction caches and must not be labeled total live KB RSS.
+  Isolated committed-KB recovery has completed:
+  `host/isolated-kb-replay-40caddd64b28/summary.json`. All 1,034 scopes refer to
+  one shared seed; 12,913 generations were reconstructed. Retained RSS increased
+  24.536 GiB over the import baseline (seed-load increment 60.059 MiB).
+  This excludes live prediction/receipt caches, HTTP buffers and concurrent
+  update transients; it is not total live KB RSS or a Full latency measurement.
+  The failed run had listener backlog in 227/338 samples, maximum 85 queued
+  connections. Complete continuation audit: `host/hostkb-continuation-audit-20261101t1205z.json`.
 
 ## Repositories and deployed code
 
@@ -63,7 +83,7 @@ it before doing any further work. The user has now requested continuation. Prese
 - ClawTune remains unchanged at
   `4a6d0af66e76b377bfc957baf84a5f414c6d8bf5`; local worktree checked clean.
   Retain its explicitly marked imputed training targets.
-- Current remote staged source:
+- Prior mutable remote staged source (preserved; use the frozen source above for the queued candidate):
   `/home/weitianc/clawbox-hostkb-20261101/source/ClawBox-restore-route-f1063e0`.
   Its name predates the later worker and qualification fixes; those files were
   copied in and verified. The editable venv can reference an older source:
@@ -236,7 +256,7 @@ or a new run ID.
 
 ## Ordered remaining work
 
-1. Inspect the already-running four-case replay and preserve terminal results,
+1. Inspect the existing four-case replay and the queued one-case 16 GiB helper; preserve terminal results,
    validation, OOM messages and cleanup. Decide final guest capacities from its
    evidence; change only affected templates if necessary.
 2. Restore-route real-VM gate is complete at the scope recorded above. Retain

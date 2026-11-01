@@ -20,7 +20,11 @@ The operational continuation handoff is
 Read it before any launch, rebuild, or deployment; it names the active diagnostic,
 failed-run evidence, deployed source, network settings and ordered remaining work.
 
-Latest implementation commit `8483f31` fixes split RAM mapping totals in template
+Latest implementation milestone `cd7f27a` adds default client prediction timings
+without an image rebuild (56 focused tests on each host; real Runtime-to-host
+success/repeat/failure and cleanup passed). The continuation handoff records the
+completed isolated committed-KB memory measurement and pending budget decision.
+Commit `8483f31` fixes split RAM mapping totals in template
 sharing verification (34 Linux tests and four real 8 GiB template proofs passed).
 Commit `35bccb8` fixes concurrent admissions reusing a pre-restore SSH route
 (122 Linux tests passed). Both were committed and pushed. The real-VM concurrency
