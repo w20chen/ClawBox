@@ -332,7 +332,8 @@ succeeded, it prints the report. Any specification change requires a new run ID.
 Plain `experiment resume RUN_ID` reuses the saved attempt and its host KB.
 Completed traces are retained. Traces whose Tool filesystem or Agent progress
 cannot be recovered are marked incomplete and are never replayed into learned
-state. Unstarted traces may proceed. To restart all traces cold, explicitly use
+state. Traces still waiting for arrival or a VM preparation slot may proceed
+because their VM work has not started. To restart all traces cold, explicitly use
 `experiment resume RUN_ID --attempt-id NEW_ID`. Prior attempt evidence is retained;
 resumed results identify recovered traces and cannot represent uninterrupted
 throughput timing.

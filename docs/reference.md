@@ -46,7 +46,7 @@ they rewrite result artifacts.
 | `qualify SPEC [--concurrency N] [--receipt FILE]` | Run capability/case probes and save a reusable receipt. |
 | `launch SPEC [--run-id ID] [--detach]` | Validate, qualify as needed, and run/resume. Also accepts `--apply-host HOST.yaml`, `--qualification FILE`, `--qualification-concurrency N`, `--force-qualify`. |
 | `run SPEC` | Lower-level execution with a valid receipt; `--run-id`, `--attempt-id`, `--owner-id`, `--qualification`, `--detach`. Prefer `launch`. |
-| `resume ID [--attempt-id ID] [--detach]` | Reopen the saved attempt; preserve completed traces and mark unrecoverable interrupted traces incomplete. A different explicit attempt ID reruns cold. |
+| `resume ID [--attempt-id ID] [--detach]` | Reopen the saved attempt; preserve completed traces, continue traces that never began VM preparation, and mark unrecoverable interrupted traces incomplete. A different explicit attempt ID reruns cold. |
 | `status ID` | Read supervisor, trial, and cleanup state. |
 | `collect ID`, `report ID` | Expand canonical arm results or regenerate reports without rerunning work. The stored `summary.json` is a compact arm index. |
 | `abort ID`, `destroy ID` | Stop/clean owned VMs while preserving results; `--cleanup-workers` (8), `--cleanup-timeout-seconds` (180). |

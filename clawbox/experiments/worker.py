@@ -2663,10 +2663,12 @@ class ExperimentWorker:
         def run_placed_session(index):
             session_id = f'{arm.arm_id}-{index:04d}'
             previous = recovery.previous(session_id)
-            if previous and self.host_knowledge is not None:
-                case = session_case_for(arm, index)
-                self.host_knowledge.reserve(session_id, case.repository or case.case_id)
-            return recovery.run(session_id, lambda: dispatch_session(index))
+            if previous:
+                if self.host_knowledge is not None:
+                    case = session_case_for(arm, index)
+                    self.host_knowledge.reserve(session_id, case.repository or case.case_id)
+                return recovery.run(session_id, lambda: dispatch_session(index))
+            return dispatch_session(index)
 
         def dispatch_session(index):
             offset = offer_offsets[index]
@@ -2682,7 +2684,10 @@ class ExperimentWorker:
             })
             with creation_slot(sandbox_prepare_gate, events, session_id,
                                phase='sandbox_prepare') as slot:
-                return run_placed_session_impl(index, slot[2])
+                # Waiting for arrival or a preparation slot has no guest side
+                # effects. Persist the start only when execution can begin, so
+                # an interruption does not discard untouched queued sessions.
+                return recovery.run(session_id, lambda: run_placed_session_impl(index, slot[2]))
 
         def run_placed_session_impl(index, preparation_release):
             session_id = f"{arm.arm_id}-{index:04d}"
