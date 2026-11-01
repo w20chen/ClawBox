@@ -157,6 +157,10 @@ its command returns. Neither VM owns a KB. Admission uses the exact host
 prediction issued for that command. A prediction failure stops that trace
 before command execution. An observation delivery failure preserves the command
 result, continues with committed knowledge, and marks online learning degraded.
+Default logs include client prediction round-trip timings in each collected
+`openclaw/SESSION/sidecar.log`; see [measurement scope](results.md). The launcher
+ships this instrumentation for new runs, so it requires no image rebuild,
+host apply, or retraining. Existing run logs are not retroactively instrumented.
 
 The generated YAML exposes these settings under `execution`:
 

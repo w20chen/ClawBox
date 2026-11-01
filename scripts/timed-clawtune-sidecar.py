@@ -23,6 +23,36 @@ def _publish(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _time_host_predictions(predictor: Any) -> None:
+    """Keep client round-trip timing in the already-collected sidecar log."""
+    predict = predictor.predict
+
+    def measured(request: Any) -> Any:
+        if request.tool_name not in {"exec", "terminal_exec"}:
+            return predict(request)
+        started = time.monotonic()
+        record = {
+            "event": "host_kb_client_prediction",
+            "event_id": request.event_id,
+            "tool_call_id": request.tool_call_id,
+            "status": "ok",
+        }
+        try:
+            result = predict(request)
+            record["remote_prediction"] = bool(
+                (result.tool_resource or {}).get("host_kb")
+            )
+            return result
+        except Exception as exc:
+            record.update(status="error", error_type=type(exc).__name__)
+            raise
+        finally:
+            record["seconds"] = time.monotonic() - started
+            print(json.dumps(record, separators=(",", ":")), flush=True)
+
+    predictor.predict = measured
+
+
 def main() -> None:
     process_entry = time.monotonic()
     parser = argparse.ArgumentParser()
@@ -53,6 +83,8 @@ def main() -> None:
 
         state_started = time.monotonic()
         state = build_state()
+        if os.environ.get('CLAWTUNE_HOST_KB_ENDPOINT'):
+            _time_host_predictions(state.predictor)
         state_built = time.monotonic()
         timing.update({
             "build_state_seconds": state_built - state_started,

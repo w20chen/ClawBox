@@ -44,6 +44,14 @@ before journal commit, and `claim` includes durable receipt admission. Bridge
 include worker-process RSS, CPU time, and thread count; these include the rest of
 the worker and must not be described as isolated KB consumption. `seed_file_bytes`
 and `journal_bytes` describe serialized storage, not resident Python memory.
+Runtime `openclaw/SESSION/sidecar.log` contains compact
+`host_kb_client_prediction` JSON records at default logging. For successful host
+round trips, select `status: ok` and `remote_prediction: true`; `seconds` covers
+the Runtime predictor invocation, including request preparation, transport,
+host queueing, and response validation. It excludes waiting before the Runtime
+invokes the predictor. Error records retain the exception type and elapsed time.
+These client timings differ from host HTTP-handler timings, which exclude
+transport and listener queueing. Retain completion/error counts with percentiles.
 Keep workloads, starting workspaces, templates, hardware scope, arrivals, and
 evidence fixed. Report completion counts with latency percentiles: statistics
 from completed calls alone omit outstanding waits and unfinished sessions.

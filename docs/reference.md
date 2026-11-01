@@ -328,6 +328,11 @@ value changes require a new run ID, with no host apply, image rebuild, or
 retraining. Host-live requires OpenClaw and an explicit validated seed directory
 in `evidence.prediction_artifact`. The host endpoint uses the existing configured
 policy listener and pair credentials; no guest scope-selection option exists.
+With `host-live`, default logging includes `host_kb_client_prediction` records in
+the collected Runtime `sidecar.log`. Durations use seconds and include the
+client request/response path; see [results](results.md) for filtering and scope.
+This launcher instrumentation needs a new run to collect data, with no host
+apply, image rebuild, or retraining.
 
 ## Inference and measurement
 

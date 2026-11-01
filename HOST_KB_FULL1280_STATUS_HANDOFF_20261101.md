@@ -1,6 +1,6 @@
 # Host KB and Full-1280 continuation handoff
 
-Updated 2026-11-01 19:32 Asia/Shanghai (11:32 UTC). Work is stopping at the user's request.
+Continuation resumed at the user's request on 2026-11-01. Latest verified milestones below; Full-1280 acceptance remains incomplete.
 This is an operational handoff; the requirements remain in
 `HOST_KB_REDESIGN_HANDOFF_20261030.md`.
 
@@ -12,8 +12,41 @@ are incomplete. Do not describe the redesign as fully verified.
 
 The latest Full run is terminal **failed**, with cleanup verified. No replacement
 Full run has been launched. One four-case capacity diagnostic is running; inspect
-it before doing any further work. The user explicitly wants work to stop soon,
-with a handoff, rather than another round of broad fixes or rebuilds.
+it before doing any further work. The user has now requested continuation. Preserve the completed work and keep further changes scoped to consequential acceptance gaps.
+
+## Continuation milestones
+
+- Restore-route real-VM gate passed with cleanup:
+  `restore-route-gate/restore-admit-58353ac4dbd4/result.json`. The restored Tool
+  changed port 23703 to 23705; concurrent admission reached its identity while
+  the first callback waited for memory. The earlier probe used the wrong SSH
+  user (`root` instead of `executor`). Explicitly preserve `PYTHONPATH` through
+  sudo; `sudo -E` alone selected the old editable checkout in this environment.
+- The 8 GiB four-case replay is still active. Case 3024 completed with its final
+  validator passing, but a replayed pytest invocation segfaulted (139), so this
+  is not complete trajectory parity. Case 3477 has multiple confirmed guest OOM
+  kills at 8 GiB. Preserve `capacity-checks/guest-processes-1793533530872820830.json`.
+- A 16 GiB candidate for 3477 was registered from the same immutable image,
+  two vCPUs unchanged: `tpl-4fb84c3c9cb347f98b28d59e`. Its input, provenance and
+  one-case specification are in `capacity-checks/pennylane-3477-16g/`.
+  Sharing/qualification correctly refused while the existing replay populated
+  the physical VM domain. Wait for its terminal result and cleanup; no bypass.
+- Native captures quantify NUMA1 at approximately 503.382 GiB total and
+  8.016-8.071 GiB free, with about 34 GiB slab/page tables/kernel stacks outside
+  the zero-valued VM kernel counters. Evidence:
+  `host/checkpoint-node-headroom-1793533442449561068.json`.
+  A proposal to use 448 GiB capacity and 400/432 GiB low/high watermarks per
+  compute node is awaiting user decision. It changes the memory baseline;
+  it is **not applied or a proven timeout fix**.
+- The per-run Runtime launcher now records compact client prediction timings
+  without an image rebuild. Windows and Linux each passed 56 focused tests.
+  Real Runtime-to-host success, repeated prediction, rejected credentials and
+  cleanup passed: `host/client-timing-5b562f09bc82/result.json`.
+- Additional failed-Full audit:
+  `host/failed-full-additional-audit-1793534003424045416.json` records output size,
+  operation CPU attribution and listener queues. These remain failed-run data.
+  A separate isolated committed-KB replay measurement is in progress; its RSS
+  excludes live prediction caches and must not be labeled total live KB RSS.
 
 ## Repositories and deployed code
 
@@ -206,15 +239,8 @@ or a new run ID.
 1. Inspect the already-running four-case replay and preserve terminal results,
    validation, OOM messages and cleanup. Decide final guest capacities from its
    evidence; change only affected templates if necessary.
-2. Finish or inspect the restore-route real-VM gate under `restore-route-gate/`.
-   Its scope is real checkpoint/restore and worker callback ordering with a
-   synthetic blocked admission, not large-concurrency acceptance. The first two host
-   SSH probes failed before checkpoint (connection refused). A subsequent
-   Runtime-to-Tool probe reached SSH but failed initial public-key authentication,
-   also before checkpoint. All three cleaned up their disposable VMs. Do not
-   interpret these diagnostic setup failures as restore failures or a passing gate.
-   Latest receipt: `restore-route-gate/restore-admit-11fad41f24b5/result.json`;
-   fix the diagnostic credential setup if this isolated gate is reused.
+2. Restore-route real-VM gate is complete at the scope recorded above. Retain
+   the receipt; large-concurrency acceptance remains part of the next Full.
 3. Resolve the memory-pressure checkpoint timeout with a targeted, evidenced
    correction. Check real per-node headroom and maintained native paths before
    adding custom machinery. Isolated round trips alone do not prove load safety.
@@ -240,4 +266,4 @@ Tool records. Prediction handler p50/p95/p99 were approximately
 38 GiB process peak belongs to the whole worker, not the KB alone. Journal disk
 bytes are not RSS. Do not turn these partial measurements into an acceptance claim.
 
-Resume only when the user asks. No successful Full-1280 result is being claimed.
+Continuation is authorized. The memory-baseline proposal requires the pending user decision. No successful Full-1280 result is being claimed.

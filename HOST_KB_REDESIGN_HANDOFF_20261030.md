@@ -14,7 +14,7 @@ from this file without relying on prior conversation.
 
 ## 1. Status at handoff
 
-**Full-1280 acceptance is incomplete. Work is stopping at the user's request.**
+**Full-1280 acceptance is incomplete. Continuation is now authorized by the user.**
 The operational continuation handoff is
 [HOST_KB_FULL1280_STATUS_HANDOFF_20261101.md](HOST_KB_FULL1280_STATUS_HANDOFF_20261101.md).
 Read it before any launch, rebuild, or deployment; it names the active diagnostic,
@@ -24,8 +24,9 @@ Latest implementation commit `8483f31` fixes split RAM mapping totals in templat
 sharing verification (34 Linux tests and four real 8 GiB template proofs passed).
 Commit `35bccb8` fixes concurrent admissions reusing a pre-restore SSH route
 (122 Linux tests passed). Both were committed and pushed. The real-VM concurrency
-gate is incomplete: the diagnostic failed initial SSH authentication before its
-checkpoint. That is not evidence that the restore fix failed or passed.
+gate subsequently passed with cleanup in
+`restore-route-gate/restore-admit-58353ac4dbd4/result.json`. The earlier diagnostic
+used the wrong SSH user. This isolated gate does not establish load safety.
 
 The latest Full run, `full-c1280-hostkb-network-20261101`, attempt
 `attempt-ff7f2ba60f2d4dbc`, arm `13eefa6530ff5eedc6b6217f`, used `ac7bc09`
@@ -43,8 +44,9 @@ unchanged. Do not repeat the entire template refresh for host-only fixes.
 Four PennyLane traces hit guest OOM at 3 GiB. Four 8 GiB diagnostic templates
 were registered from the same immutable images and passed sharing/qualification.
 Their normal-CLI replay `capacity-c4-hostkb-20261101` is running under
-`capacity-checks/runs`; inspect its actual state first. 8 GiB is not yet proven
-sufficient. A separate corrected urlman validation manifest is ready; the frozen
+`capacity-checks/runs`; inspect its actual state first. 8 GiB is proven insufficient for case 3477 by guest OOM captures. A 16 GiB
+candidate from its unchanged image is registered, pending isolated qualification
+and replay after current-run cleanup. A separate corrected urlman validation manifest is ready; the frozen
 failed Full input remains unchanged.
 
 Project networking and actual APT/pip installs are verified on Kunpeng and a
@@ -1278,10 +1280,10 @@ Before rebuilding on Kunpeng:
 
 ## 23. Immediate next action for the implementing agent
 
-Work is paused at the user's request. On an authorized continuation:
+Continuation is authorized. Follow the current operational handoff:
 
-1. Read `HOST_KB_FULL1280_STATUS_HANDOFF_20261101.md`, check both worktrees and
-   inspect the existing four-case diagnostic before starting anything new.
+1. Read `HOST_KB_FULL1280_STATUS_HANDOFF_20261101.md` for current diagnostic
+   identities, completed gates, and the pending memory-baseline decision.
 2. Resolve the specific remaining capacity, restored-route validation and
    checkpoint-pressure issues from their evidence. Preserve frozen runs, all
    qualified unchanged templates, and all unrelated/anns data.
