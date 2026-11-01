@@ -166,6 +166,9 @@ you intentionally replace trace or prediction files; it is the slower command th
 reparses and rehashes all inputs.
 For mixed guest sizes, the launch quota check uses the configured case assignment
 and reports aggregate VM demand separately from physical-memory admission.
+After changing selected templates, pass earlier raw proofs with repeated
+`experiment prove-template-sharing --resume-result PATH` options to reuse
+unchanged template mappings. Only missing templates need new sharing probes.
 
 For host-live learning, use the current host checkout when starting a new run.
 The injected Runtime SSH shim keeps standard OpenClaw launcher environment

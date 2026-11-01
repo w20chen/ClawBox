@@ -250,7 +250,7 @@ def test_template_sharing_probe_releases_each_pair_before_next_template(
                 "size_kib": 3 * 1024 * 1024,
                 "rss_kib": 1, "pss_kib": 1, "shared_clean_kib": 1,
             },
-        }]},
+        }], "replaced-template": []},
     }), encoding="utf-8")
 
     result = template_base_sharing_test(
@@ -265,6 +265,7 @@ def test_template_sharing_probe_releases_each_pair_before_next_template(
     assert result["template_retry_attempts"] == 1
     assert list(result["template_retry_errors"]) == ["tool-1"]
     assert result["template_count_reused"] == 1
+    assert 'replaced-template' not in result['templates']
     assert result["template_count_probed_this_attempt"] == 2
     assert "tool-0" not in start_attempts
     assert peak == 2 and active == 0

@@ -42,7 +42,7 @@ they rewrite result artifacts.
 | `describe SPEC [--json]` | Show VM shapes, policies, budgets, and arm count. |
 | `plan SPEC` | Print the expanded trial matrix. |
 | `doctor SPEC [--probe-vm]` | Check services, templates, and resources; optionally probe a real VM. |
-| `prove-template-sharing SPEC --output FILE` | Prove physical RAM-base sharing; `--artifact-root`, repeated `--resume-result`. |
+| `prove-template-sharing SPEC --output FILE` | Prove physical RAM-base sharing; `--artifact-root`, repeated `--resume-result`. Reuses matching template IDs from prior raw proofs and retains their file hashes; replaced IDs are omitted. |
 | `qualify SPEC [--concurrency N] [--receipt FILE]` | Run capability/case probes and save a reusable receipt. |
 | `launch SPEC [--run-id ID] [--detach]` | Validate, qualify as needed, and run/resume. Also accepts `--apply-host HOST.yaml`, `--qualification FILE`, `--qualification-concurrency N`, `--force-qualify`. |
 | `run SPEC` | Lower-level execution with a valid receipt; `--run-id`, `--attempt-id`, `--owner-id`, `--qualification`, `--detach`. Prefer `launch`. |

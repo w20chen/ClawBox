@@ -1155,9 +1155,10 @@ def _validated_prior_template_evidence(
     for template, rows in observed.items():
         sandbox = templates.get(template)
         if sandbox is None:
-            raise ValueError(
-                f"prior template-sharing result contains an unexpected template {template}: {path}"
-            )
+            # A previous corpus proof can include templates replaced in this
+            # specification. Reuse only its intersection with requested IDs;
+            # the complete source file remains bound by its SHA256 below.
+            continue
         if not isinstance(rows, list) or not rows:
             raise ValueError(f"prior template-sharing result has empty evidence for {template}")
         minimum_kib = sandbox.memory_mib * 1024 // 2
