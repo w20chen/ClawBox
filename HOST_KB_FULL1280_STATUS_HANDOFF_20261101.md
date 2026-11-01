@@ -46,8 +46,12 @@ it before doing any further work. The user has now requested continuation. Prese
   8.016-8.071 GiB free, with about 34 GiB slab/page tables/kernel stacks outside
   the zero-valued VM kernel counters. Evidence:
   `host/checkpoint-node-headroom-1793533442449561068.json`.
-  The user wants both compute NUMA nodes fully utilized and requests attribution
-  before a budget reduction. The 448 GiB capacity / 400/432 GiB watermark
+  The user explicitly requires retaining **160 CPUs and approximately 1 TiB
+  across the two compute NUMA nodes**: NUMA0 CPUs 0-79 and NUMA1 CPUs 80-159,
+  configured local capacity 500 GiB each (1,000 GiB total). Keep the existing
+  per-node low/high watermarks 448/480 GiB and the existing shared pool.
+  Resolve reclaim, physical headroom and checkpoint behavior within this
+  resource envelope; do not silently reduce the experiment budget. The 448 GiB capacity / 400/432 GiB watermark
   proposal is **not approved, not applied, and not a proven timeout fix**.
   The 33.90 GiB figure is node-wide kernel occupancy, including 19.96 GiB
   reclaimable slab; it is not demonstrated unavoidable ClawBox overhead.
@@ -58,7 +62,7 @@ it before doing any further work. The user has now requested continuation. Prese
   budget. `NumaCgroupMemorySampler.current()` returns per-node VM charges but
   whole-host MemAvailable; it does not establish physical headroom on that node. The syntax-validated budget-only
   draft is `input-corrections/numa448-proposal/experiment-budget-only-draft.yaml`;
-  it still needs the corrected workload and verified guest shapes before launch.
+  retain it as an unapproved historical proposal; do not use it for the next Full run.
 - Implementation milestone `cd7f27a` is committed and pushed. The per-run
   Runtime launcher now records compact client prediction timings
   without an image rebuild. Windows and Linux each passed 56 focused tests.
@@ -294,4 +298,4 @@ Tool records. Prediction handler p50/p95/p99 were approximately
 38 GiB process peak belongs to the whole worker, not the KB alone. Journal disk
 bytes are not RSS. Do not turn these partial measurements into an acceptance claim.
 
-Continuation is authorized. Keep the current budgets pending evidence on reclaim and physical node headroom; the user wants both compute nodes fully utilized. No successful Full-1280 result is being claimed.
+Continuation is authorized. Retain the user-confirmed 160-CPU / 1,000-GiB local resource envelope across NUMA0/1; investigate reclaim and physical node headroom without silently reducing it. No successful Full-1280 result is being claimed.

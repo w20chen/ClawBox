@@ -118,6 +118,11 @@ These are requirements, not suggestions.
 13. If an observation update fails after bounded retries, preserve the command
     result and continue that trace using its last committed KB. Mark its
     online-learning validity degraded; continue other traces normally.
+14. Retain 160 CPUs across compute NUMA0/1 (CPUs 0-159) and approximately
+    1 TiB local memory: configured capacity 500 GiB per node, 1,000 GiB total.
+    Preserve existing 448/480 GiB per-node low/high watermarks and the shared
+    pool. Investigate reclaim and physical headroom within this resource
+    envelope; the proposed reduction to 448 GiB capacity per node is unapproved.
 
 Requirements above are settled. Concrete class names and proposed fields below
 are implementation guidance. Preserve current prediction/learning semantics
