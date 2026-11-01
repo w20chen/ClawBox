@@ -2,11 +2,12 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: sudo bash scripts/clawbox-pypi-cache {start|status|stop} [--bind-address IP] [--port PORT] [--data-root PATH]" >&2
-  exit 2
+  echo "usage: sudo bash scripts/clawbox-pypi-cache {start|status|stop} [--bind-address IP] [--port PORT] [--data-root PATH] [--upstream-proxy URL] [--network-host]" >&2
+  exit "${1:-2}"
 }
 
 action=${1:-}
+[[ $action != --help ]] || usage 0
 [[ -n "$action" ]] || usage
 shift
 
@@ -15,11 +16,15 @@ port=3141
 data_root=/var/lib/clawbox/pypi-cache
 container=clawbox-pypi-cache
 image=clawbox-pypi-cache:devpi-6.20.0
+upstream_proxy=""
+network_host=false
 while (($#)); do
   case "$1" in
     --bind-address) bind_address=${2:-}; shift 2 ;;
     --port) port=${2:-}; shift 2 ;;
     --data-root) data_root=${2:-}; shift 2 ;;
+    --upstream-proxy) upstream_proxy=${2:-}; shift 2 ;;
+    --network-host) network_host=true; shift ;;
     *) usage ;;
   esac
 done
@@ -28,10 +33,30 @@ if [[ $EUID -ne 0 ]]; then
   echo "run this command with sudo so Docker and the cache directory are writable" >&2
   exit 1
 fi
+if [[ -n $upstream_proxy && ! $upstream_proxy =~ ^https?:// ]]; then
+  echo "--upstream-proxy requires an http:// or https:// proxy URL" >&2
+  exit 2
+fi
+if [[ $upstream_proxy =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])([:/]|$) && $network_host != true ]]; then
+  echo "a host-loopback proxy requires --network-host; bridge containers have their own loopback" >&2
+  exit 2
+fi
 if [[ ! $port =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then
   echo "--port must be an integer from 1 to 65535" >&2
   exit 2
 fi
+
+wait_http() {
+  for attempt in {1..30}; do
+    if curl --noproxy '*' --fail --silent --max-time 2 "http://$bind_address:$port/+status" >/dev/null; then
+      echo "$container HTTP endpoint is ready"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "cache HTTP endpoint did not become ready; inspect docker logs $container and the bind address/port" >&2
+  return 1
+}
 
 case "$action" in
   start)
@@ -39,8 +64,17 @@ case "$action" in
       echo "start requires --bind-address with the host address reachable from CubeSandbox VMs" >&2
       exit 2
     }
+    command -v curl >/dev/null || { echo "install curl before starting the cache" >&2; exit 1; }
     if docker ps --format '{{.Names}}' | grep -Fxq "$container"; then
+      current_network=$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$container")
+      current_env=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container")
+      if { [[ $network_host == true && $current_network != host ]]; } ||
+         { [[ -n $upstream_proxy ]] && ! grep -Fxq "HTTPS_PROXY=$upstream_proxy" <<< "$current_env"; }; then
+        echo "$container is running with different proxy/network settings. Stop it, retain it under a backup name, then start with the same --data-root and reviewed settings." >&2
+        exit 1
+      fi
       echo "$container is already running"
+      wait_http
       exit 0
     fi
     if docker ps -a --format '{{.Names}}' | grep -Fxq "$container"; then
@@ -50,12 +84,19 @@ case "$action" in
     repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
     install -d -m 0750 "$data_root/data"
     docker build -t "$image" "$repo_root/deploy/pypi-cache"
+    network_args=(-p "$bind_address:$port:3141")
+    if [[ $network_host == true ]]; then
+      network_args=(--network host -e "CLAWBOX_PYPI_BIND_ADDRESS=$bind_address" -e "CLAWBOX_PYPI_PORT=$port")
+    fi
+    proxy_args=()
+    if [[ -n $upstream_proxy ]]; then
+      proxy_args=(-e "HTTP_PROXY=$upstream_proxy" -e "HTTPS_PROXY=$upstream_proxy")
+    fi
     docker run -d --name "$container" --restart unless-stopped \
-      -p "$bind_address:$port:3141" \
+      "${network_args[@]}" "${proxy_args[@]}" \
       -v "$data_root/data:/data" \
       "$image"
-    sleep 1
-    docker ps --filter "name=^/$container$"
+    wait_http
     ;;
   status)
     docker ps -a --filter "name=^/$container$"

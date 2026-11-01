@@ -81,6 +81,22 @@ Schema-4 `--set` accepts mechanism groups and `conditions.FIELD`. Other fields
 are edited in YAML. Arm overrides take precedence and are reported by
 `configure` when they replace an explicit common setting.
 
+`sudo bash scripts/clawbox-pypi-cache {start|status|stop}` manages the host PyPI
+cache. Docker and curl are required. `start` waits for its HTTP status endpoint;
+verify an actual package install before freezing an experiment.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--bind-address` | required for start | Host IP reachable from Tool VMs |
+| `--port` | `3141` | TCP port, integer 1–65535 |
+| `--data-root` | `/var/lib/clawbox/pypi-cache` | Persistent cache root; reuse the existing path |
+| `--upstream-proxy` | unset | HTTP(S) proxy URL used by the cache for upstream downloads |
+| `--network-host` | false | Linux host networking; required for a host-loopback proxy, with the server bound to the selected address/port |
+
+Changing container proxy/network settings requires stopping and retaining the
+old container under a backup name before replacement with the same data root.
+Use a new experiment run ID; no host apply, guest image rebuild, or retraining.
+
 ## Files, units, and schema layout
 
 | Location | Meaning |

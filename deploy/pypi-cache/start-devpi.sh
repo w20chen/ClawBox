@@ -7,6 +7,6 @@ fi
 
 exec devpi-server \
     --serverdir /data \
-    --host 0.0.0.0 \
-    --port 3141 \
+    --host "${CLAWBOX_PYPI_BIND_ADDRESS:-0.0.0.0}" \
+    --port "${CLAWBOX_PYPI_PORT:-3141}" \
     --threads 64

@@ -196,6 +196,23 @@ experiment YAML, set `execution.apt_cache_proxy_url` to
 internet policy. Use a new run ID; no template rebuild, host apply or retraining
 is needed.
 
+If the host needs an HTTP proxy for PyPI downloads, configure the cache itself:
+
+```bash
+sudo bash scripts/clawbox-pypi-cache start --bind-address HOST_IP \
+  --data-root /path/to/existing/cache --network-host \
+  --upstream-proxy http://127.0.0.1:8118
+```
+
+Host networking lets this Linux container reach a proxy bound to host loopback;
+the cache still binds only the specified address and port. The proxy must be
+running and reachable. Host shell proxy exports alone do not reach the container.
+To change an existing cache, stop it, rename its container to a unique backup name
+with `docker rename`, and run the command with the same data root. Keep the backup
+stopped while its replacement uses that data. Repeated identical starts reuse the
+running service; changed proxy/network settings fail with a remedy. Freeze these
+settings before a new experiment run ID; no guest image rebuild or retraining.
+
 Choose cache upstream mirrors reachable from your host. Preserve existing cache
 data and back up its configuration before changing mirrors. Verify `apt-get
 update`, an actual package install, and `python3 -m pip install` in a disposable
