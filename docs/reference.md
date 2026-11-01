@@ -140,7 +140,9 @@ VM pool and writes a profile only after checks succeed.
 | `cube_master_log_level` | `null` | Preserve Cube logging; `debug`, `info`, `warn`, or `error`. `warn` avoids verbose inventory logs in large runs. |
 
 Cube's quotas cover configured VM resources and differ from ClawBox's measured
-admission limits. Size them from reported node quotas and requested VM shapes,
+admission limits. Preflight sums both VMs for each session's assigned case and
+checks the largest arm demand; one larger case does not enlarge every session.
+Size them from reported node quotas and requested VM shapes,
 including existing allocations and headroom. Quota changes affect every node of
 the selected instance type. Apply changes on an idle host; the helper restarts
 affected services when needed. Detection is a starting proposal, not an allocation

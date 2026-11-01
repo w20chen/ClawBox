@@ -32,7 +32,7 @@ from .spec import (
 )
 from .spec_types import AdmissionPolicy, ArrivalSchedule
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
-from .worker import atomic_json
+from .worker import atomic_json, session_case_for
 
 
 QUALIFICATION_SCHEMA_VERSION = 16
@@ -246,17 +246,22 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
         return {"template_id": value.template, "memory_mib": value.memory_mib,
                 "vcpu": value.vcpu}
 
-    # A conservative envelope: every offered session may own both VMs. This
-    # checks Cube's independent quota, not a claim about resident concurrency.
+    # Every offered session may own both VMs. Count its assigned shape rather
+    # than multiplying one exceptional large Tool template across the arm.
+    # This checks Cube's independent quota, not actual resident consumption.
     tools = [
         resolve_case_sandbox(case, spec.sandbox)
         for case in load_workload_cases(spec.workload)
     ]
-    count = max(spec.execution.concurrency_levels)
+    arms = []
+    for arm in expand_matrix(spec):
+        assigned = [resolve_case_sandbox(session_case_for(arm, i), arm.sandbox)
+                    for i in range(arm.concurrency)]
+        arms.append(dict(vm_count=2 * arm.concurrency,
+            cpu_milli=(arm.concurrency * arm.runtime.vcpu + sum(t.vcpu for t in assigned)) * 1000,
+            memory_mib=arm.concurrency * arm.runtime.memory_mib + sum(t.memory_mib for t in assigned)))
     demand = dict(
-        vm_count=count * 2,
-        cpu_milli=count * (spec.runtime.vcpu + max(t.vcpu for t in tools)) * 1000,
-        memory_mib=count * (spec.runtime.memory_mib + max(t.memory_mib for t in tools)),
+        **{key: max(arm[key] for arm in arms) for key in ('vm_count', 'cpu_milli', 'memory_mib')},
         max_vm_cpu_milli=max(spec.runtime.vcpu, *(t.vcpu for t in tools)) * 1000,
         max_vm_memory_mib=max(spec.runtime.memory_mib, *(t.memory_mib for t in tools)),
     )

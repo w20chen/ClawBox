@@ -164,6 +164,8 @@ The normal `experiment launch` path reuses saved workload readiness metadata and
 does not repeat a full corpus audit. Use `experiment validate SPEC --inputs` after
 you intentionally replace trace or prediction files; it is the slower command that
 reparses and rehashes all inputs.
+For mixed guest sizes, the launch quota check uses the configured case assignment
+and reports aggregate VM demand separately from physical-memory admission.
 
 For host-live learning, use the current host checkout when starting a new run.
 The injected Runtime SSH shim keeps standard OpenClaw launcher environment

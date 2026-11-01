@@ -23,6 +23,29 @@ from clawbox.experiments.spec import (
 EXAMPLE = Path("examples/experiments/getting-started.yaml")
 
 
+@pytest.mark.parametrize('assignment,count,tool_mib,tool_cpus', [
+    ('round_robin', 5, 3 * 3072 + 2 * 16384, 3 * 2 + 2 * 4),
+    ('unique', 2, 3072 + 16384, 2 + 4),
+    ('single_case', 5, 5 * 16384, 5 * 4),
+])
+def test_host_capacity_counts_assigned_shapes(assignment, count, tool_mib, tool_cpus):
+    from clawbox.experiments.spec_types import SessionAssignment
+    spec = load_experiment(EXAMPLE)
+    cases = tuple(spec.workload.cases[0].model_copy(update={
+        'case_id': f'case-{i}', 'sandbox': spec.sandbox.model_copy(update={
+            'memory_mib': memory, 'vcpu': cpus})})
+        for i, (memory, cpus) in enumerate([(3072, 2), (16384, 4)]))
+    spec = spec.model_copy(update={
+        'workload': spec.workload.model_copy(update={'cases': cases,
+            'session_assignment': SessionAssignment(assignment)}),
+        'execution': spec.execution.model_copy(update={'concurrency_levels': (count,)})})
+    demand = qualification_module.host_profile_for(spec)['cube_capacity_demand']
+    assert demand['vm_count'] == 2 * count
+    assert demand['memory_mib'] == count * spec.runtime.memory_mib + tool_mib
+    assert demand['cpu_milli'] == (count * spec.runtime.vcpu + tool_cpus) * 1000
+    assert demand['max_vm_memory_mib'] == 16384
+
+
 def test_file_mapping_totals_include_split_segments_of_the_same_ram_file(monkeypatch):
     smaps = """10000000-50000000 rw-p 00000000 08:01 42 /data/volumes/tpl-memory
 Size:            1048576 kB
