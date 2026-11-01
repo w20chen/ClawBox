@@ -23,6 +23,28 @@ from clawbox.experiments.spec import (
 EXAMPLE = Path("examples/experiments/getting-started.yaml")
 
 
+def test_file_mapping_totals_include_split_segments_of_the_same_ram_file(monkeypatch):
+    smaps = """10000000-50000000 rw-p 00000000 08:01 42 /data/volumes/tpl-memory
+Size:            1048576 kB
+Rss:                 32 kB
+Pss:                 16 kB
+Shared_Clean:        32 kB
+60000000-70000000 rw-p 00000000 00:00 0
+Size:             262144 kB
+Rss:               1024 kB
+80000000-240000000 rw-p 40000000 08:01 42 /data/volumes/tpl-memory
+Size:            7340032 kB
+Rss:                 80 kB
+Pss:                 40 kB
+Shared_Clean:        80 kB
+"""
+    monkeypatch.setattr(Path, 'read_text', lambda self, **kwargs: smaps)
+    assert qualification_module._file_mappings(123) == {
+        ('08:01', 42): {'path': '/data/volumes/tpl-memory', 'size_kib': 8388608,
+                       'rss_kib': 112, 'pss_kib': 56, 'shared_clean_kib': 112},
+    }
+
+
 def test_worker_gc_changes_run_identity_without_invalidating_vm_capability():
     deferred = load_experiment(EXAMPLE)
     assert deferred.execution.worker_cyclic_gc_enabled is False

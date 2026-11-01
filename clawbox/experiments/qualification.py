@@ -973,7 +973,7 @@ def _file_mappings(pid: int) -> dict[tuple[str, int], dict[str, int | str]]:
             "Shared_Clean": "shared_clean_kib",
         }.get(name)
         if field:
-            current[field] = int(value.split()[0])
+            current[field] = int(current[field]) + int(value.split()[0])
     return result
 
 
