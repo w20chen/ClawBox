@@ -46,9 +46,17 @@ it before doing any further work. The user has now requested continuation. Prese
   8.016-8.071 GiB free, with about 34 GiB slab/page tables/kernel stacks outside
   the zero-valued VM kernel counters. Evidence:
   `host/checkpoint-node-headroom-1793533442449561068.json`.
-  A proposal to use 448 GiB capacity and 400/432 GiB low/high watermarks per
-  compute node is awaiting user decision. It changes the memory baseline;
-  it is **not applied or a proven timeout fix**. The syntax-validated budget-only
+  The user wants both compute NUMA nodes fully utilized and requests attribution
+  before a budget reduction. The 448 GiB capacity / 400/432 GiB watermark
+  proposal is **not approved, not applied, and not a proven timeout fix**.
+  The 33.90 GiB figure is node-wide kernel occupancy, including 19.96 GiB
+  reclaimable slab; it is not demonstrated unavoidable ClawBox overhead.
+  A later allocator capture (`host/node1-slab-breakdown-1793535228228496338.json`)
+  identifies 18.70 GiB in XFS inode cache and 4.87 GiB in generic 1/2 KiB
+  allocation caches. Their historical per-project ownership is unproven.
+  Investigate reclaim and physical per-node headroom before selecting a lower
+  budget. `NumaCgroupMemorySampler.current()` returns per-node VM charges but
+  whole-host MemAvailable; it does not establish physical headroom on that node. The syntax-validated budget-only
   draft is `input-corrections/numa448-proposal/experiment-budget-only-draft.yaml`;
   it still needs the corrected workload and verified guest shapes before launch.
 - Implementation milestone `cd7f27a` is committed and pushed. The per-run
@@ -286,4 +294,4 @@ Tool records. Prediction handler p50/p95/p99 were approximately
 38 GiB process peak belongs to the whole worker, not the KB alone. Journal disk
 bytes are not RSS. Do not turn these partial measurements into an acceptance claim.
 
-Continuation is authorized. The memory-baseline proposal requires the pending user decision. No successful Full-1280 result is being claimed.
+Continuation is authorized. Keep the current budgets pending evidence on reclaim and physical node headroom; the user wants both compute nodes fully utilized. No successful Full-1280 result is being claimed.
