@@ -76,8 +76,13 @@ zero and do not rule out guest OOM. Targeted capacity probes are prepared in
 ceiling, not measured required memory. Check affected template capacity before
 claiming successful workload execution; preserve the other qualified templates.
 The live run also reported exit 255 immediately after restores for lektor-960
-and setuptools_scm-505. `host/network-errors-35min.json` retains the lifecycle
-evidence; inspect Runtime SSH errors before assigning a cause or changing code.
+and setuptools_scm-505. `host/network-restore-route-order.json` proves concurrent
+admissions reused the old port while the restoring callback waited for memory.
+The worker now invalidates that route and checks the restored bridge before
+releasing its lifecycle lock for the reservation wait. Focused tests passed
+on Windows (120 passed, 2 skipped) and Kunpeng (122 passed), including concurrent
+admission ordering. This host-only fix is staged separately from the current
+run; real-VM validation and the next Full acceptance run remain pending.
 
 Remaining: complete Full-1280 and audit coverage, errors, cleanup, and the
 measurements in section 21. Worker interruption recovery is verified; a host

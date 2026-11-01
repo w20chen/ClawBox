@@ -1020,12 +1020,14 @@ def test_paused_tool_is_restored_before_growth_admission_and_routing():
     result = worker._prepare_tool_admission(
         arm, "session", lifecycle, coordinator, SimpleNamespace(),
         watermark, 3, wait_for_admission=lambda operation: operation(),
+        on_restored=lambda: calls.append(("restore_ready", lifecycle.resident)),
     )
 
     assert result == (0, 3, "shared", 0.25, True)
     assert calls == [
         ("active", "session", True),
         ("restore", False),
+        ("restore_ready", True),
         ("route", True, 3),
         ("admit", True, 0, 3, True),
     ]
@@ -1116,6 +1118,24 @@ def test_failed_tool_restore_does_not_reserve_growth():
         )
 
     assert calls == ["active", "restore"]
+
+
+def test_failed_restored_bridge_readiness_does_not_reserve_growth():
+    lifecycle = SimpleNamespace(resident=False)
+    worker = object.__new__(ExperimentWorker)
+    worker._restore_with_one_victim = lambda *args: setattr(lifecycle, 'resident', True)
+    coordinator = SimpleNamespace(set_tool_active=lambda *args: None)
+    arm = SimpleNamespace(execution=SimpleNamespace(arm_timeout_seconds=30))
+
+    def fail_readiness():
+        raise RuntimeError('restored bridge unavailable')
+
+    with pytest.raises(RuntimeError, match='restored bridge unavailable'):
+        worker._prepare_tool_admission(
+            arm, 'session', lifecycle, coordinator, SimpleNamespace(), None, 3,
+            on_restored=fail_readiness,
+            wait_for_admission=lambda operation: pytest.fail('reserved before readiness'),
+        )
 
 
 @pytest.mark.parametrize("field,value", [

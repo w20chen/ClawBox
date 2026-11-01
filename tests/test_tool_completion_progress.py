@@ -6,10 +6,68 @@ from threading import Event, Lock, Thread
 from types import SimpleNamespace
 
 from clawbox.experiments.worker import (
-    RuntimeStatusPoller, wait_for_admission_without_lifecycle_lock,
+    ExperimentWorker, RuntimeStatusPoller, wait_for_admission_without_lifecycle_lock,
 )
 from clawbox.replay.lifecycle import CommandResult
 from clawbox.experiments.prediction_records import PredictionRecordBuffer
+
+
+def test_concurrent_admission_cannot_use_pre_restore_route_during_memory_wait():
+    lifecycle_lock = Lock()
+    waiting = Event()
+    release = Event()
+    lifecycle = SimpleNamespace(resident=False)
+    cached_route = {'port': 2222, 'bridge_ready': False}
+    coordinator = SimpleNamespace(
+        set_tool_active=lambda *args: None,
+        begin_tool_admission=lambda *args, **kwargs: 0.0,
+    )
+    arm = SimpleNamespace(execution=SimpleNamespace(arm_timeout_seconds=30))
+    worker = object.__new__(ExperimentWorker)
+    worker._restore_with_one_victim = lambda *args: setattr(lifecycle, 'resident', True)
+    errors = []
+
+    def restored():
+        assert lifecycle.resident
+        assert lifecycle_lock.locked()
+        cached_route.update(port=None, bridge_ready=True)
+
+    def reserve_after_concurrent_admission(operation):
+        def reserve():
+            waiting.set()
+            assert release.wait(2)
+            return operation()
+        return wait_for_admission_without_lifecycle_lock(lifecycle_lock, reserve)
+
+    def first_admission():
+        try:
+            with lifecycle_lock:
+                worker._prepare_tool_admission(
+                    arm, 'session', lifecycle, coordinator, SimpleNamespace(), None, 3,
+                    on_restored=restored,
+                    wait_for_admission=reserve_after_concurrent_admission,
+                )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = Thread(target=first_admission, daemon=True)
+    thread.start()
+    try:
+        assert waiting.wait(2)
+        with lifecycle_lock:
+            # A second callback sees the same sandbox ID, now resident. It must
+            # find no cached old route even while the restoring callback waits.
+            worker._prepare_tool_admission(
+                arm, 'session', lifecycle, coordinator, SimpleNamespace(), None, 3,
+                on_restored=lambda: pytest.fail('resident VM restored twice'),
+                wait_for_admission=lambda operation: operation(),
+            )
+            assert cached_route == {'port': None, 'bridge_ready': True}
+    finally:
+        release.set()
+        thread.join(2)
+    assert not thread.is_alive()
+    assert not errors
 
 
 def test_resident_runtime_poll_does_not_take_model_lifecycle_lock():

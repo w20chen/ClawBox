@@ -4124,6 +4124,54 @@ class ExperimentWorker:
                                 "dependency_install_gate": True,
                             })
                             raise
+                    def prepare_restored_tool() -> None:
+                        nonlocal admitted_route, admitted_route_requires_preflight
+                        admitted_route = None
+                        admitted_route_requires_preflight = True
+                        bridge_ready_started = time.monotonic()
+                        bridge_error: Exception | None = None
+                        bridge_result = None
+                        for bridge_attempt in range(1, 31):
+                            try:
+                                # A restored bridge normally resumes intact.
+                                # Probe first; restart only to recover a failed probe.
+                                candidate = executor.execute(
+                                    native_tool_bridge_setup_command(
+                                        knowledge_environment=kb_env,
+                                        require_progress_events=arm.policy.runtime_control.adaptive,
+                                        restart=bridge_attempt in (2, 10, 20),
+                                        command_timeout_seconds=arm.execution.command_timeout_seconds,
+                                        apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
+                                        pypi_cache_index_url=arm.execution.pypi_cache_index_url,
+                                        allow_internet_access=arm.sandbox.allow_internet_access,
+                                    ),
+                                    60,
+                                )
+                                if candidate.exit_code == 0:
+                                    bridge_result = candidate
+                                    break
+                                bridge_error = RuntimeError(
+                                    "bridge setup exited "
+                                    f"{candidate.exit_code}: {candidate.stderr[-1000:]}"
+                                )
+                            except Exception as exc:
+                                bridge_error = exc
+                            if bridge_attempt < 30:
+                                time.sleep(0.5)
+                        if bridge_result is None:
+                            raise RuntimeError(
+                                "Tool telemetry bridge did not recover after restore "
+                                "within 30 readiness attempts; last error: "
+                                f"{type(bridge_error).__name__}: {bridge_error}"
+                            ) from bridge_error
+                        events.write({
+                            "event": "tool_restore_ready",
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "attempts": bridge_attempt,
+                            "service_seconds": time.monotonic() - bridge_ready_started,
+                        })
+
                     with wait_lock:
                         control_marks["lifecycle_lock"] = time.monotonic()
                         try:
@@ -4144,69 +4192,10 @@ class ExperimentWorker:
                                         wait_lock, operation,
                                     )
                                 ),
+                                on_restored=prepare_restored_tool,
                             )
                             reservation_acquired = True
                             control_marks["memory_prepare"] = time.monotonic()
-                            if restored_tool:
-                                admitted_route = None
-                                admitted_route_requires_preflight = True
-                                bridge_ready_started = time.monotonic()
-                                bridge_error: Exception | None = None
-                                bridge_result = None
-                                for bridge_attempt in range(1, 31):
-                                    try:
-                                        # A snapshot restore normally resumes
-                                        # the existing bridge process. Probe it
-                                        # first; killing a healthy resumed
-                                        # bridge creates avoidable races at
-                                        # high concurrency. Periodic restarts
-                                        # remain an idempotent recovery path.
-                                        candidate = executor.execute(
-                                            native_tool_bridge_setup_command(
-                                                knowledge_environment=kb_env,
-                                                require_progress_events=arm.policy.runtime_control.adaptive,
-                                                restart=bridge_attempt in (2, 10, 20),
-                                                command_timeout_seconds=(
-                                                    arm.execution.command_timeout_seconds
-                                                ),
-                                                apt_cache_proxy_url=(
-                                                    arm.execution.apt_cache_proxy_url
-                                                ),
-                                                pypi_cache_index_url=(
-                                                    arm.execution.pypi_cache_index_url
-                                                ),
-                                                allow_internet_access=(
-                                                    arm.sandbox.allow_internet_access
-                                                ),
-                                            ),
-                                            60,
-                                        )
-                                        if candidate.exit_code == 0:
-                                            bridge_result = candidate
-                                            break
-                                        bridge_error = RuntimeError(
-                                            "bridge setup exited "
-                                            f"{candidate.exit_code}: {candidate.stderr[-1000:]}"
-                                        )
-                                    except Exception as exc:
-                                        bridge_error = exc
-                                    if bridge_attempt < 30:
-                                        time.sleep(0.5)
-                                if bridge_result is None:
-                                    raise RuntimeError(
-                                        "Tool telemetry bridge did not recover after restore "
-                                        "within 30 readiness attempts; last error: "
-                                        f"{type(bridge_error).__name__}: {bridge_error}"
-                                    ) from bridge_error
-                                events.write({
-                                    "event": "tool_restore_ready",
-                                    "session_id": session_id,
-                                    "execution_id": execution_id,
-                                    "attempts": bridge_attempt,
-                                    "service_seconds": (
-                                        time.monotonic() - bridge_ready_started
-                                    ),
-                                })
                             # Resolve only after the active mark and memory
                             # reservation. Restore may replace the mapping.
                             current_sandbox = lifecycle.sandbox
@@ -5182,6 +5171,7 @@ class ExperimentWorker:
         amount_mib: int,
         *,
         wait_for_admission: Callable[[Callable[[], float]], float],
+        on_restored: Callable[[], None] | None = None,
     ) -> tuple[int, int, str, float, bool]:
         """Restore first, then reserve growth in its actual allocation tier."""
         restored_tool = not lifecycle.resident
@@ -5210,6 +5200,12 @@ class ExperimentWorker:
             self._restore_with_one_victim(
                 arm, session_id, lifecycle, coordinator, events,
             )
+            # The reservation wait releases the caller's lifecycle lock. Make
+            # the restored bridge ready and invalidate the old SSH route first;
+            # otherwise another admission can observe resident=True and reuse
+            # the pre-checkpoint endpoint while this request waits for memory.
+            if on_restored is not None:
+                on_restored()
 
         local_amount = amount_mib
         accounted_amount = amount_mib
