@@ -11,11 +11,14 @@ class OverlayMap(MutableMapping):
     def __init__(self, base, delta=None):
         self.base = base
         self.delta = {} if delta is None else delta
+        self._extra_size = sum(key not in base for key in self.delta)
 
     def __getitem__(self, key):
         return self.delta[key] if key in self.delta else self.base[key]
 
     def __setitem__(self, key, value):
+        if key not in self.delta and key not in self.base:
+            self._extra_size += 1
         self.delta[key] = value
 
     def __delitem__(self, key):
@@ -26,13 +29,16 @@ class OverlayMap(MutableMapping):
         yield from (key for key in self.delta if key not in self.base)
 
     def __len__(self):
-        return len(self.base) + sum(key not in self.base for key in self.delta)
+        return len(self.base) + self._extra_size
 
     def __contains__(self, key):
         return key in self.delta or key in self.base
 
     def copy(self):
-        return type(self)(self.base, self.delta.copy())
+        result = type(self)(self.base)
+        result.delta = self.delta.copy()
+        result._extra_size = self._extra_size
+        return result
 
 
 class SharedSequence(Sequence):

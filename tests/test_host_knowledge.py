@@ -6,6 +6,34 @@ from clawbox.experiments.knowledge.layers import OverlayMap, SharedSequence
 from clawtune_kb.store import create_seed
 from tool_resource.runtime_kb import RuntimeToolResourceKB, ClauseResourceKB, CompletedCall, ToolCallQuery
 from tool_time.lattice_kb import LatticeTimeKB, LATTICE_TIME_ALGORITHMS
+def test_overlay_size_tracks_new_keys_and_overrides_without_rescanning():
+    class CountedBase(dict):
+        membership_reads = 0
+
+        def __contains__(self, key):
+            self.membership_reads += 1
+            return super().__contains__(key)
+
+    base = CountedBase({0: 'seed'})
+    mapping = OverlayMap(base, {0: 'override', 1: 'new'})
+    assert len(mapping) == 2
+    for key in range(1, 2000):
+        mapping[key] = key
+    mapping[0] = 'override again'
+    fork = mapping.copy()
+    fork[2000] = 'private'
+    reads = base.membership_reads
+    for _ in range(100):
+        assert len(mapping) == 2000
+        assert len(fork) == 2001
+        assert bool(mapping)
+    assert base.membership_reads == reads
+    assert 2000 not in mapping
+    assert base == {0: 'seed'}
+    assert len(dict(mapping)) == len(mapping)
+    assert len(dict(fork)) == len(fork)
+
+
 def observation(index=0, **kwargs):
     from tool_resource.runtime_kb import ClauseObservation
     values = dict(repo='org/repo', bin='python', argv=('python', 'work.py'), ts_start=float(index),

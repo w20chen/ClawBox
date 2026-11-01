@@ -4959,7 +4959,7 @@ class ExperimentWorker:
                    if arm.execution.control_timing_details else {}),
             })
             return {"session_id": session_id, "case_id": arm.case.case_id,
-                    "host_knowledge": (self.host_knowledge.summary()['scopes'][session_id]
+                    "host_knowledge": (self.host_knowledge.scope_summary(session_id)
                                        if arm.resources.prediction_mode == 'host-live' else None),
                     "rollout_id": session_id,
                     "tool_template": arm.sandbox.template,

@@ -63,6 +63,32 @@ def test_durable_learning_lost_ack_and_isolation(tmp_path):
     assert receipt not in next((tmp_path / 'kb/scopes').glob('*/journal.jsonl')).read_text()
 
 
+def test_session_summary_does_not_wait_for_another_sessions_update(tmp_path):
+    from threading import Event, Thread
+    manager = setup_manager(tmp_path)()
+    manager.reserve('a', 'repo')
+    manager.reserve('b', 'repo')
+    entered, release = Event(), Event()
+
+    def updating_other_scope():
+        with manager.scopes['b'].lock:
+            entered.set()
+            release.wait(3)
+
+    thread = Thread(target=updating_other_scope)
+    thread.start()
+    assert entered.wait(2)
+    try:
+        summary = manager.scope_summary('a')
+        assert not release.is_set()
+        assert thread.is_alive(), 'summary waited for the other scope to finish'
+        assert summary['learning_valid']
+    finally:
+        release.set()
+        thread.join(3)
+    assert summary == manager.summary()['scopes']['a']
+
+
 def test_validation_failure_cannot_publish_or_learn(tmp_path, monkeypatch):
     manager = setup_manager(tmp_path)()
     manager.reserve('a', 'repo')

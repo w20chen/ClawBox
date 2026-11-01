@@ -307,6 +307,22 @@ class HostKnowledgeManager:
                     rss_bytes=process.memory_info().rss, cpu_seconds=cpu.user + cpu.system,
                     threads=process.num_threads(), active_scopes=len(self.scopes))
 
+    @staticmethod
+    def _scope_summary(scope):
+        return {
+            'generation': scope.view.generation,
+            'learning_valid': not scope.degraded and len(scope.committed) == len(scope.claims),
+            'uncommitted_execution_ids': sorted(set(scope.claims) - set(scope.committed)),
+            'claimed_executions': len(scope.claims),
+            'committed_executions': len(scope.committed),
+        }
+
+    def scope_summary(self, session_id):
+        with self.lock:
+            scope = self.scopes[session_id]
+        with scope.lock:
+            return self._scope_summary(scope)
+
     def summary(self):
         # Sessions reserve scopes concurrently.  Snapshot the registry under
         # its owner lock, then read each overlay under its own lock so a
@@ -320,18 +336,7 @@ class HostKnowledgeManager:
                 journal = scope.path / 'journal.jsonl'
                 if journal.exists():
                     journal_bytes += journal.stat().st_size
-                scope_summaries[session_id] = {
-                    'generation': scope.view.generation,
-                    'learning_valid': (
-                        not scope.degraded
-                        and len(scope.committed) == len(scope.claims)
-                    ),
-                    'uncommitted_execution_ids': sorted(
-                        set(scope.claims) - set(scope.committed)
-                    ),
-                    'claimed_executions': len(scope.claims),
-                    'committed_executions': len(scope.committed),
-                }
+                scope_summaries[session_id] = self._scope_summary(scope)
         return {
             **self.identity,
             'seed_file_bytes': sum(
