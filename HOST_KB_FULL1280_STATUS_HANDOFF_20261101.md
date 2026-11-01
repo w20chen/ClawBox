@@ -1,6 +1,6 @@
 # Host KB and Full-1280 continuation handoff
 
-Continuation resumed at the user's request on 2026-11-01. Updated approximately 22:28 Asia/Shanghai after cache proxy verification. Full-1280 acceptance remains incomplete.
+Continuation resumed at the user's request on 2026-11-01. Updated approximately 22:50 Asia/Shanghai after the qualified Full launch. Full-1280 acceptance remains incomplete.
 This is an operational handoff; the requirements remain in
 `HOST_KB_REDESIGN_HANDOFF_20261030.md`.
 
@@ -10,13 +10,39 @@ This is an operational handoff; the requirements remain in
 are substantially complete, but the large-run acceptance and final measurements
 are incomplete. Do not describe the redesign as fully verified.
 
-The latest Full run is terminal **failed**, with cleanup verified. No replacement
-Full run has been launched. Capacity and pair-learning diagnostics are now terminal.
+The replacement Full run **`full-c1280-hostkb-verified-20261101` is running**;
+do not launch another run. Its attempt is `attempt-65351564b5f146c5`, arm
+`16a2612b32bf4f09e4353520`, worker PID 2315727 (verify identity before use).
+The previous Full is terminal failed with cleanup verified. Capacity, package
+installation, pair-learning and final qualification gates are now terminal.
 The user requested a plan and execution through completion, with careful gates to
 avoid repeated Full runs. Preserve 160 CPUs and 1,000 GiB across NUMA0/1.
 
 ## Latest continuation results (supersede earlier interim notes)
 
+- Both exact package-install commands passed in `package-install-proxy-gate-20261101`,
+  attempt `attempt-4360c5f5935b41d0`, with verified cleanup. Evidence:
+  `package-install-gate/final-audit-1793543455354070895.json`.
+- Final qualification `qualification-419258b3ba23` passed all **503/503** cases,
+  with zero session failures, plus native snapshot/restore and live borrowing
+  probes across both compute nodes. Receipt: `full-ready/qualification.json`.
+- `full-ready/frozen-baseline.json` records the actual source/native/input hashes,
+  qualified receipt, cache identity and storage headroom. Frozen ClawBox revision:
+  `a315b3dc2f158e67ca27c349b34d2df0c8ee0d48`. Source:
+  `/home/weitianc/clawbox-hostkb-20261101/source/ClawBox-full-ready-a315b3d`.
+  The normal CLI launched the new Full at 14:45 UTC; `full-ready/launch.json`
+  retains both host preflight and launch identity. Resource envelope remains
+  160 CPUs, 500 GiB/node, 448/480 GiB watermarks, unchanged shared pool.
+- Read-only observers are active: `host/full-ready-host-samples.jsonl`,
+  `host/full-ready-progress.json`, `host/full-ready-progress-timeline-v2.jsonl`,
+  and `host/checkpoint-watch-full-c1280-hostkb-verified-20261101/`.
+  The progress observer's first attempt failed on string timestamp conversion;
+  its corrected second attempt reads the same immutable event stream. The
+  experiment itself was not restarted or changed.
+- Continue by monitoring this run, auditing terminal evidence and cleanup,
+  and recording the section 21 acceptance limits. Do not rerun completed gates,
+  rebuild images, or launch Full-2560 automatically. The older bullets below
+  retain provenance; their pending launch/install instructions are superseded.
 - The four 8 GiB cases completed. Final validators passed, but 3477 had guest
   OOM, 3024 had one extra segfault, and 3057/5407 had consequential package-install
   differences. Saved detail: `capacity-checks/divergence-detail-1793537534768321244.json`.
