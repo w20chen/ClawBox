@@ -98,12 +98,15 @@ function instrumentHookOnlyExec(event: unknown, config: PluginConfig, decision: 
   if (config.sandboxExecEnvelope !== true || !shouldInstrument(event, config)) {
     return empty;
   }
-  if (config.requireHostPrediction && !hostReceipt(decision)) {
-    throw new Error("Host prediction receipt is required before Tool execution");
-  }
   const params = cloneRecord(isRecord(event) ? event.params ?? event.arguments ?? event.input ?? null : null);
   if (params === null || typeof params.command !== "string" || params.command.length === 0) {
+    // Structured filesystem tools have no shell command to envelope. They are
+    // admitted later by the ClawBox SSH backend with their fixed host budget,
+    // so an exec prediction receipt is neither available nor required here.
     return empty;
+  }
+  if (config.requireHostPrediction && !hostReceipt(decision)) {
+    throw new Error("Host prediction receipt is required before Tool execution");
   }
   const requestedCommand = params.command;
   const executionId = `exec-${randomUUID()}`;
