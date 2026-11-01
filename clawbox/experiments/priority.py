@@ -1004,14 +1004,16 @@ class PriorityDomain:
                 )
             time.sleep(.05)
         requested = parse_cpu_list(required_cpus)
-        escaped = [
-            thread for thread in vcpus
-            if not parse_cpu_list(thread['cpus_allowed']) <= requested
-        ]
-        if escaped:
-            raise RuntimeError(
-                f'CubeSandbox native vCPU affinity escaped NUMA CPUs {required_cpus}: {escaped}'
-            )
+        for thread in vcpus:
+            os.sched_setaffinity(thread['tid'], requested)
+            effective = set(os.sched_getaffinity(thread['tid']))
+            if effective != requested:
+                raise RuntimeError(
+                    f'CubeSandbox native vCPU affinity could not be enforced '
+                    f'for {thread["tid"]}: requested={required_cpus}, '
+                    f'effective={_format_cpu_list(effective)}'
+                )
+            thread['cpus_allowed'] = _format_cpu_list(effective)
         self._vcpu_threads[key] = tuple(
             (thread['tid'], thread['name']) for thread in vcpus
         )

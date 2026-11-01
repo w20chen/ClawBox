@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 
 import pytest
 
@@ -483,11 +484,18 @@ def test_vm_verification_tolerates_exited_auxiliary_thread(monkeypatch, tmp_path
             return 'Name: vcpu0\nCpus_allowed_list: 0-1\n'
         return original(path, *args, **kwargs)
     monkeypatch.setattr(Path, 'read_text', read)
+    applied = []
+    monkeypatch.setattr(os, 'sched_setaffinity',
+                        lambda tid, cpus: applied.append((tid, set(cpus))),
+                        raising=False)
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda tid: {0, 1},
+                        raising=False)
     monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_lru_bytes',
                         lambda path: ({0: 1024}, 0))
     monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_anon_bytes',
                         lambda path: {0: 1024})
     assert [t['tid'] for t in domain.verify(0, 'tool', 'vm')['threads']] == [101]
+    assert applied == [(101, {0, 1})]
     # A freshly restored incremental snapshot can be entirely file-backed.
     # Shared file cache is not evidence about the VMM allocation policy.
     monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_lru_bytes',
@@ -536,6 +544,10 @@ def test_native_vm_verification_waits_for_vcpu_threads(monkeypatch, tmp_path):
             return 'Name: vcpu0\nCpus_allowed_list: 0-1\n'
         return original(path, *args, **kwargs)
     monkeypatch.setattr(Path, 'read_text', read)
+    monkeypatch.setattr(os, 'sched_setaffinity', lambda tid, cpus: None,
+                        raising=False)
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda tid: {0, 1},
+                        raising=False)
     def expose_vcpu(_delay):
         (leaf / 'cgroup.threads').write_text('101')
     monkeypatch.setattr('clawbox.experiments.priority.time.sleep', expose_vcpu)
