@@ -103,9 +103,9 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     assert "HostName=192.0.2.20" in command
     assert "Port=20020" in command
     assert "HostKeyAlias=clawbox-tool-tool-a" in command
-    assert "ControlMaster=auto" in command
-    assert "ControlPersist=300" in command
-    assert "ControlPath=/state/openclaw/session-a/ssh/master-9" in command
+    assert "ControlMaster=no" in command
+    assert "ControlPersist=no" in command
+    assert "ControlPath=none" in command
     assert command[-2] == "openclaw-sandbox"
     assert command[-1].endswith("\nprintf /run/identity\n} 2>&1")
     assert [path for path, _body in posted] == ["/v1/tool/admit", "/v1/tool/complete"]
@@ -155,8 +155,8 @@ def test_policy_route_replaces_stale_explicit_port_and_route_options() -> None:
     assert "HostName=192.0.2.20" in command
     assert "Port=20020" in command
     assert "HostKeyAlias=clawbox-tool-tool-a" in command
-    assert "ControlMaster=auto" in command
-    assert "ControlPath=/state/openclaw/session-a/ssh/master-7" in command
+    assert "ControlMaster=no" in command
+    assert "ControlPath=none" in command
     assert command[-2:] == ["executor@192.0.2.9", "true"]
 
 

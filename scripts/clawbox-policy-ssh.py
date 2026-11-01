@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 
@@ -363,23 +363,13 @@ def _ssh_args_for_route(argv: list[str], route: dict[str, Any]) -> list[str]:
         "-o", f"HostName={route['host']}",
         "-o", f"Port={route['port']}",
         "-o", f"HostKeyAlias={route['host_key_alias']}",
+        # The Tool bridge bounds a connection from its handshake. Reusing
+        # that connection would let an earlier command consume a later
+        # command's execution window and disconnect it while it still runs.
+        "-o", "ControlMaster=no",
+        "-o", "ControlPersist=no",
+        "-o", "ControlPath=none",
     ]
-    control_dir = os.environ.get("CLAWBOX_SSH_CONTROL_DIR", "").strip()
-    if control_dir:
-        directory = PurePosixPath(control_dir)
-        if not directory.is_absolute():
-            raise RuntimeError("SSH control directory must be absolute")
-        # A restored Tool receives a new endpoint epoch.  Key the OpenSSH
-        # master by that epoch so a live connection can never bypass current
-        # Cube route identity after checkpoint/restore.
-        control_path = str(directory / f"master-{route['epoch']}")
-        if len(os.fsencode(control_path)) > 100:
-            raise RuntimeError("SSH control path is too long for a Unix socket")
-        overrides.extend((
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPersist=300",
-            "-o", f"ControlPath={control_path}",
-        ))
     return [*prefix, *overrides, *argv[target_index:]]
 
 

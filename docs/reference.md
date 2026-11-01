@@ -310,7 +310,7 @@ Fields are under `execution`:
 | `randomized_order`, `random_seed` | `true`, 0 | Arm-order randomization and reproducible seed |
 | `arm_timeout_seconds` | 3600 | Arm execution deadline, seconds |
 | `arm_finalization_timeout_seconds` | 300 | Additional supervisor allowance for cleanup/results, seconds |
-| `command_timeout_seconds` | 300 | Tool command deadline, seconds |
+| `command_timeout_seconds` | 300 | Tool command deadline, seconds. Each admitted invocation uses a fresh SSH connection so earlier calls cannot consume its connection lifetime. Changing the deadline requires a new run ID, not an image rebuild. |
 | `replay_tool_timeout_multiplier` | 1.0 | Unitless multiplier, 1.0–100.0, applied only to recorded replay Tool deadlines after admission. Fast commands do not wait longer; only expiry is extended. Use a new run ID after changing it. |
 | `arrival_schedule` | `poisson` | `burst`, `fixed_stagger`, or `poisson` |
 | `stagger_interval_seconds` | 0 | Positive for fixed staggering; zero for burst/Poisson |

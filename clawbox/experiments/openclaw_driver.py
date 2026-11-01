@@ -493,7 +493,6 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_POLICY_CONTROL_TOKEN={shlex.quote(policy_control.token)} "
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
         f"CLAWBOX_POLICY_AUDIT_FILE={shlex.quote(policy_audit_file)} "
-        f"CLAWBOX_SSH_CONTROL_DIR={shlex.quote(ssh_dir)} "
         f"CLAWBOX_TOOL_TIMEOUT_SECONDS={tool_timeout_seconds} "
         f"CLAWBOX_REPLAY_NO_AUTO_COMPACTION={int(replay_mode)} "
         f"CLAWBOX_REPLAY_NO_REMOTE_SKILLS={int(replay_mode)} "
