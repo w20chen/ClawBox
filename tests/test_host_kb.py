@@ -89,6 +89,38 @@ def test_session_summary_does_not_wait_for_another_sessions_update(tmp_path):
     assert summary == manager.summary()['scopes']['a']
 
 
+def test_real_guest_memory_domain_is_used_after_learning_and_recovery(tmp_path):
+    make = setup_manager(tmp_path)
+    manager = make()
+    for session in ('a', 'b'):
+        manager.reserve(session, 'repo')
+    request = prediction_payload('a')
+    initial = manager.predict('a', request)
+    before_b = manager.predict('b', prediction_payload('b'))
+    assert initial['prediction']['tool'] == before_b['prediction']['tool']
+    receipt = initial['prediction_receipt']
+    manager.claim('a', dict(execution_id='memory-exec', prediction_receipt=receipt,
+        command=request['command'], command_sha256=request['command_sha256']))
+    call = CompletedCall('repo', 'exec', 'sleep 1', 1., 4.,
+        memory_measurement='guest_memtotal_minus_memavailable', memory_eligible=True,
+        memory_baseline_bytes=64 * 1024**2, memory_total_peak_bytes=192 * 1024**2,
+        memory_extra_peak_bytes=128 * 1024**2, memory_environment_id='guest-a')
+    observation = {key: value for key, value in request.items()
+        if key not in ('event_id', 'tool_call_id', 'command_context', 'raw_params')}
+    observation.update(execution_id='memory-exec', prediction_receipt=receipt,
+        call=asdict(call), clauses=[], call_provenance=training_target_provenance(call),
+        quality=dict(collection_validity='valid', cleanup='ok', loss_total=0, reason=None))
+    manager.observe('a', observation)
+    after = manager.predict('a', {**request, 'tool_call_id': 'after'})['prediction']['tool']
+    assert after['memory_measurement'] == 'guest_memtotal_minus_memavailable'
+    assert after['targets']['memory_extra_peak_bytes']['p50'] == 128 * 1024**2
+    after_b = manager.predict('b', {**prediction_payload('b'), 'tool_call_id': 'after'})
+    assert after_b['prediction']['tool'] == before_b['prediction']['tool']
+    recovered = make()
+    recovered.reserve('a', 'repo')
+    assert recovered.predict('a', {**request, 'tool_call_id': 'recovered'})['prediction']['tool'] == after
+
+
 def test_validation_failure_cannot_publish_or_learn(tmp_path, monkeypatch):
     manager = setup_manager(tmp_path)()
     manager.reserve('a', 'repo')

@@ -157,6 +157,11 @@ its command returns. Neither VM owns a KB. Admission uses the exact host
 prediction issued for that command. A prediction failure stops that trace
 before command execution. An observation delivery failure preserves the command
 result, continues with committed knowledge, and marks online learning degraded.
+Memory queries initially use the seed's deployment prior. After a pair commits
+its first eligible guest-memory measurement, that pair queries the guest-memory
+domain so its observations can affect later predictions. The seed is not
+relabelled. This host-side query correction requires a new run ID; existing
+guest images and the seed remain reusable.
 Default logs include client prediction round-trip timings in each collected
 `openclaw/SESSION/sidecar.log`; see [measurement scope](results.md). The launcher
 ships this instrumentation for new runs, so it requires no image rebuild,

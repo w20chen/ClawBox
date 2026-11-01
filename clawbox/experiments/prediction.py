@@ -622,11 +622,12 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
         self.lattice, self.runtime = cached
         self._query_lock = Lock()
 
-    def _metadata(self, item: dict, command: str, digest: str) -> dict:
+    def _metadata(self, item: dict, command: str, digest: str, *, admission_policy=None) -> dict:
         if digest != command_sha256(command):
             raise ValueError("P50 artifact command digest mismatch")
         selected = select_cold_start_p50(
-            item.get("models") or {}, self.admission_prediction_policy,
+            item.get("models") or {},
+            self.admission_prediction_policy if admission_policy is None else admission_policy,
             self.host_calibrations,
         )
         calibration = self.host_calibrations[selected["host_calibration_key"]]
@@ -674,6 +675,19 @@ class HostLivePredictionProvider(ColdStartPredictionProvider):
     """Admission calibration/provenance only; the host manager owns live queries."""
     def __init__(self, path, *, repository, sandbox_identity=None):
         super().__init__(path, repository=repository, sandbox_identity=sandbox_identity, _metadata_only=True)
+
+    def _metadata(self, item: dict, command: str, digest: str) -> dict:
+        models = item.get('models') or {}
+        policy = []
+        for row in self.admission_prediction_policy:
+            row = dict(row)
+            measurement = (models.get(row['model']) or {}).get('memory_measurement')
+            if row['target'].startswith('memory_'):
+                if measurement not in {'cgroup_v2_environment_union_v1', 'guest_memtotal_minus_memavailable'}:
+                    raise PredictionUnavailable('host-live prediction has an unsupported memory measurement')
+                row['measurement'] = measurement
+            policy.append(row)
+        return super()._metadata(item, command, digest, admission_policy=policy)
 
     def resolve(self, command, prediction=None):
         raise PredictionUnavailable('host-live admission requires a host-issued receipt')

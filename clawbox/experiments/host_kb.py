@@ -55,6 +55,14 @@ class _Scope:
     claims: dict = field(default_factory=dict)
     committed: dict = field(default_factory=dict)
     degraded: bool = False
+    observed_memory_measurement: str | None = None
+
+    def remember_memory_measurement(self, call):
+        # Seed memory is a cold-start proxy. After a usable guest observation,
+        # query its measurement domain without relabelling either dataset.
+        if (call is not None and call.memory_eligible and not call.censored
+                and call.memory_measurement == 'guest_memtotal_minus_memavailable'):
+            self.observed_memory_measurement = call.memory_measurement
 
 
 def _measured(operation):
@@ -89,7 +97,8 @@ class HostKnowledgeManager:
         self.identity = dict(schema_version=PROTOCOL, run_id=run_id, attempt_id=attempt_id,
             arm_id=arm_id, seed_sha256=self.seed.digest, mapping_policy_sha256=self.policy_digest,
             clawtune_revision=clawtune_revision, memory_measurement=memory_measurement,
-            label_policy='clawtune_marked_imputation', max_optional_features=self.seed.lattice.max_optional_features)
+            label_policy='clawtune_marked_imputation', max_optional_features=self.seed.lattice.max_optional_features,
+            prediction_memory_policy='observed_guest_after_seed_proxy_v1')
         _write_identity(self.root / 'manifest.json', self.identity)
         self.scopes = {}
         self.lock = threading.RLock()
@@ -154,6 +163,7 @@ class HostKnowledgeManager:
             if digest(payload) != row['payload_digest']:
                 raise ValueError('KB observation digest mismatch')
             scope.view = scope.view.successor(call, clauses)
+            scope.remember_memory_measurement(call)
             if scope.view.generation != row['generation']:
                 raise ValueError('KB journal generation mismatch')
             scope.committed[execution_id] = (row['wire_digest'], row['generation'])
@@ -192,7 +202,8 @@ class HostKnowledgeManager:
             context['container_id'] = 'host-kb-guest-context'
             context['host_workspace'] = None
             query = ToolCallQuery(payload['repository'], payload['tool_name'], payload['command'],
-                                  scope.view.last_time + 1., self.measurement)
+                                  scope.view.last_time + 1.,
+                                  scope.observed_memory_measurement or self.measurement)
             tool, diagnostics = scope.view.predict(query, command_context=ParseContext(**context),
                                                    features=scope.features, feature_call_id=key)
             models = {'tool': tool.model_dump(mode='json'),
@@ -290,6 +301,7 @@ class HostKnowledgeManager:
             self._append(scope, dict(kind='observe', payload=durable, payload_digest=digest(durable),
                                      wire_digest=payload_digest, generation=successor.generation))
             scope.view = successor
+            scope.remember_memory_measurement(call)
             scope.committed[execution_id] = (payload_digest, successor.generation)
             return dict(status='accepted', scope_generation=successor.generation, payload_sha256=payload_digest)
 

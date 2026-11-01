@@ -167,6 +167,29 @@ def rss_model(backend, value):
     return result
 
 
+@pytest.mark.parametrize('measurement', [
+    'guest_memtotal_minus_memavailable', 'cgroup_v2_environment_union_v1',
+])
+def test_host_live_selection_preserves_the_prediction_measurement(measurement):
+    from clawbox.experiments.prediction import HostLivePredictionProvider
+    provider = object.__new__(HostLivePredictionProvider)
+    provider.admission_prediction_policy = [dict(model='lattice', level='lattice_environment_extra',
+        target='memory_extra_peak_bytes', measurement='cgroup_v2_environment_union_v1',
+        semantics='proxy', host_calibration='direct_estimate')]
+    provider.host_calibrations = {'direct_estimate': dict(target='host_cgroup_memory_current_increment',
+        method='identity_estimate', sample_count=0, scale=1., offset_bytes=0)}
+    provider.prediction_source = 'host_live_clawtune'
+    provider.payload = {'kb_sha256': 'seed'}
+    estimate = model('lattice', 128 * 1024**2)
+    estimate['memory_measurement'] = measurement
+    result = provider._metadata({'models': {'lattice': estimate}}, 'sleep 1',
+        hashlib.sha256(b'sleep 1').hexdigest())
+    assert result['predicted_incremental_memory_mib'] == 128
+    assert result['clawtune_query_memory_measurement'] == measurement
+    assert result['prediction_semantics'] == 'proxy'
+    assert provider.admission_prediction_policy[0]['measurement'] == 'cgroup_v2_environment_union_v1'
+
+
 def test_p50_prefers_lattice_even_when_toolkb_is_smaller():
     result = select_p50({'lattice': model('lattice', 2**20), 'tool': model('runtime', 0)})
     assert result['predicted_incremental_memory_mib'] == 1

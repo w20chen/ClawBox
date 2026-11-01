@@ -381,6 +381,12 @@ report coalescing and cached-demand age; see [result interpretation](results.md)
 Changing the interval or host sampling implementation requires a new run ID,
 without host apply, image rebuild or retraining.
 `measurement.validation.command` optionally checks the final task result.
+For `host-live`, the KB manifest records `prediction_memory_policy`.
+`observed_guest_after_seed_proxy_v1` uses the seed measurement until a pair has
+an eligible, uncensored guest-memory observation, then queries
+`guest_memtotal_minus_memavailable` for that pair. Admission metadata retains
+the queried measurement and the host-growth estimate's proxy semantics. Use a
+new run ID when updating this host policy; no image rebuild or retraining is needed.
 `measurement.output.directory` defaults to `/results` and is a worker fallback.
 The supported CLI supplies the host output root through `--output-root` or
 `CLAWBOX_OUTPUT_ROOT` (default `results`). Diagnostic logging does not disable

@@ -38,6 +38,12 @@ def _remove_wrapper_line_offset(text: str, lines: int) -> str:
 
 def _failure(text: str, code: int | None = None) -> tuple[int, str] | None:
     text = text.replace("\r\n", "\n")
+    # Imported research responses may append advice after the actual exit
+    # marker. The advice is presentation, not evidence that the call succeeded.
+    text = re.sub(
+        r"\n\n\[Analyze the error above and try a different approach\.\]\s*$",
+        "", text,
+    )
     # Research tool imports preserve the original error in the next request.
     directory = re.fullmatch(
         r"Error: Directory not found: ([^\n]+)(?:\n\n\[Analyze the error above and try a different approach\.\])?",

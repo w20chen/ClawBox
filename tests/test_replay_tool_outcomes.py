@@ -59,6 +59,38 @@ def test_recorded_empty_output_nonzero_exit(monkeypatch):
     ) == [{'call_id': 'call_0_0', 'exit_code': 1, 'recorded_error': ''}]
 
 
+def test_imported_timeout_advice_retains_recorded_exit(monkeypatch):
+    span = setup_case(
+        monkeypatch,
+        "Error: [timeout]\n\nExit code: 124\n\n"
+        "[Analyze the error above and try a different approach.]",
+        "ModuleNotFoundError: missing dependency\n(Command exited with code 2)",
+    )
+    span['output']['exit_code'] = 2
+    unexpected = []
+    tool_outcomes.match_recorded_tool_failures(
+        Path('trace'), [span], session_id='s', reported_failures=1,
+        unexpected_failures=unexpected,
+    )
+    assert unexpected[0]['recorded_exit_code'] == 124
+    assert unexpected[0]['recorded_error_excerpt'] == 'Error: [timeout]'
+    assert unexpected[0]['reason'] == 'failure_outcome_changed'
+    assert unexpected[0]['observed_exit_code'] == 2
+
+
+def test_import_advice_does_not_hide_changed_failure(monkeypatch):
+    span = setup_case(
+        monkeypatch,
+        "TypeError: old\nExit code: 1\n\n"
+        "[Analyze the error above and try a different approach.]",
+        "ValueError: new\n(Command exited with code 1)",
+    )
+    with pytest.raises(ValueError, match='unexpected replay Tool failure'):
+        tool_outcomes.match_recorded_tool_failures(
+            Path('trace'), [span], session_id='s', reported_failures=1,
+        )
+
+
 def test_imported_directory_error(monkeypatch):
     span = setup_case(monkeypatch,
         "Error: Directory not found: /testbed/missing\n\n[Analyze the error above and try a different approach.]",

@@ -31,6 +31,9 @@ after the cleanup verdict is stored in the canonical arm result.
 
 Before comparing arms, check submitted/completed sessions, final task validation,
 failures, timeouts, OOMs, execution-ID joins, telemetry coverage, and cleanup.
+Final validation checks only its configured command. Inspect replay divergence
+records separately; imported advice following an exit-code line does not change
+that recorded exit code.
 
 For host-live runs, `correctness.host_knowledge` reports pair generations and
 uncommitted execution IDs. `online_learning_valid: false` means command results
