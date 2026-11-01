@@ -1,0 +1,838 @@
+diff --git a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go b/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
+index 4ae7e24..6a49085 100644
+--- a/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
++++ b/Cubelet/plugins/cube/internals/cgroup/handle/v2/manager.go
+@@ -278,19 +278,20 @@ func (h *handler) AddProc(group string, pid uint64) error {
+ }
+ 
+ func (h *handler) RemoveLimit(ctx context.Context, group string) error {
+-	cpuLimitFilePath := path.Join(h.root, group, "cpu.max")
+-	memLimitFilePath := path.Join(h.root, group, "memory.max")
+-	if exist, _ := utils.DenExist(cpuLimitFilePath); exist {
+-		err := os.WriteFile(cpuLimitFilePath, []byte("max 100000"), 0644)
+-		if err != nil {
+-			log.G(ctx).Errorf("remove cpu limit error %v", err)
+-			return err
++	// CleanForReuse empties the cgroup before this method. Restore every
++	// controller ClawBox may tune so the next VM cannot inherit an earlier
++	// generation's protection or boost.
++	defaults := map[string]string{
++		"cpu.max": "max 100000", "memory.max": "max",
++		"cpu.weight": "100", "memory.low": "0", "memory.high": "max",
++	}
++	for name, value := range defaults {
++		controlPath := path.Join(h.root, group, name)
++		if exist, _ := utils.DenExist(controlPath); !exist {
++			continue
+ 		}
+-	}
+-	if exist, _ := utils.DenExist(memLimitFilePath); exist {
+-		err := os.WriteFile(memLimitFilePath, []byte("max"), 0644)
+-		if err != nil {
+-			log.G(ctx).Errorf("remove memory limit error %v", err)
++		if err := os.WriteFile(controlPath, []byte(value), 0644); err != nil {
++			log.G(ctx).Errorf("restore reusable cgroup control %s error %v", name, err)
+ 			return err
+ 		}
+ 	}
+diff --git a/Cubelet/services/cubebox/incremental_memory_reclaim.go b/Cubelet/services/cubebox/incremental_memory_reclaim.go
+new file mode 100644
+index 0000000..5144552
+--- /dev/null
++++ b/Cubelet/services/cubebox/incremental_memory_reclaim.go
+@@ -0,0 +1,199 @@
++// SPDX-License-Identifier: Apache-2.0
++
++package cubebox
++
++import (
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++
++	"golang.org/x/sys/unix"
++)
++
++type reclaimMemoryRange struct {
++	GPA    uint64 `json:"gpa"`
++	Offset uint64 `json:"offset"`
++	Length uint64 `json:"length"`
++}
++
++type reclaimMemoryLayer struct {
++	Name         string               `json:"name"`
++	Ranges       []reclaimMemoryRange `json:"ranges"`
++	ExternalPath *string              `json:"external_path,omitempty"`
++}
++
++type reclaimMemoryLineage struct {
++	SchemaVersion         uint32               `json:"schema_version"`
++	LogicalBytes          uint64               `json:"logical_bytes"`
++	AllocatedBytes        uint64               `json:"allocated_bytes"`
++	DirtyBytes            *uint64              `json:"dirty_bytes"`
++	TransferredBytes      uint64               `json:"transferred_bytes"`
++	EffectivePrivateBytes uint64               `json:"effective_private_bytes"`
++	ReclaimedBytes        uint64               `json:"reclaimed_bytes"`
++	ReclaimSkippedBytes   uint64               `json:"reclaim_skipped_bytes,omitempty"`
++	FullBase              bool                 `json:"full_base"`
++	Layers                []reclaimMemoryLayer `json:"layers"`
++}
++
++type memoryReclaimStats struct {
++	AllocatedBefore uint64
++	AllocatedAfter  uint64
++	ReclaimedBytes  uint64
++	SkippedBytes    uint64
++	PunchedRanges   int
++}
++
++func reclaimHoles(ranges []reclaimMemoryRange, logical uint64) ([]reclaimMemoryRange, error) {
++	ordered := append([]reclaimMemoryRange(nil), ranges...)
++	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Offset < ordered[j].Offset })
++	var holes []reclaimMemoryRange
++	var cursor uint64
++	for _, current := range ordered {
++		end := current.Offset + current.Length
++		if current.Length == 0 || end < current.Offset || end > logical || current.Offset < cursor {
++			return nil, fmt.Errorf("invalid retained RAM range offset=%d length=%d", current.Offset, current.Length)
++		}
++		if current.Offset > cursor {
++			holes = append(holes, reclaimMemoryRange{Offset: cursor, Length: current.Offset - cursor})
++		}
++		cursor = end
++	}
++	if cursor < logical {
++		holes = append(holes, reclaimMemoryRange{Offset: cursor, Length: logical - cursor})
++	}
++	return holes, nil
++}
++
++// reclaimSupersededMemory runs only after the previous pause snapshot has
++// been successfully removed and the resumed VM has been destroyed. An owned
++// layer must also have exactly one link; otherwise it is left untouched.
++func reclaimSupersededMemory(memoryPath string) (memoryReclaimStats, error) {
++	var stats memoryReclaimStats
++	sidecar := memoryPath + ".lineage.json"
++	raw, err := os.ReadFile(sidecar)
++	if err != nil {
++		return stats, err
++	}
++	var lineage reclaimMemoryLineage
++	if err := json.Unmarshal(raw, &lineage); err != nil {
++		return stats, fmt.Errorf("decode RAM lineage: %w", err)
++	}
++	if lineage.SchemaVersion != 1 || lineage.LogicalBytes == 0 || len(lineage.Layers) == 0 {
++		return stats, fmt.Errorf("invalid RAM lineage schema or layout")
++	}
++
++	var current unix.Stat_t
++	if err := unix.Stat(memoryPath, &current); err != nil {
++		return stats, fmt.Errorf("stat current RAM snapshot: %w", err)
++	}
++	lineage.AllocatedBytes = 0
++	lineage.EffectivePrivateBytes = 0
++	lineage.ReclaimSkippedBytes = 0
++	for index, layer := range lineage.Layers {
++		if layer.Name != fmt.Sprintf("%06d.mem", index) || strings.ContainsAny(layer.Name, `/\\`) {
++			return stats, fmt.Errorf("invalid RAM layer name %q", layer.Name)
++		}
++		if layer.ExternalPath != nil {
++			continue
++		}
++		for _, retained := range layer.Ranges {
++			lineage.EffectivePrivateBytes += retained.Length
++		}
++		layerPath := filepath.Join(memoryPath+".layers", layer.Name)
++		file, err := os.OpenFile(layerPath, os.O_RDWR, 0)
++		if err != nil {
++			return stats, fmt.Errorf("open RAM layer %s: %w", layer.Name, err)
++		}
++		var before unix.Stat_t
++		if err := unix.Fstat(int(file.Fd()), &before); err != nil {
++			file.Close()
++			return stats, fmt.Errorf("stat RAM layer %s: %w", layer.Name, err)
++		}
++		beforeBytes := uint64(before.Blocks) * 512
++		stats.AllocatedBefore += beforeBytes
++		holes, err := reclaimHoles(layer.Ranges, lineage.LogicalBytes)
++		if err != nil {
++			file.Close()
++			return stats, fmt.Errorf("RAM layer %s: %w", layer.Name, err)
++		}
++		isCurrentWriteFile := before.Dev == current.Dev && before.Ino == current.Ino
++		if !isCurrentWriteFile && before.Nlink == 1 {
++			for _, hole := range holes {
++				if hole.Offset > uint64(^uint64(0)>>1) || hole.Length > uint64(^uint64(0)>>1) {
++					file.Close()
++					return stats, fmt.Errorf("RAM reclaim range exceeds int64")
++				}
++				if err := unix.Fallocate(int(file.Fd()), unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE,
++					int64(hole.Offset), int64(hole.Length)); err != nil {
++					file.Close()
++					return stats, fmt.Errorf("punch RAM layer %s offset=%d length=%d: %w",
++						layer.Name, hole.Offset, hole.Length, err)
++				}
++				stats.PunchedRanges++
++			}
++			if err := file.Sync(); err != nil {
++				file.Close()
++				return stats, fmt.Errorf("sync reclaimed RAM layer %s: %w", layer.Name, err)
++			}
++		} else if !isCurrentWriteFile && len(holes) != 0 {
++			for _, hole := range holes {
++				lineage.ReclaimSkippedBytes += hole.Length
++			}
++		}
++		var after unix.Stat_t
++		if err := unix.Fstat(int(file.Fd()), &after); err != nil {
++			file.Close()
++			return stats, fmt.Errorf("restat RAM layer %s: %w", layer.Name, err)
++		}
++		if err := file.Close(); err != nil {
++			return stats, err
++		}
++		afterBytes := uint64(after.Blocks) * 512
++		stats.AllocatedAfter += afterBytes
++		lineage.AllocatedBytes += afterBytes
++		if beforeBytes > afterBytes {
++			stats.ReclaimedBytes += beforeBytes - afterBytes
++		}
++	}
++	lineage.ReclaimedBytes += stats.ReclaimedBytes
++	stats.SkippedBytes = lineage.ReclaimSkippedBytes
++
++	updated, err := json.Marshal(&lineage)
++	if err != nil {
++		return stats, err
++	}
++	directory := filepath.Dir(sidecar)
++	temporary, err := os.CreateTemp(directory, filepath.Base(sidecar)+".reclaim-*")
++	if err != nil {
++		return stats, err
++	}
++	temporaryName := temporary.Name()
++	defer os.Remove(temporaryName)
++	if err = temporary.Chmod(0600); err == nil {
++		_, err = temporary.Write(updated)
++	}
++	if err == nil {
++		err = temporary.Sync()
++	}
++	closeErr := temporary.Close()
++	if err == nil {
++		err = closeErr
++	}
++	if err == nil {
++		err = os.Rename(temporaryName, sidecar)
++	}
++	if err != nil {
++		return stats, fmt.Errorf("commit reclaimed RAM accounting: %w", err)
++	}
++	if dir, openErr := os.Open(directory); openErr == nil {
++		err = dir.Sync()
++		_ = dir.Close()
++		if err != nil {
++			return stats, fmt.Errorf("sync reclaimed RAM accounting: %w", err)
++		}
++	}
++	return stats, nil
++}
+diff --git a/Cubelet/services/cubebox/incremental_memory_reclaim_test.go b/Cubelet/services/cubebox/incremental_memory_reclaim_test.go
+new file mode 100644
+index 0000000..1a98631
+--- /dev/null
++++ b/Cubelet/services/cubebox/incremental_memory_reclaim_test.go
+@@ -0,0 +1,97 @@
++// SPDX-License-Identifier: Apache-2.0
++
++package cubebox
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func writeReclaimFixture(t *testing.T, shared bool) (string, string, uint64) {
++	t.Helper()
++	directory := t.TempDir()
++	memoryPath := filepath.Join(directory, "memory.mem")
++	layers := memoryPath + ".layers"
++	if err := os.Mkdir(layers, 0700); err != nil {
++		t.Fatal(err)
++	}
++	page := uint64(os.Getpagesize())
++	old := filepath.Join(layers, "000000.mem")
++	if err := os.WriteFile(old, make([]byte, 3*page), 0600); err != nil {
++		t.Fatal(err)
++	}
++	file, err := os.OpenFile(old, os.O_WRONLY, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for offset := uint64(0); offset < 3*page; offset += page {
++		if _, err := file.WriteAt([]byte{0x5a}, int64(offset)); err != nil {
++			t.Fatal(err)
++		}
++	}
++	file.Close()
++	current := filepath.Join(layers, "000001.mem")
++	if err := os.WriteFile(memoryPath, make([]byte, 3*page), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Link(memoryPath, current); err != nil {
++		t.Fatal(err)
++	}
++	if shared {
++		if err := os.Link(old, filepath.Join(directory, "reader.mem")); err != nil {
++			t.Fatal(err)
++		}
++	}
++	lineage := reclaimMemoryLineage{
++		SchemaVersion: 1, LogicalBytes: 3 * page,
++		Layers: []reclaimMemoryLayer{
++			{Name: "000000.mem", Ranges: []reclaimMemoryRange{
++				{Offset: 0, Length: page}, {Offset: 2 * page, Length: page},
++			}},
++			{Name: "000001.mem", Ranges: []reclaimMemoryRange{{Offset: page, Length: page}}},
++		},
++	}
++	raw, _ := json.Marshal(&lineage)
++	if err := os.WriteFile(memoryPath+".lineage.json", raw, 0600); err != nil {
++		t.Fatal(err)
++	}
++	return memoryPath, old, page
++}
++
++func TestReclaimSupersededMemoryPunchesOnlyUnsharedInheritedPages(t *testing.T) {
++	memoryPath, old, page := writeReclaimFixture(t, false)
++	stats, err := reclaimSupersededMemory(memoryPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.PunchedRanges != 1 || stats.ReclaimedBytes < page || stats.SkippedBytes != 0 {
++		t.Fatalf("unexpected reclaim stats: %+v", stats)
++	}
++	content, err := os.ReadFile(old)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if content[0] != 0x5a || content[page] != 0 || content[2*page] != 0x5a {
++		t.Fatalf("retained and reclaimed contents do not match")
++	}
++}
++
++func TestReclaimSupersededMemoryPreservesSharedReader(t *testing.T) {
++	memoryPath, old, page := writeReclaimFixture(t, true)
++	stats, err := reclaimSupersededMemory(memoryPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.PunchedRanges != 0 || stats.ReclaimedBytes != 0 || stats.SkippedBytes != page {
++		t.Fatalf("unexpected shared-layer stats: %+v", stats)
++	}
++	content, err := os.ReadFile(old)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if content[page] != 0x5a {
++		t.Fatalf("shared reader content was reclaimed")
++	}
++}
+diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
+index 86084df..fd13624 100644
+--- a/Cubelet/services/cubebox/pause_cow.go
++++ b/Cubelet/services/cubebox/pause_cow.go
+@@ -32,7 +32,7 @@ import (
+ )
+ 
+ type pauseSnapshotConfig struct {
+-	SnapshotType string `json:"snapshot_type,omitempty"`
++	SnapshotType   string  `json:"snapshot_type,omitempty"`
+ 	DestinationURL string  `json:"destination_url"`
+ 	MemoryVolURL   *string `json:"memory_vol_url,omitempty"`
+ }
+@@ -219,7 +219,9 @@ func (s *service) updateWithPauseCow(
+ 		return rsp, nil
+ 	}
+ 	snapshotMechanism := strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.mechanism"])
+-	if snapshotMechanism == "" { snapshotMechanism = "full-copy" }
++	if snapshotMechanism == "" {
++		snapshotMechanism = "full-copy"
++	}
+ 	if snapshotMechanism != "full-copy" && snapshotMechanism != "incremental-cow" {
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+ 		rsp.Ret.RetMsg = "invalid snapshot mechanism"
+@@ -381,7 +383,9 @@ func (s *service) updateWithPauseCow(
+ 		DestinationURL: layout.MetaWork,
+ 		MemoryVolURL:   &memURL,
+ 	}
+-	if snapshotMechanism == "incremental-cow" { pauseCfg.SnapshotType = "kvm-cow" }
++	if snapshotMechanism == "incremental-cow" {
++		pauseCfg.SnapshotType = "kvm-cow"
++	}
+ 	cfgJSON, err := json.Marshal(pauseCfg)
+ 	if err != nil {
+ 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("marshal pause snapshot config: %v", err))
+@@ -442,21 +446,21 @@ func (s *service) updateWithPauseCow(
+ 	}
+ 
+ 	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
+-		SnapshotID:      snapID,
+-		InstanceType:    "cubebox",
+-		SpecDir:         specDir,
+-		SnapshotPath:    layout.Home,
+-		MetaDir:         layout.MetaDir,
+-		RootfsVol:       rootfsObject.Name,
+-		RootfsKind:      rootfsObject.Kind,
+-		MemoryVol:       memoryObject.Name,
+-		MemoryKind:      memoryObject.Kind,
++		SnapshotID:              snapID,
++		InstanceType:            "cubebox",
++		SpecDir:                 specDir,
++		SnapshotPath:            layout.Home,
++		MetaDir:                 layout.MetaDir,
++		RootfsVol:               rootfsObject.Name,
++		RootfsKind:              rootfsObject.Kind,
++		MemoryVol:               memoryObject.Name,
++		MemoryKind:              memoryObject.Kind,
+ 		MemorySnapshotMechanism: snapshotMechanism,
+-		MetadataVol:     storage.S3MetadataCatalogVol(backend, snapID),
+-		MetadataKind:    storage.S3MetadataCatalogKind(backend),
+-		RootfsSizeBytes: rootfsObject.SizeBytes,
+-		Kind:            storage.CatalogKindPauseSnapshot,
+-		Backend:         backend,
++		MetadataVol:             storage.S3MetadataCatalogVol(backend, snapID),
++		MetadataKind:            storage.S3MetadataCatalogKind(backend),
++		RootfsSizeBytes:         rootfsObject.SizeBytes,
++		Kind:                    storage.CatalogKindPauseSnapshot,
++		Backend:                 backend,
+ 	}); err != nil {
+ 		// catalog.json is required for Resume / List / cross-node; do not mark
+ 		// PAUSED without it (sandbox_spec already fails hard above).
+@@ -540,7 +544,18 @@ func (s *service) updateWithPauseCow(
+ 	}
+ 	if prev := replacedLivePauseSnapshotID(prevLiveSnap, snapID); prev != "" {
+ 		stepLog.Infof("pause replaced live snap %s with %s; CleanupTemplate previous", prev, snapID)
+-		s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev, cleanupBackendForPauseSnap(backend, prev))
++		if s.bestEffortCleanupPauseSnapshot(workCtx, req.RequestID, prev,
++			cleanupBackendForPauseSnap(backend, prev)) &&
++			snapshotMechanism == "incremental-cow" && directMemory {
++			stats, reclaimErr := reclaimSupersededMemory(directMemoryPath)
++			if reclaimErr != nil {
++				stepLog.Warnf("incremental RAM reclaim deferred path=%s: %v", directMemoryPath, reclaimErr)
++			} else {
++				stepLog.Infof("incremental RAM reclaim path=%s allocated_before=%d allocated_after=%d reclaimed=%d skipped=%d ranges=%d",
++					directMemoryPath, stats.AllocatedBefore, stats.AllocatedAfter,
++					stats.ReclaimedBytes, stats.SkippedBytes, stats.PunchedRanges)
++			}
++		}
+ 	}
+ 	writeCheckpointPhase(cleanupPhaseStarted, "cubelet.cleanup_previous", req.SandboxID, req.RequestID, snapID, true)
+ 	return rsp, nil
+@@ -769,10 +784,10 @@ func pauseSnapIDToGCOnDestroy(req *cubebox.DestroyCubeSandboxRequest, sb *cubebo
+ // bestEffortCleanupPauseSnapshot removes a pause catalog. After Pause
+ // succeeds Cubelet GCs the previous live pause snap here; Destroy is the
+ // leftover / failed-pause fallback. Master is not in this path.
+-func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID, snapID, backend string) {
++func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID, snapID, backend string) bool {
+ 	snapID = strings.TrimSpace(snapID)
+ 	if snapID == "" {
+-		return
++		return false
+ 	}
+ 	cleanupRsp, err := s.CleanupTemplate(ctx, &cubebox.CleanupTemplateRequest{
+ 		RequestID:  requestID,
+@@ -781,11 +796,13 @@ func (s *service) bestEffortCleanupPauseSnapshot(ctx context.Context, requestID,
+ 	})
+ 	if err != nil {
+ 		log.G(ctx).Warnf("pause-snap GC after destroy failed snap=%s: %v", snapID, err)
+-		return
++		return false
+ 	}
+ 	if cleanupRsp != nil && cleanupRsp.GetRet() != nil &&
+ 		cleanupRsp.GetRet().GetRetCode() != errorcode.ErrorCode_Success {
+ 		log.G(ctx).Warnf("pause-snap GC after destroy snap=%s ret=%v msg=%s",
+ 			snapID, cleanupRsp.GetRet().GetRetCode(), cleanupRsp.GetRet().GetRetMsg())
++		return false
+ 	}
++	return cleanupRsp != nil && cleanupRsp.GetRet() != nil
+ }
+diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_manager.rs
+index f1e4073..e416156 100644
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -1385,11 +1385,11 @@ impl MemoryManager {
+                 return Err(Error::Restore(MigratableError::Restore(anyhow!(
+                     "kvm-cow restore requires lazy private mappings without hugepages"))));
+             }
+-            let memory_file = if fast_restore {
+-                Some(if let Some(lineage) = &lineage {
+-                    File::open(lineage.layers[0]
+-                        .file_path(&memory_file_target.path))
+-                } else { memory_file_target.open_read() }.map_err(Error::SnapshotOpen)?)
++            // A canonical lineage is a disjoint set of effective ranges, so no
++            // individual layer is necessarily a complete base mapping. Start
++            // with lazy anonymous memory and map every effective range below.
++            let memory_file = if fast_restore && lineage.is_none() {
++                Some(memory_file_target.open_read().map_err(Error::SnapshotOpen)?)
+             } else { None };
+ 
+             let mm = MemoryManager::new(
+@@ -1424,7 +1424,7 @@ impl MemoryManager {
+             });
+             if let Some(lineage) = lineage {
+                 let mut manager = mm.lock().unwrap();
+-                for layer in lineage.layers.iter().skip(1) {
++                for layer in &lineage.layers {
+                     let file = File::open(layer.file_path(&memory_file_target.path))
+                         .map_err(Error::SnapshotOpen)?;
+                     for range in &layer.ranges {
+@@ -3248,11 +3248,23 @@ impl MemoryManager {
+             snapshot_lineage::allocate_warm(&target.path, &ranges).map_err(io_error)?;
+         }
+         let lineage = Lineage::inherit(&target.path,
+-            parent.map(|(path, lineage)| (path.as_path(), lineage)), logical_bytes).map_err(io_error)?;
++            parent.map(|(path, lineage)| (path.as_path(), lineage)), logical_bytes,
++            &ranges).map_err(io_error)?;
++        let mut cold_bytes_since_discard = 0_u64;
+         for r in &ranges {
+             self.save_range_to_file(&file, &MemoryRange { gpa: r.gpa, length: r.length }, r.offset)?;
++            if !volatile {
++                cold_bytes_since_discard += r.length;
++                if cold_bytes_since_discard >= 16 * 1024 * 1024 {
++                    discard_cold_snapshot_cache(&file).map_err(io_error)?;
++                    cold_bytes_since_discard = 0;
++                }
++            }
+         }
+         lineage.publish(&target.path, ranges, !volatile).map_err(io_error)?;
++        if !volatile && cold_bytes_since_discard != 0 {
++            discard_cold_snapshot_cache(&file).map_err(io_error)?;
++        }
+         Ok(())
+     }
+ 
+diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapshot_lineage.rs
+index 6c16c2a..16f34df 100644
+--- a/hypervisor/vmm/src/snapshot_lineage.rs
++++ b/hypervisor/vmm/src/snapshot_lineage.rs
+@@ -6,6 +6,7 @@
+ use serde::{Deserialize, Serialize};
+ use std::fs::{self, File, OpenOptions};
+ use std::io::{self, Write};
++use std::collections::HashSet;
+ use std::os::unix::fs::MetadataExt;
+ use std::os::unix::io::AsRawFd;
+ use std::path::{Path, PathBuf};
+@@ -39,6 +40,10 @@ pub struct Lineage {
+     pub allocated_bytes: u64,
+     pub dirty_bytes: Option<u64>,
+     pub transferred_bytes: u64,
++    #[serde(default)]
++    pub effective_private_bytes: u64,
++    #[serde(default)]
++    pub reclaimed_bytes: u64,
+     pub full_base: bool,
+     pub layers: Vec<Layer>,
+ }
+@@ -59,6 +64,80 @@ fn invalid(message: &str) -> io::Error {
+     io::Error::new(io::ErrorKind::InvalidData, message)
+ }
+ 
++fn range_end(range: &Range) -> io::Result<u64> {
++    range.offset.checked_add(range.length)
++        .ok_or_else(|| invalid("RAM range overflow"))
++}
++
++fn normalize_ranges(mut ranges: Vec<Range>) -> io::Result<Vec<Range>> {
++    ranges.retain(|range| range.length != 0);
++    ranges.sort_by_key(|range| range.offset);
++    let mut normalized: Vec<Range> = Vec::new();
++    for range in ranges {
++        let end = range_end(&range)?;
++        if let Some(previous) = normalized.last_mut() {
++            let previous_end = range_end(previous)?;
++            if range.offset < previous_end {
++                let expected_gpa = previous.gpa.checked_add(range.offset - previous.offset)
++                    .ok_or_else(|| invalid("RAM GPA overflow"))?;
++                if range.gpa != expected_gpa {
++                    return Err(invalid("overlapping RAM ranges have inconsistent mappings"));
++                }
++                if end > previous_end {
++                    previous.length = end - previous.offset;
++                }
++                continue;
++            }
++            if range.offset == previous_end
++                && range.gpa == previous.gpa.checked_add(previous.length)
++                    .ok_or_else(|| invalid("RAM GPA overflow"))?
++            {
++                previous.length = end - previous.offset;
++                continue;
++            }
++        }
++        normalized.push(range);
++    }
++    Ok(normalized)
++}
++
++fn subtract_ranges(source: &[Range], covered: &[Range]) -> io::Result<Vec<Range>> {
++    let covered = normalize_ranges(covered.to_vec())?;
++    let mut retained = Vec::new();
++    for range in source {
++        let end = range_end(range)?;
++        let mut cursor = range.offset;
++        for replacement in &covered {
++            let replacement_end = range_end(replacement)?;
++            if replacement_end <= cursor {
++                continue;
++            }
++            if replacement.offset >= end {
++                break;
++            }
++            if replacement.offset > cursor {
++                retained.push(Range {
++                    gpa: range.gpa + cursor - range.offset,
++                    offset: cursor,
++                    length: replacement.offset - cursor,
++                });
++            }
++            cursor = cursor.max(replacement_end.min(end));
++            if cursor == end {
++                break;
++            }
++        }
++        if cursor < end {
++            retained.push(Range {
++                gpa: range.gpa + cursor - range.offset,
++                offset: cursor,
++                length: end - cursor,
++            });
++        }
++    }
++    normalize_ranges(retained)
++}
++
+ pub fn volatile(file: &File) -> io::Result<bool> {
+     let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+     if unsafe { libc::fstatfs(file.as_raw_fd(), &mut stat) } != 0 {
+@@ -94,12 +173,12 @@ impl Lineage {
+         };
+         let lineage: Self = serde_json::from_reader(file)?;
+         if lineage.schema_version != 1 || lineage.layers.is_empty()
+-            || lineage.layers[0].ranges != layout
+             || lineage.logical_bytes != layout.iter().map(|r| r.length).sum::<u64>()
+             || page_size == 0
+         {
+             return Err(invalid("incomplete RAM lineage or incompatible guest layout"));
+         }
++        let mut effective = Vec::new();
+         for (index, layer) in lineage.layers.iter().enumerate() {
+             if layer.name != format!("{:06}.mem", index) {
+                 return Err(invalid("invalid RAM layer name"));
+@@ -115,8 +194,7 @@ impl Lineage {
+             }
+             let mut previous_end = 0;
+             for range in &layer.ranges {
+-                let end = range.offset.checked_add(range.length)
+-                    .ok_or_else(|| invalid("RAM range overflow"))?;
++                let end = range_end(range)?;
+                 if range.length == 0 || range.offset < previous_end
+                     || range.offset % page_size != 0 || range.length % page_size != 0
+                     || !layout.iter().any(|region| {
+@@ -128,8 +206,12 @@ impl Lineage {
+                     return Err(invalid("RAM layer range outside guest mapping"));
+                 }
+                 previous_end = end;
++                effective.push(range.clone());
+             }
+         }
++        if normalize_ranges(effective)? != normalize_ranges(layout.to_vec())? {
++            return Err(invalid("RAM lineage does not cover the guest layout"));
++        }
+         Ok(Some(lineage))
+     }
+ 
+@@ -137,7 +219,8 @@ impl Lineage {
+         let logical_bytes = ranges.iter().map(|range| range.length).sum();
+         Self {
+             schema_version: 1, logical_bytes, allocated_bytes: 0,
+-            dirty_bytes: None, transferred_bytes: 0, full_base: false,
++            dirty_bytes: None, transferred_bytes: 0, effective_private_bytes: 0,
++            reclaimed_bytes: 0, full_base: false,
+             layers: vec![Layer {
+                 name: "000000.mem".into(), ranges, external_path: Some(path),
+             }],
+@@ -148,22 +231,43 @@ impl Lineage {
+     /// Unlinking the predecessor then cannot break this snapshot or a live mmap.
+     /// Owned layers remain hardlinked; an immutable external template base is
+     /// referenced directly and may reside on another filesystem.
+-    pub fn inherit(path: &Path, parent: Option<(&Path, &Self)>, logical_bytes: u64)
++    pub fn inherit(path: &Path, parent: Option<(&Path, &Self)>, logical_bytes: u64,
++                   replacements: &[Range])
+         -> io::Result<Self>
+     {
+         fs::create_dir(layer_dir(path))?;
+         let mut layers = Vec::new();
+         if let Some((parent_path, parent)) = parent {
+-            for layer in &parent.layers {
++            // Canonicalize both new and legacy parents newest-to-oldest. Each
++            // inherited layer contains only bytes not supplied by a newer
++            // parent layer or this checkpoint.
++            let mut covered = normalize_ranges(replacements.to_vec())?;
++            let mut retained = Vec::new();
++            for layer in parent.layers.iter().rev() {
++                let ranges = subtract_ranges(&layer.ranges, &covered)?;
++                covered.extend(layer.ranges.iter().cloned());
++                covered = normalize_ranges(covered)?;
++                if !ranges.is_empty() {
++                    retained.push((layer, ranges));
++                }
++            }
++            retained.reverse();
++            for (index, (layer, ranges)) in retained.into_iter().enumerate() {
++                let name = format!("{:06}.mem", index);
+                 if layer.external_path.is_none() {
+-                    fs::hard_link(layer.file_path(parent_path), layer.file_path(path))?;
++                    fs::hard_link(layer.file_path(parent_path), layer_dir(path).join(&name))?;
+                 }
+-                layers.push(layer.clone());
++                layers.push(Layer {
++                    name,
++                    ranges,
++                    external_path: layer.external_path.clone(),
++                });
+             }
+         }
+         Ok(Self {
+             schema_version: 1, logical_bytes, allocated_bytes: 0,
+-            dirty_bytes: None, transferred_bytes: 0, full_base: parent.is_none(), layers,
++            dirty_bytes: None, transferred_bytes: 0, effective_private_bytes: 0,
++            reclaimed_bytes: 0, full_base: parent.is_none(), layers,
+         })
+     }
+ 
+@@ -174,15 +278,22 @@ impl Lineage {
+     {
+         self.transferred_bytes = ranges.iter().map(|r| r.length).sum();
+         self.dirty_bytes = if self.full_base { None } else { Some(self.transferred_bytes) };
+-        let name = format!("{:06}.mem", self.layers.len());
+-        fs::hard_link(path, layer_dir(path).join(&name))?;
+-        self.layers.push(Layer { name, ranges, external_path: None });
++        if !ranges.is_empty() {
++            let name = format!("{:06}.mem", self.layers.len());
++            fs::hard_link(path, layer_dir(path).join(&name))?;
++            self.layers.push(Layer { name, ranges, external_path: None });
++        }
++        let mut inodes = HashSet::new();
+         for layer in &self.layers {
+             if layer.external_path.is_some() {
+                 continue;
+             }
++            self.effective_private_bytes += layer.ranges.iter().map(|range| range.length).sum::<u64>();
+             let file = File::open(layer.file_path(path))?;
+-            self.allocated_bytes += file.metadata()?.blocks() * 512;
++            let metadata = file.metadata()?;
++            if inodes.insert((metadata.dev(), metadata.ino())) {
++                self.allocated_bytes += metadata.blocks() * 512;
++            }
+             if durable { file.sync_all()?; }
+         }
+         let target = sidecar(path);
+@@ -227,14 +338,14 @@ mod tests {
+         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+         let layout = vec![Range { gpa: 0x40000000, offset: 0, length: 3 * page }];
+         fs::write(&base, vec![0x5a; (3 * page) as usize]).unwrap();
+-        Lineage::inherit(&base, None, 3 * page).unwrap()
++        Lineage::inherit(&base, None, 3 * page, &layout).unwrap()
+             .publish(&base, layout.clone(), false).unwrap();
+         let parent = Lineage::load(&base, &layout, page).unwrap().unwrap();
+         let file = File::create(&delta).unwrap();
+         file.set_len(3 * page).unwrap();
+         file.write_all_at(&vec![0; page as usize], page).unwrap();
+         let range = Range { gpa: 0x40000000 + page, offset: page, length: page };
+-        Lineage::inherit(&delta, Some((&base, &parent)), 3 * page).unwrap()
++        Lineage::inherit(&delta, Some((&base, &parent)), 3 * page, std::slice::from_ref(&range)).unwrap()
+             .publish(&delta, vec![range], false).unwrap();
+         fs::remove_file(&base).unwrap();
+         fs::remove_file(sidecar(&base)).unwrap();
+@@ -266,7 +377,7 @@ mod tests {
+         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+         let layout = vec![Range { gpa: 0x40000000, offset: 0, length: page }];
+         fs::write(&path, vec![0; page as usize]).unwrap();
+-        Lineage::inherit(&path, None, page).unwrap().publish(&path, layout.clone(), false).unwrap();
++        Lineage::inherit(&path, None, page, &layout).unwrap().publish(&path, layout.clone(), false).unwrap();
+         let changed = vec![Range { gpa: 0x80000000, offset: 0, length: page }];
+         assert!(Lineage::load(&path, &changed, page).is_err());
+     }
+@@ -286,6 +397,7 @@ mod tests {
+             &delta,
+             Some((&template, &Lineage::external_base(template.clone(), layout.clone()))),
+             2 * page,
++            &[Range { gpa: 0x40000000 + page, offset: page, length: page }],
+         ).unwrap().publish(
+             &delta,
+             vec![Range { gpa: 0x40000000 + page, offset: page, length: page }],
+@@ -299,4 +411,57 @@ mod tests {
+         fs::remove_file(&template).unwrap();
+         assert!(Lineage::load(&delta, &layout, page).is_err());
+     }
++
++    #[test]
++    fn inherited_ranges_are_split_merged_and_renamed_without_overlap() {
++        let directory = Directory::new();
++        let base = directory.0.join("base.mem");
++        let child_path = directory.0.join("child.mem");
++        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
++        let layout = vec![Range { gpa: 0x40000000, offset: 0, length: 5 * page }];
++        fs::write(&base, vec![0x5a; (5 * page) as usize]).unwrap();
++        Lineage::inherit(&base, None, 5 * page, &layout).unwrap()
++            .publish(&base, layout.clone(), false).unwrap();
++        let parent = Lineage::load(&base, &layout, page).unwrap().unwrap();
++        let replacements = vec![
++            Range { gpa: 0x40000000, offset: 0, length: page },
++            Range { gpa: 0x40000000 + 2 * page, offset: 2 * page, length: 2 * page },
++        ];
++        let inherited = Lineage::inherit(
++            &child_path, Some((&base, &parent)), 5 * page, &replacements).unwrap();
++        assert_eq!(inherited.layers.len(), 1);
++        assert_eq!(inherited.layers[0].ranges, vec![
++            Range { gpa: 0x40000000 + page, offset: page, length: page },
++            Range { gpa: 0x40000000 + 4 * page, offset: 4 * page, length: page },
++        ]);
++        let file = File::create(&child_path).unwrap();
++        file.set_len(5 * page).unwrap();
++        inherited.publish(&child_path, replacements, false).unwrap();
++        let child = Lineage::load(&child_path, &layout, page).unwrap().unwrap();
++        assert_eq!(child.layers.len(), 2);
++        assert_eq!(child.effective_private_bytes, 5 * page);
++        assert_eq!(child.layers.iter().flat_map(|layer| layer.ranges.iter())
++            .map(|range| range.length).sum::<u64>(), 5 * page);
++    }
++
++    #[test]
++    fn zero_dirty_checkpoint_adds_no_empty_layer() {
++        let directory = Directory::new();
++        let base = directory.0.join("base.mem");
++        let child_path = directory.0.join("child.mem");
++        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
++        let layout = vec![Range { gpa: 0x40000000, offset: 0, length: page }];
++        fs::write(&base, vec![0x5a; page as usize]).unwrap();
++        Lineage::inherit(&base, None, page, &layout).unwrap()
++            .publish(&base, layout.clone(), false).unwrap();
++        let parent = Lineage::load(&base, &layout, page).unwrap().unwrap();
++        let file = File::create(&child_path).unwrap();
++        file.set_len(page).unwrap();
++        Lineage::inherit(&child_path, Some((&base, &parent)), page, &[]).unwrap()
++            .publish(&child_path, vec![], false).unwrap();
++        let child = Lineage::load(&child_path, &layout, page).unwrap().unwrap();
++        assert_eq!(child.layers.len(), 1);
++        assert_eq!(child.transferred_bytes, 0);
++        assert_eq!(child.dirty_bytes, Some(0));
++    }
+ }

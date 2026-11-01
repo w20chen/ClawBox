@@ -39,6 +39,7 @@ IRQ_ACTIVE_PATCH_FILE=$SCRIPT_DIR/irq-routing-active-legacy.patch
 NUMA_CLEAN_FILE_PATCH_FILE=$SCRIPT_DIR/numa-clean-file-and-checkpoint-summary.patch
 CGROUP_BIRTH_PATCH_FILE=$SCRIPT_DIR/cgroup-birth.patch
 COLD_STREAM_PATCH_FILE=$SCRIPT_DIR/cold-snapshot-streaming.patch
+MEMORY_RECLAIM_PATCH_FILE=$SCRIPT_DIR/memory-snapshot-reclaim.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -70,6 +71,7 @@ PATCH_FILES=(
   "$NUMA_CLEAN_FILE_PATCH_FILE"
   "$CGROUP_BIRTH_PATCH_FILE"
   "$COLD_STREAM_PATCH_FILE"
+  "$MEMORY_RECLAIM_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -151,6 +153,13 @@ apply_cold_stream_patch() {
   fi
 }
 
+apply_memory_reclaim_patch() {
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$MEMORY_RECLAIM_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$MEMORY_RECLAIM_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$MEMORY_RECLAIM_PATCH_FILE"
+  fi
+}
+
 # The final birth patch supersedes the priority patch's attachment hunk.
 if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$CGROUP_BIRTH_PATCH_FILE" >/dev/null 2>&1; then
   if [[ -f "$PATCHSET_STAMP" ]]; then
@@ -160,6 +169,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   fi
   apply_upstream_pagemap_fix
   apply_cold_stream_patch
+  apply_memory_reclaim_patch
   git -C "$SOURCE_DIR" diff --check
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
@@ -246,6 +256,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   apply_final_placement_patches
   apply_upstream_pagemap_fix
   apply_cold_stream_patch
+  apply_memory_reclaim_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone priority patch set already prepared: $SOURCE_DIR"
@@ -352,6 +363,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
   apply_final_placement_patches
   apply_upstream_pagemap_fix
   apply_cold_stream_patch
+  apply_memory_reclaim_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -416,10 +428,11 @@ apply_once "$CGROUP_RECLAIM_PATCH_FILE" "reclaim file cache when returning nativ
 apply_once "$NETWORK_ASYNC_GC_PATCH_FILE" "run stale network-policy GC outside Cubelet readiness"
 apply_once "$IRQ_ROUTING_PATCH_FILE" "batched and deferred interrupt routing"
 apply_once "$IRQ_ACTIVE_PATCH_FILE" "activate only attached legacy IRQ routes"
+apply_upstream_pagemap_fix
 apply_once "$NUMA_CLEAN_FILE_PATCH_FILE" "retain shared file backing during NUMA migration and summarize checkpoint timings"
 apply_once "$CGROUP_BIRTH_PATCH_FILE" "start shims in their assigned cgroup without migrating shared mappings"
-apply_upstream_pagemap_fix
 apply_cold_stream_patch
+apply_memory_reclaim_patch
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
