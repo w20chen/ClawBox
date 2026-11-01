@@ -263,6 +263,69 @@ def test_active_sampler_reads_fresh_charge_without_reopening_counter(tmp_path, m
     assert descriptor.closed
 
 
+def test_execution_samplers_share_one_timer_and_keep_individual_samples():
+    import threading
+    from clawbox.experiments.memory import _SandboxSamplingLoop
+
+    class Reader:
+        interval_s = 0.01
+
+        def __init__(self):
+            self.samples = 0
+
+        def _sample(self):
+            self.samples += 1
+
+    loop = _SandboxSamplingLoop()
+    readers = [Reader() for _ in range(1280)]
+    before = set(threading.enumerate())
+    try:
+        for reader in readers:
+            loop.add(reader)
+        deadline = time.monotonic() + 3
+        while min(reader.samples for reader in readers) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert min(reader.samples for reader in readers) >= 2
+        assert set(threading.enumerate()) - before == {loop._thread}
+    finally:
+        for reader in readers:
+            loop.remove(reader)
+    stopped = [reader.samples for reader in readers]
+    time.sleep(0.03)
+    assert [reader.samples for reader in readers] == stopped
+
+
+def test_shared_sampler_removal_waits_for_inflight_read():
+    from threading import Event, Thread
+    from clawbox.experiments.memory import _SandboxSamplingLoop
+
+    entered, release, removed = Event(), Event(), Event()
+
+    class Reader:
+        interval_s = 0.001
+
+        def _sample(self):
+            entered.set()
+            release.wait(3)
+
+    loop, reader = _SandboxSamplingLoop(), Reader()
+    loop.add(reader)
+    assert entered.wait(2)
+
+    def remove():
+        loop.remove(reader)
+        removed.set()
+
+    thread = Thread(target=remove)
+    thread.start()
+    try:
+        assert not removed.wait(0.03)
+    finally:
+        release.set()
+        thread.join(3)
+    assert removed.is_set()
+
+
 def test_rss_reader_rejects_replaced_process_and_closes_files(tmp_path):
     from clawbox.experiments.memory import ProcessRSSReader
     process = tmp_path/'123'; process.mkdir()

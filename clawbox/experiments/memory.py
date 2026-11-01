@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Full, Queue
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from collections.abc import Callable
 
 
@@ -755,6 +755,49 @@ class ProcessRSSReader:
         self.valid = False
 
 
+class _SandboxSamplingLoop:
+    """One timer thread for all execution-window counter readers in a worker.
+
+    Sampling and removal share the condition lock: removal cannot return while
+    a read is in flight, so stop() can safely take its final sample and close FDs.
+    Each reader keeps its own interval; overdue samples are never fabricated.
+    """
+
+    def __init__(self):
+        self._condition = Condition()
+        self._samplers = {}
+        self._thread = None
+
+    def add(self, sampler):
+        with self._condition:
+            self._samplers[sampler] = time.monotonic() + sampler.interval_s
+            if self._thread is None:
+                self._thread = Thread(target=self._run, name='sandbox-counter-sampler', daemon=True)
+                self._thread.start()
+            self._condition.notify()
+
+    def remove(self, sampler):
+        with self._condition:
+            self._samplers.pop(sampler, None)
+            self._condition.notify()
+
+    def _run(self):
+        with self._condition:
+            while True:
+                now = time.monotonic()
+                for sampler, due in tuple(self._samplers.items()):
+                    if due <= now:
+                        sampler._sample()
+                        self._samplers[sampler] = time.monotonic() + sampler.interval_s
+                deadline = min(self._samplers.values(), default=None)
+                self._condition.wait(
+                    None if deadline is None else max(0, deadline - time.monotonic())
+                )
+
+
+_sandbox_sampling_loop = _SandboxSamplingLoop()
+
+
 class SandboxRSSSampler:
     """Execution-window host RSS sampler for one CubeSandbox microVM."""
 
@@ -772,10 +815,8 @@ class SandboxRSSSampler:
         self._charge_reader = None
         self.proc_root = proc_root
         self.interval_s = interval_s
-        self._stop = Event()
         self._lock = Lock()
         self._samples: list[int] = []
-        self._thread: Thread | None = None
         # A Tool is pinned resident for the execution window. Discover its
         # processes once, not with a host-wide /proc scan every 50 ms per tool.
         # Bind retained proc descriptors to the discovered process start time.
@@ -811,17 +852,12 @@ class SandboxRSSSampler:
         self._sample()
         sampled = time.monotonic()
         self.startup_timing['first_sample_s'] = sampled-started
-        self._thread = Thread(
-            target=self._run, name=f"sandbox-rss-{self.sandbox_id[:8]}", daemon=True,
-        )
-        self._thread.start()
+        _sandbox_sampling_loop.add(self)
         self.startup_timing['thread_start_s'] = time.monotonic()-sampled
 
     def stop(self) -> dict[str, int | str | None]:
-        self._stop.set()
-        if self._thread is not None:
-            with span('sampler.join'):
-                self._thread.join()
+        with span('sampler.join'):
+            _sandbox_sampling_loop.remove(self)
         with span('sampler.final_sample'):
             self._sample()
         self._rss_reader.close()
@@ -858,10 +894,6 @@ class SandboxRSSSampler:
             **faults,
             "fault_counter_scope": "host_vm_processes_execution_window",
         }
-
-    def _run(self) -> None:
-        while not self._stop.wait(self.interval_s):
-            self._sample()
 
     def _sample(self) -> None:
         if self.cgroup is not None:
