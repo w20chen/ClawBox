@@ -14,88 +14,49 @@ from this file without relying on prior conversation.
 
 ## 1. Status at handoff
 
-The host-live implementation is deployed at ClawBox `ac7bc09`; Full-1280
-acceptance remains pending. Requirements below remain the acceptance target,
-not a claim that every validation gate has passed.
+**Full-1280 acceptance is incomplete. Work is stopping at the user's request.**
+The operational continuation handoff is
+[HOST_KB_FULL1280_STATUS_HANDOFF_20261101.md](HOST_KB_FULL1280_STATUS_HANDOFF_20261101.md).
+Read it before any launch, rebuild, or deployment; it names the active diagnostic,
+failed-run evidence, deployed source, network settings and ordered remaining work.
 
-The Runtime and 503 selected Tool templates have been refreshed. Qualification
-passed for all 503 templates. Real VM gates verified private learned journals,
-measured observations, same-attempt recovery without replaying completed calls,
-and an explicit cold attempt. A trace interrupted during Tool execution remains
-incomplete; untouched queued traces can continue on plain resume. The Linux
-SSH/recovery test group passed 89 tests. ClawTune remains unchanged at the
-revision below, including its explicitly marked imputed targets.
+Latest implementation commit `8483f31` fixes split RAM mapping totals in template
+sharing verification (34 Linux tests and four real 8 GiB template proofs passed).
+Commit `35bccb8` fixes concurrent admissions reusing a pre-restore SSH route
+(122 Linux tests passed). Both were committed and pushed. The real-VM concurrency
+gate is incomplete: the diagnostic failed initial SSH authentication before its
+checkpoint. That is not evidence that the restore fix failed or passed.
 
-Verification artifacts on Kunpeng are under
-`/data/full1280-hostkb-pagemap-bit61-20261101`: `qualification-v9/qualification.json`,
-`recovery-gate/same-attempt-verification.json`,
-`recovery-gate/cold-attempt-verification.json`, and
-`recovery-gate/live-vm-filesystem-inspection.json`.
-The previous acceptance attempt, `full-c1280-hostkb-freshssh-20261101`, attempt
-`attempt-3146d1cb1e5045a5`, failed after a pause API HTTP 408 aborted the shared
-policy controller. Its worker then needed explicit abort to finish exiting;
-cleanup is verified. Evidence is `host/freshssh-terminal-audit.json` and
-`host/freshssh-failed-checkpoint-phases.jsonl`.
-The failed-session replay cancellation fix passed 36 tests on Windows and
-Kunpeng (`host/gateway-cancel-linux-tests.txt`). Package network repair is
-verified on the host and a disposable PennyLane Tool VM: APT update/install,
-pip install/import, repeated update, and cleanup passed. Evidence is under
-`network-check/`; the prepared next specification is
-`experiment-network-caches.yaml`. It explicitly selects the existing host APT
-and PyPI caches with internet access enabled. Host proxy access depends on the
-saved `kunpeng-tunnel` SSH forward remaining connected. Earlier failed runs
-remain failure evidence. Do not refresh the templates again for host-only changes.
-The PyPI cache's `mirror_no_project_list` setting was enabled at
-2026-11-01 10:40:42 UTC during the current run. Before this change, full-index
-timeouts caused false 404 responses for existing packages `py` and `build`;
-afterward both returned 200 and an isolated pip install passed. The upstream
-and cached files were retained without a restart. Configuration backups and
-verification are in `network-check/`. Current-run timings therefore span two
-cache configurations and are not a fixed-environment performance baseline.
+The latest Full run, `full-c1280-hostkb-network-20261101`, attempt
+`attempt-ff7f2ba60f2d4dbc`, arm `13eefa6530ff5eedc6b6217f`, used `ac7bc09`
+and is terminal failed. Cleanup is verified and its worker/supervisor exited.
+A native pause HTTP 408 aborted it after 1,034 pairs became ready and 159
+successful session measurements. Preserve `host/network-terminal-audit.json`
+under `/data/full1280-hostkb-pagemap-bit61-20261101`. No new Full is launched.
 
-The current run is `full-c1280-hostkb-network-20261101`, attempt
-`attempt-ff7f2ba60f2d4dbc`, arm `13eefa6530ff5eedc6b6217f`, at `ac7bc09`.
-The existing 503-case qualification receipt passed validation for its specification.
-An isolated same-template WARM/WARM/COLD round trip preserved process state;
-the COLD checkpoint took 1.62 seconds. This does not resolve the previous
-load-dependent stall. Native binaries remain unchanged. The read-only watcher
-under `host/checkpoint-watch-full-c1280-hostkb-network-20261101/` captures native
-thread stacks when a checkpoint exceeds 10 seconds, before timeout cleanup.
-Check the actual worker and terminal results before interpreting this run.
-The watcher captured a later 67.71-second successful checkpoint, request
-`3420de2f-3373-4a0c-8fb3-ffbde4b534e9`; its VM snapshot phase took 62.66 seconds.
-This is slow-checkpoint evidence, not another timeout. A bounded sampler under
-`host/native-samples-network-full/` is prepared to collect up to three short VMM
-CPU profiles if further slow checkpoints occur; check its receipts before
-claiming that any profiles were captured.
+Runtime and all 503 selected Tool templates were refreshed and qualified.
+Host-only mutable KBs, shared seed/private overlays, marked imputation, real-VM
+same-attempt recovery, explicit cold attempts and absence of local mutable VM KB
+were verified in the scopes named in the continuation handoff. ClawTune is
+unchanged. Do not repeat the entire template refresh for host-only fixes.
 
-The current run is not clean acceptance evidence yet. Its `urlman-12` validation
-has a proven false negative: the original recorded patch and current patch are
-identical, but neither contains the literal string required by the validator.
-`input-corrections/urlman-validation-evidence.json` proves this and names a
-separate corrected workload manifest; frozen inputs/results remain unchanged.
-PennyLane-3024, -3477, -3057, and -5407 hit real guest OOM in their 3 GiB Tool VMs;
-see `host/network-guest-pennylane-3024-exit.txt` and
-`host/network-guest-pennylane-3477-oom.txt`, and the additional
-`host/network-guest-oom-PennyLaneAI__pennylane-*.txt` captures. Host cgroup OOM counters stayed
-zero and do not rule out guest OOM. Targeted capacity probes are prepared in
-`capacity-checks/plan.json` but have not been executed; 8 GiB is a diagnostic
-ceiling, not measured required memory. Check affected template capacity before
-claiming successful workload execution; preserve the other qualified templates.
-The live run also reported exit 255 immediately after restores for lektor-960
-and setuptools_scm-505. `host/network-restore-route-order.json` proves concurrent
-admissions reused the old port while the restoring callback waited for memory.
-The worker fix at `35bccb8` invalidates that route and checks the restored bridge before
-releasing its lifecycle lock for the reservation wait. Focused tests passed
-on Windows (120 passed, 2 skipped) and Kunpeng (122 passed), including concurrent
-admission ordering. This host-only fix is staged separately from the current
-run; real-VM validation and the next Full acceptance run remain pending.
+Four PennyLane traces hit guest OOM at 3 GiB. Four 8 GiB diagnostic templates
+were registered from the same immutable images and passed sharing/qualification.
+Their normal-CLI replay `capacity-c4-hostkb-20261101` is running under
+`capacity-checks/runs`; inspect its actual state first. 8 GiB is not yet proven
+sufficient. A separate corrected urlman validation manifest is ready; the frozen
+failed Full input remains unchanged.
 
-Remaining: complete Full-1280 and audit coverage, errors, cleanup, and the
-measurements in section 21. Worker interruption recovery is verified; a host
-reboot retaining this redesign's learned KB has not been exercised. Isolated
-package/bootstrap and CLI checks do not establish fresh bare-metal Cube service
-installation. Keep these limits explicit in verification evidence.
+Project networking and actual APT/pip installs are verified on Kunpeng and a
+Tool VM. Original port1080 and general shell settings are preserved; project
+HTTP8118 and cache settings depend on the saved SSH tunnel. The failed Full spans
+a mid-run cache-setting change and is not a fixed-environment performance baseline.
+
+Remaining consequential work: finish guest-capacity and restore-route validation,
+resolve the load-dependent COLD checkpoint stall, then run one new Full-1280 and
+complete the section21 acceptance/measurement audit. Native captures show severe
+memory pressure; no exact bottleneck or tested remedy is established. Actual
+host-reboot KB recovery and clean-machine Cube installation also remain unproven.
 
 Implementation baseline (2026-11-01; the handoff already had user edits):
 
@@ -1317,22 +1278,24 @@ Before rebuilding on Kunpeng:
 
 ## 23. Immediate next action for the implementing agent
 
-1. Recheck both git worktrees and read applicable `AGENTS.md` files.
-2. Preserve the tracked failure-debug handoff and all unrelated work. Reconnect
-   to Kunpeng and inspect the actual checkout/deployment before any mutation.
-3. Write the protocol schemas and reference full-copy differential tests first,
-   including command/outcome context and receipt/view-version semantics.
-4. Implement the shared seed/pair-overlay layer before changing VM behavior.
-5. Do not rebuild or run Full-1280 until local tests and the single-pair
-   Kunpeng gate pass.
-6. Commit and push each important verified milestone in the appropriate
-   repository, keeping ClawBox and ClawTune revisions recorded together in the
-   validation evidence.
+Work is paused at the user's request. On an authorized continuation:
+
+1. Read `HOST_KB_FULL1280_STATUS_HANDOFF_20261101.md`, check both worktrees and
+   inspect the existing four-case diagnostic before starting anything new.
+2. Resolve the specific remaining capacity, restored-route validation and
+   checkpoint-pressure issues from their evidence. Preserve frozen runs, all
+   qualified unchanged templates, and all unrelated/anns data.
+3. Use a new run ID for the next Full-1280 only after the consequential fixes
+   and input corrections are ready. Do not repeat completed protocol work or
+   rebuild all images for host-only changes.
+4. Audit this document's original acceptance requirements at their stated scope;
+   commit and push verified ClawBox milestones. Do not modify ClawTune.
 
 The redesign is complete only when the host owns all mutable KB state, each
 pair is independently isolated by host mapping, same-attempt recovery works,
 new attempts start cold, admission uses the pair's live host prediction, and
-future sharing policies can be changed without modifying VM clients.
+future sharing policies can be changed without modifying VM clients, with the
+required Full-1280 acceptance and measurements verified.
 
 ## 24. Keeping this handoff usable for later work
 
