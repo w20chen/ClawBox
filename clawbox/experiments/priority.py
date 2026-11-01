@@ -157,6 +157,7 @@ def session_priority(index: int, concurrency: int, repetition: int) -> str:
 class PriorityDomain:
     leaf_release_grace_seconds = 5.0
     leaf_kill_grace_seconds = 5.0
+    native_vcpu_ready_grace_seconds = 5.0
 
     def __init__(self, parent: Path, *, concurrency: int, repetition: int,
                  registry: Path = REGISTRY, placements: dict | None = None,
@@ -973,25 +974,35 @@ class PriorityDomain:
                 f'CubeSandbox native cgroup excludes requested CPUs at {actual}: '
                 f'requested={required_cpus}, effective={cpus}'
             )
-        threads = []
-        for tid_text in (actual/'cgroup.threads').read_text().split():
-            tid = int(tid_text)
-            try:
-                status = dict(
-                    line.split(':', 1)
-                    for line in Path(f'/proc/{tid}/status').read_text().splitlines()
-                    if ':' in line
+        deadline = time.monotonic() + self.native_vcpu_ready_grace_seconds
+        while True:
+            threads = []
+            for tid_text in (actual/'cgroup.threads').read_text().split():
+                tid = int(tid_text)
+                try:
+                    status = dict(
+                        line.split(':', 1)
+                        for line in Path(f'/proc/{tid}/status').read_text().splitlines()
+                        if ':' in line
+                    )
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                threads.append({
+                    'tid': tid,
+                    'name': status['Name'].strip(),
+                    'cpus_allowed': status['Cpus_allowed_list'].strip(),
+                })
+            vcpus = [
+                thread for thread in threads
+                if thread['name'].startswith('vcpu')
+            ]
+            if vcpus:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f'CubeSandbox native cgroup has no vCPU threads: {actual}'
                 )
-            except (FileNotFoundError, ProcessLookupError):
-                continue
-            threads.append({
-                'tid': tid,
-                'name': status['Name'].strip(),
-                'cpus_allowed': status['Cpus_allowed_list'].strip(),
-            })
-        vcpus = [thread for thread in threads if thread['name'].startswith('vcpu')]
-        if not vcpus:
-            raise RuntimeError(f'CubeSandbox native cgroup has no vCPU threads: {actual}')
+            time.sleep(.05)
         requested = parse_cpu_list(required_cpus)
         escaped = [
             thread for thread in vcpus
