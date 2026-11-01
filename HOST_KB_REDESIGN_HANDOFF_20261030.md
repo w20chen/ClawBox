@@ -14,7 +14,7 @@ from this file without relying on prior conversation.
 
 ## 1. Status at handoff
 
-The host-live implementation is deployed at ClawBox `4563173`; Full-1280
+The host-live implementation is deployed at ClawBox `ac7bc09`; Full-1280
 acceptance remains pending. Requirements below remain the acceptance target,
 not a claim that every validation gate has passed.
 
@@ -31,22 +31,30 @@ Verification artifacts on Kunpeng are under
 `recovery-gate/same-attempt-verification.json`,
 `recovery-gate/cold-attempt-verification.json`, and
 `recovery-gate/live-vm-filesystem-inspection.json`.
-The latest acceptance attempt, `full-c1280-hostkb-freshssh-20261101`, attempt
+The previous acceptance attempt, `full-c1280-hostkb-freshssh-20261101`, attempt
 `attempt-3146d1cb1e5045a5`, failed after a pause API HTTP 408 aborted the shared
 policy controller. Its worker then needed explicit abort to finish exiting;
 cleanup is verified. Evidence is `host/freshssh-terminal-audit.json` and
-`host/freshssh-failed-checkpoint-phases.jsonl`. No Full run is active.
+`host/freshssh-failed-checkpoint-phases.jsonl`.
 The failed-session replay cancellation fix passed 36 tests on Windows and
-Kunpeng (`host/gateway-cancel-linux-tests.txt`); it has not had another Full run.
-Resolve the checkpoint stall before another attempt. Package network repair is
+Kunpeng (`host/gateway-cancel-linux-tests.txt`). Package network repair is
 verified on the host and a disposable PennyLane Tool VM: APT update/install,
 pip install/import, repeated update, and cleanup passed. Evidence is under
 `network-check/`; the prepared next specification is
 `experiment-network-caches.yaml`. It explicitly selects the existing host APT
 and PyPI caches with internet access enabled. Host proxy access depends on the
 saved `kunpeng-tunnel` SSH forward remaining connected. Earlier failed runs
-remain failure evidence. Do not refresh the
-templates again for host-only changes.
+remain failure evidence. Do not refresh the templates again for host-only changes.
+
+The current run is `full-c1280-hostkb-network-20261101`, attempt
+`attempt-ff7f2ba60f2d4dbc`, arm `13eefa6530ff5eedc6b6217f`, at `ac7bc09`.
+The existing 503-case qualification receipt passed validation for its specification.
+An isolated same-template WARM/WARM/COLD round trip preserved process state;
+the COLD checkpoint took 1.62 seconds. This does not resolve the previous
+load-dependent stall. Native binaries remain unchanged. The read-only watcher
+under `host/checkpoint-watch-full-c1280-hostkb-network-20261101/` captures native
+thread stacks when a checkpoint exceeds 10 seconds, before timeout cleanup.
+Check the actual worker and terminal results before interpreting this run.
 
 Remaining: complete Full-1280 and audit coverage, errors, cleanup, and the
 measurements in section 21. Worker interruption recovery is verified; a host
