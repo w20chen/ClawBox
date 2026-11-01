@@ -1,0 +1,43 @@
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -2509,6 +2509,15 @@
+                 .seek(SeekFrom::Start(file_offset))
+                 .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+         }
++        // A first-generation COLD base can be a whole guest-sized range.
++        // Flush and release bounded batches so copying it does not compete
++        // with resident guests for an entire second copy in the page cache.
++        // WARM/tmpfs must retain its pages; small incremental ranges continue
++        // to use the final snapshot-wide flush below.
++        const COLD_BATCH: u64 = 16 * 1024 * 1024;
++        let stream_cold = range.length > COLD_BATCH
++            && !crate::snapshot_lineage::volatile(memory_file)
++                .map_err(|e| MigratableError::MigrateSend(e.into()))?;
+         // Here we are manually handling the retry in case we can't read
+         // the whole region at once because we can't use the implementation
+         // from vm-memory::GuestMemory of write_all_to() as it is not
+@@ -2519,10 +2528,23 @@
+                 .write_volatile_to(
+                     GuestAddress(range.gpa + offset),
+                     &mut memory_file.as_fd(),
+-                    (range.length - offset) as usize,
++                    if stream_cold {
++                        (range.length - offset).min(COLD_BATCH) as usize
++                    } else {
++                        (range.length - offset) as usize
++                    },
+                 )
+                 .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++            if bytes_written == 0 {
++                return Err(MigratableError::MigrateSend(
++                    io::Error::new(io::ErrorKind::WriteZero, "snapshot write made no progress").into(),
++                ));
++            }
+             offset += bytes_written as u64;
++            if stream_cold {
++                discard_cold_snapshot_cache(memory_file)
++                    .map_err(|e| MigratableError::MigrateSend(e.into()))?;
++            }
+ 
+             if offset == range.length {
+                 break;

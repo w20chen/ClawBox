@@ -91,6 +91,9 @@ fix, and builds Cubelet and Shim. It does not install or restart services.
 Repeating the same patch set
 reuses the source checkout. If the patch set changes incompatibly, preserve the
 old checkout and pass a new empty `--source` directory.
+The COLD snapshot writer flushes large contiguous ranges in bounded batches.
+Updating this native path requires rebuilding/installing the host binaries and
+a new run ID; guest templates remain reusable. WARM snapshots retain their cache.
 
 Managed NUMA placement starts shims directly in their assigned cgroup. The host
 must use cgroup v2 and permit `clone3(CLONE_INTO_CGROUP)` (Linux 5.7 or newer).
