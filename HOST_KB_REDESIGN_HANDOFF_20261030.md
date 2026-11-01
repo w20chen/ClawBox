@@ -14,9 +14,33 @@ from this file without relying on prior conversation.
 
 ## 1. Status at handoff
 
-This is the implementation target, not a description of deployed behavior.
-Host-live implementation is in progress in ClawBox; it is not yet deployment-qualified. No images/templates have been refreshed and no
-new full experiment has run. Verification evidence is separate from this handoff.
+The host-live implementation is deployed at ClawBox `4563173`; Full-1280
+acceptance remains pending. Requirements below remain the acceptance target,
+not a claim that every validation gate has passed.
+
+The Runtime and 503 selected Tool templates have been refreshed. Qualification
+passed for all 503 templates. Real VM gates verified private learned journals,
+measured observations, same-attempt recovery without replaying completed calls,
+and an explicit cold attempt. A trace interrupted during Tool execution remains
+incomplete; untouched queued traces can continue on plain resume. The Linux
+SSH/recovery test group passed 89 tests. ClawTune remains unchanged at the
+revision below, including its explicitly marked imputed targets.
+
+Verification artifacts on Kunpeng are under
+`/data/full1280-hostkb-pagemap-bit61-20261101`: `qualification-v9/qualification.json`,
+`recovery-gate/same-attempt-verification.json`,
+`recovery-gate/cold-attempt-verification.json`, and
+`recovery-gate/live-vm-filesystem-inspection.json`.
+The active acceptance run is `full-c1280-hostkb-freshssh-20261101`, attempt
+`attempt-3146d1cb1e5045a5`, under `runs/`. Check its process and terminal evidence
+before any restart. Earlier failed runs are preserved and are not acceptance
+results. Do not refresh the templates again for host-only changes.
+
+Remaining: complete Full-1280 and audit coverage, errors, cleanup, and the
+measurements in section 21. Worker interruption recovery is verified; a host
+reboot retaining this redesign's learned KB has not been exercised. Isolated
+package/bootstrap and CLI checks do not establish fresh bare-metal Cube service
+installation. Keep these limits explicit in verification evidence.
 
 Implementation baseline (2026-11-01; the handoff already had user edits):
 
@@ -28,15 +52,15 @@ Implementation baseline (2026-11-01; the handoff already had user edits):
 - New live training uses current ClawTune marked imputation, by user decision.
 - This handoff and `FULL_1280_FAILURE_DEBUG_HANDOFF_20261028.md` are now
   tracked. Preserve the latter as unrelated work.
-- Kunpeng is reachable. Implementation and validation are in progress; no final
-  corpus refresh or Full-1280 acceptance run has completed.
+- Kunpeng is reachable; the refreshed corpus is qualified. No Full-1280
+  acceptance run has completed successfully yet.
 - User scope correction: do not modify ClawTune. All adaptations belong to
   ClawBox; use unchanged upstream at the revision above. Any later sections
   naming ClawTune edit locations identify source to borrow into ClawBox instead.
 
 
-Before starting implementation, recheck both repositories and the remote
-Kunpeng state. Preserve unrelated changes and all data related to `anns`.
+Before continuing, recheck both repositories and the remote Kunpeng state.
+Preserve unrelated changes and all data related to `anns`.
 
 Changes from the original handoff: remove the deleted EdgeKappa work; correct
 seed sizes; reuse existing incremental Lattice maintenance; account for command
@@ -1270,7 +1294,5 @@ extension boundary is required now. If implementation would change a model's
 learning semantics or lose an input, explain that consequence and ask before
 making the change.
 
-Validation of this handoff update: local source/revision/seed inspection and
-document consistency checks only. No implementation tests, VM runs, installation,
-rebuilds, or performance measurements were performed. Remote verification was
-blocked by the SSH timeout recorded in section 1.
+Section 1 records the current implementation and validation status. Detailed
+verification artifacts remain separate from this requirements document.
