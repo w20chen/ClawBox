@@ -1,6 +1,6 @@
 # Host KB and Full-1280 continuation handoff
 
-Continuation resumed at the user's request on 2026-11-01. Updated after the real pair-learning gate, approximately 21:50 Asia/Shanghai. Full-1280 acceptance remains incomplete.
+Continuation resumed at the user's request on 2026-11-01. Updated approximately 22:28 Asia/Shanghai after cache proxy verification. Full-1280 acceptance remains incomplete.
 This is an operational handoff; the requirements remain in
 `HOST_KB_REDESIGN_HANDOFF_20261030.md`.
 
@@ -68,6 +68,45 @@ avoid repeated Full runs. Preserve 160 CPUs and 1,000 GiB across NUMA0/1.
   and exact current qualification; launch one Full-1280; audit section 21 metrics.
   Isolated clean-machine install and actual host-reboot recovery remain unproven;
   do not reboot/reinstall the shared host to claim them.
+- Additional preflight fixes, committed and pushed: `a60b239` counts the actual
+  per-session guest shapes instead of multiplying the single largest template
+  across 1,280 sessions; `1631e90` reuses the matching subset of prior sharing
+  proofs after selected templates are replaced. Linux: 52 focused tests passed.
+  `full-ready/experiment.yaml` and `workload.json` retain all 503 original cases,
+  original traces, 160 CPUs, 500 GiB/node, 448/480 GiB watermarks and shared pool.
+  Four shapes are 8/8/16/8 GiB for 3024/3057/3477/5407; urlman validator is corrected.
+  `full-ready/template-sharing.json` reused **503/503** proofs with zero new probes.
+  Evidence: `host/final-preflight-progress-1793541834694247597.json`.
+- All 16 saved PennyLane wheel URLs passed SHA256 verification. The install-only
+  gate's qualification `qualification-809098cdcd17` was explicitly aborted with
+  verified cleanup after proving the cache bypassed the working host proxy.
+  No formal run `package-install-gate-20261101` was launched. Preserve this attempt.
+- `a315b3d` adds explicit upstream HTTP proxy and Linux host-network options to
+  the maintained PyPI-cache script, with HTTP readiness and repeat-start checks.
+  Actual cache now uses `http://127.0.0.1:8118`, binds `193.124.7.2:3141`, and retains
+  `/data/clawbox-performance-20261022T154600Z/pypi-cache-service/data` unchanged.
+  Backup container `clawbox-pypi-cache-before-proxy-20261101` must remain stopped;
+  do not run two servers against this data. Before/after inspect receipts and
+  apply log are under `host/cache-{before,after}-proxy-container.json` and
+  `host/cache-proxy-apply.log`. Isolated fresh cache init passed and cleaned up:
+  `host/cache-isolated-init-1793542928284069584.json` (not a clean Cube host test).
+  The real cache fetched a complete 30,953,174-byte SciPy wheel in 13.97 seconds,
+  SHA256 verified: `network-check/proxy-cache-scipy-1793543189766304522.json`.
+  An initial five-second upstream TLS timeout is retained in container logs;
+  the subsequent complete fetch passed. No package versions were changed.
+- Active install-only continuation: normal CLI launch of
+  `package-install-proxy-gate-20261101` under `package-install-gate/runs`, using
+  frozen source `/home/weitianc/clawbox-hostkb-20261101/source/ClawBox-full-ready-a315b3d`
+  and explicit revision `a315b3dc2f158e67ca27c349b34d2df0c8ee0d48`.
+  Log: `package-install-gate/launch-proxy.log`. Inspect existing state before
+  starting anything else. `host/audit-package-gate-final.py` requires terminal
+  success, cleanup and both exact pip executions exiting zero.
+  Then run `host/qualify-full-ready.sh` once; it requires that audit and writes
+  `full-ready/qualification.json`, `.log`, and `.exit`. Full has not launched.
+  Read-only Full observers are prepared as `host/watch-full-ready-host.py` and
+  `host/watch-full-ready-checkpoints.py`; the latter limits captures to two slow
+  checkpoints (10/30/60 seconds each). The tentative unique Full run ID is
+  `full-c1280-hostkb-verified-20261101`, under the original `runs` root.
 
 ## Continuation milestones
 
