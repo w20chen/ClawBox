@@ -104,7 +104,10 @@ def test_runtime_client_uses_authenticated_host_prediction_and_rejects_missing_r
         client = RemoteKnowledgeClient(SimpleNamespace(host_kb_endpoint=session.url,
             host_kb_token=session.token, host_kb_session_id='a', host_kb_timeout_seconds=3., tool_resource_repo='repo'))
         request = SimpleNamespace(tool_name='exec', event_id='event', tool_call_id='call',
-            raw_params={'command':'sleep 1'}, command_context={})
+            raw_params={'command': (
+                'CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS=1200\n'
+                'sleep 1'
+            )}, command_context={})
         try:
             prediction = client.predict(request)
             receipt = prediction.tool_resource['host_kb']['prediction_receipt']

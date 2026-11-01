@@ -638,9 +638,6 @@ def validate_native_tool_join(
         if execution_id in expected:
             raise ValueError(f"duplicate policy execution identity: {execution_id}")
         expected[execution_id] = request
-    if not expected:
-        raise ValueError("native Tool join contains no completed policy executions")
-
     runtime_by_id: dict[str, list[dict[str, Any]]] = {}
     preflight_rejected: list[str] = []
     if runtime_span_records is not None:

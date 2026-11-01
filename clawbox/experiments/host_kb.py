@@ -308,11 +308,35 @@ class HostKnowledgeManager:
                     threads=process.num_threads(), active_scopes=len(self.scopes))
 
     def summary(self):
-        return {**self.identity, 'seed_file_bytes': sum(p.stat().st_size for p in self.seed.path.glob('*.json')),
-                'journal_bytes': sum((s.path / 'journal.jsonl').stat().st_size
-                                     for s in self.scopes.values() if (s.path / 'journal.jsonl').exists()),
-                'scopes': {sid: {'generation': s.view.generation,
-            'learning_valid': not s.degraded and len(s.committed) == len(s.claims),
-            'uncommitted_execution_ids': sorted(set(s.claims) - set(s.committed)),
-            'claimed_executions': len(s.claims),
-            'committed_executions': len(s.committed)} for sid, s in self.scopes.items()}}
+        # Sessions reserve scopes concurrently.  Snapshot the registry under
+        # its owner lock, then read each overlay under its own lock so a
+        # per-session result cannot race another session being registered.
+        with self.lock:
+            scopes = tuple(self.scopes.items())
+        scope_summaries = {}
+        journal_bytes = 0
+        for session_id, scope in scopes:
+            with scope.lock:
+                journal = scope.path / 'journal.jsonl'
+                if journal.exists():
+                    journal_bytes += journal.stat().st_size
+                scope_summaries[session_id] = {
+                    'generation': scope.view.generation,
+                    'learning_valid': (
+                        not scope.degraded
+                        and len(scope.committed) == len(scope.claims)
+                    ),
+                    'uncommitted_execution_ids': sorted(
+                        set(scope.claims) - set(scope.committed)
+                    ),
+                    'claimed_executions': len(scope.claims),
+                    'committed_executions': len(scope.committed),
+                }
+        return {
+            **self.identity,
+            'seed_file_bytes': sum(
+                path.stat().st_size for path in self.seed.path.glob('*.json')
+            ),
+            'journal_bytes': journal_bytes,
+            'scopes': scope_summaries,
+        }

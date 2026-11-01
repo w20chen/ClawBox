@@ -595,6 +595,31 @@ def test_native_tool_join_reports_preflight_rejections_without_inventing_telemet
             validate([executed, altered])
 
 
+def test_native_tool_join_accepts_session_without_managed_execution():
+    verdict = validate_native_tool_join(
+        bridge_records=[{
+            "execution_source": "bridge-local",
+            "execution_id": "health-check",
+        }],
+        cgroup_artifacts={}, clause_artifacts={}, policy_records=[],
+        runtime_span_records=[], expected_session_id="session-a",
+    )
+    assert verdict["valid"] is True
+    assert verdict["policy_execution_count"] == 0
+    assert verdict["runtime_envelope_execution_count"] == 0
+    assert verdict["runtime_trace_execution_count"] == 0
+    assert verdict["exact_id_join_rate"] == 1.0
+
+    with pytest.raises(ValueError, match="Runtime trace identity mismatch"):
+        validate_native_tool_join(
+            bridge_records=[], cgroup_artifacts={}, clause_artifacts={},
+            policy_records=[], runtime_span_records=[{
+                "session_id": "session-a",
+                "execution": {"execution_id": "exec-unexpected"},
+            }], expected_session_id="session-a",
+        )
+
+
 def test_native_tool_join_allows_explicit_runtime_trace_exemption() -> None:
     execution_id = "exec-fs"
     digest = hashlib.sha256(b"read file").hexdigest()

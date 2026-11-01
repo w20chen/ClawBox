@@ -8,6 +8,23 @@ from clawtune_sidecar.contracts.models import ToolPrediction
 from clawtune_sidecar.predictors.tool_resource import _command_for_request
 
 
+_DEFERRED_TIMEOUT_PREFIX = 'CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS='
+
+
+def _host_profile_command(command):
+    """Match the logical command used later by the ClawBox SSH policy shim."""
+    if not command.startswith(_DEFERRED_TIMEOUT_PREFIX):
+        return command
+    marker, separator, remainder = command.partition('\n')
+    if not separator:
+        return command
+    try:
+        timeout = float(marker.removeprefix(_DEFERRED_TIMEOUT_PREFIX))
+    except ValueError:
+        return command
+    return remainder if timeout > 0 else command
+
+
 class RemoteKnowledgeClient:
     artifact_dir = None
     _state_store = None
@@ -25,6 +42,10 @@ class RemoteKnowledgeClient:
         command = _command_for_request(request)
         if request.tool_name not in {'exec', 'terminal_exec'} or not command:
             return ToolPrediction()
+        # The gateway-only timeout marker controls deferred waiting but is not
+        # part of the command that the policy shim admits or the Tool executes.
+        # Predict from that same logical command so its receipt can be claimed.
+        command = _host_profile_command(command)
         payload = dict(schema_version=PROTOCOL, session_id=self.config.host_kb_session_id,
             event_id=request.event_id, tool_call_id=request.tool_call_id,
             tool_name=request.tool_name, command=command, command_sha256=command_digest(command),
