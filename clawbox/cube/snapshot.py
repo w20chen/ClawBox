@@ -36,6 +36,9 @@ def _allocated_bytes(path: Path, stat: os.stat_result | None = None) -> int:
 
 @operation('native.snapshot_metadata')
 def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[str, Any]:
+    from .snapshot_compression import read_compressed_snapshot_metadata
+    if compressed := read_compressed_snapshot_metadata(path):
+        return compressed
     memory = Path(path)
     sidecar = Path(path + ".lineage.json")
     if not sidecar.exists():

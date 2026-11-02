@@ -65,6 +65,27 @@ launch. `--force` replaces a generated YAML file; it does not permit changing a
 frozen run. Relative input paths resolve from the working directory. Use
 absolute paths for external traces, KBs, manifests, and results.
 
+To measure page-local Zstd snapshot storage, first build the helper and add the
+two fields below to the generated specification. Keep the default `none` for an
+uncompressed baseline, and use a different run ID for each setting.
+
+```bash
+sudo bash scripts/build-zstd-page-snapshot.sh /usr/local/bin/clawbox-zstd-page-snapshot
+```
+
+```yaml
+environment:
+  resources:
+    snapshot_compression: zstd-page
+    snapshot_compression_binary: /usr/local/bin/clawbox-zstd-page-snapshot
+```
+
+Run `experiment qualify` or ordinary `launch` after the edit. No host apply,
+image rebuild, or retraining is required. Results report compression inside
+checkpoint snapshot metrics and decompression inside restore metrics. Interpret
+WARM savings as parked tmpfs DRAM released after raw files are removed; interpret
+COLD savings as disk space, not DRAM.
+
 ## 3. Select a workload and comparison
 
 For an existing replay and prepared Tool image:

@@ -80,6 +80,8 @@ class CubeSandboxLifecycle:
                  snapshot_pool: WarmSnapshotPool | None = None,
                  snapshot_reservation_bytes: int | None = None,
                  snapshot_mechanism: str = "incremental-cow", lazy_restore: bool = True,
+                 snapshot_compression: str = "none",
+                 snapshot_compression_binary: str = "clawbox-zstd-page-snapshot",
                  snapshot_storage: str = "tiered", numa_borrower: Any = None,
                  configured_memory_bytes: int | None = None,
                  cgroup_token: str | None = None,
@@ -97,6 +99,10 @@ class CubeSandboxLifecycle:
         if snapshot_mechanism == "incremental-cow" and not lazy_restore:
             raise ValueError("incremental-cow requires lazy restore")
         self.snapshot_mechanism = snapshot_mechanism
+        if snapshot_compression not in {"none", "zstd-page"}:
+            raise ValueError("invalid snapshot compression")
+        self.snapshot_compression = snapshot_compression
+        self.snapshot_compression_binary = snapshot_compression_binary
         self.lazy_restore = lazy_restore
         self._snapshot_tier: SnapshotTier | None = None
         self.client = client
@@ -523,6 +529,22 @@ class CubeSandboxLifecycle:
                             snapshot_mechanism=self.snapshot_mechanism,
                         )
                         pause_completed = True
+                    if self.snapshot_compression == "zstd-page":
+                        from .snapshot_compression import compress_snapshot
+                        native_manifest = dict(manifest)
+                        with self._measure_stage(stage_seconds, "snapshot_compress_s"):
+                            compression_before = self._observe_physical()
+                            compression = compress_snapshot(
+                                path, binary=self.snapshot_compression_binary,
+                                native_snapshot_metrics=native_manifest,
+                            )
+                            compression_after = self._observe_physical()
+                        manifest = {
+                            **native_manifest,
+                            "compression": compression,
+                            "compression_host_memory_before": compression_before,
+                            "compression_host_memory_after": compression_after,
+                        }
                     if tier is SnapshotTier.WARM:
                         self.snapshot_pool.commit(
                             key, path=path,
@@ -611,6 +633,22 @@ class CubeSandboxLifecycle:
                             "control_response_reconciled": True,
                         }
                         manifest.setdefault("transferred_bytes", None)
+                        if self.snapshot_compression == "zstd-page":
+                            from .snapshot_compression import compress_snapshot
+                            native_manifest = dict(manifest)
+                            with self._measure_stage(stage_seconds, "snapshot_compress_s"):
+                                compression_before = self._observe_physical()
+                                compression = compress_snapshot(
+                                    path, binary=self.snapshot_compression_binary,
+                                    native_snapshot_metrics=native_manifest,
+                                )
+                                compression_after = self._observe_physical()
+                            manifest = {
+                                **native_manifest,
+                                "compression": compression,
+                                "compression_host_memory_before": compression_before,
+                                "compression_host_memory_after": compression_after,
+                            }
                         if tier is SnapshotTier.WARM:
                             if self.snapshot_pool is None:
                                 raise RuntimeError("WARM snapshot accounting is not configured")
@@ -716,13 +754,31 @@ class CubeSandboxLifecycle:
             before = self._state
             started_wall, started_mono = time.time(), time.monotonic()
             host_memory_before = self._observe_physical()
+            spill_snapshot_metrics = None
             try:
+                if self.snapshot_compression == "zstd-page":
+                    from .snapshot_compression import decompress_snapshot
+                    decompress_snapshot(manifest.path, binary=self.snapshot_compression_binary)
                 with self._transfer("spill"):
                     self.client.relocate_snapshot(
                         self.sandbox, tier=SnapshotTier.COLD.value,
                         memory_snapshot_path=destination,
                         generation=manifest.key.generation,
                     )
+                if self.snapshot_compression == "zstd-page":
+                    from .snapshot import read_snapshot_metadata
+                    from .snapshot_compression import compress_snapshot
+                    native_metrics = read_snapshot_metadata(
+                        destination,
+                        require_lineage=self.snapshot_mechanism == "incremental-cow",
+                    )
+                    spill_snapshot_metrics = {
+                        **native_metrics,
+                        "compression": compress_snapshot(
+                            destination, binary=self.snapshot_compression_binary,
+                            native_snapshot_metrics=native_metrics,
+                        ),
+                    }
                 self._verify_warm_files_removed()
                 self._tier = SnapshotTier.COLD
                 self._snapshot_tier = SnapshotTier.COLD
@@ -733,6 +789,7 @@ class CubeSandboxLifecycle:
                     tier_to=SnapshotTier.COLD.value,
                     snapshot_generation=manifest.key.generation,
                     snapshot_path=destination,
+                    snapshot_metrics=spill_snapshot_metrics,
                 )
             except Exception as exc:
                 self._record(
@@ -770,6 +827,7 @@ class CubeSandboxLifecycle:
             self._state = SandboxState.RESTORING
             started_wall, started_mono = time.time(), time.monotonic()
             stage_seconds: dict[str, float] = _StageSeconds()
+            restore_snapshot_metrics = None
             with self._measure_stage(stage_seconds, "physical_observation_before_s"):
                 host_memory_before = self._observe_physical()
             resume_attempted = False
@@ -778,6 +836,29 @@ class CubeSandboxLifecycle:
                 if self.prepare_cgroup is not None:
                     with self._measure_stage(stage_seconds, "prepare_cgroup_s"):
                         self.prepare_cgroup()
+                if self.snapshot_compression == "zstd-page" and self._snapshot_key is not None:
+                    from .snapshot_compression import decompress_snapshot
+                    snapshot_root = (
+                        self.warm_snapshot_root if self._snapshot_tier is SnapshotTier.WARM
+                        else self.cold_snapshot_root
+                    )
+                    if not snapshot_root:
+                        raise RuntimeError("compressed snapshot root is unavailable")
+                    compressed_path = (
+                        f"{snapshot_root.rstrip('/')}/{self.sandbox_id}/"
+                        f"{self.role}-g{self._snapshot_key.generation}.mem"
+                    )
+                    with self._measure_stage(stage_seconds, "snapshot_decompress_s"):
+                        decompression_before = self._observe_physical()
+                        decompression = decompress_snapshot(
+                            compressed_path, binary=self.snapshot_compression_binary,
+                        )
+                        decompression_after = self._observe_physical()
+                    restore_snapshot_metrics = {
+                        "decompression": decompression,
+                        "decompression_host_memory_before": decompression_before,
+                        "decompression_host_memory_after": decompression_after,
+                    }
                 with self._transfer("restore", stage_seconds), self._measure_stage(stage_seconds, "api_restore_s"):
                     self.sandbox = self.client.connect_sandbox(
                         self.sandbox_id,
@@ -837,6 +918,7 @@ class CubeSandboxLifecycle:
                                     started_wall, started_mono,
                                     host_memory_before=host_memory_before,
                                     stage_seconds=stage_seconds,
+                                    snapshot_metrics=restore_snapshot_metrics,
                                     tier_from=self._snapshot_tier.value if self._snapshot_tier else None,
                                     tier_to=SnapshotTier.LOCAL.value,
                                     snapshot_generation=self._generation)
@@ -888,7 +970,9 @@ class CubeSandboxLifecycle:
         from pathlib import Path
         remaining = [str(file) for path in self._warm_paths
                      for file in (Path(path), Path(path+'.lineage.json'), Path(path+'.metrics.json'),
-                                  *Path(path+'.layers').glob('*')) if file.exists()]
+                                  Path(path+'.zstd-pages.json'),
+                                  *Path(path+'.layers').glob('*'),
+                                  *Path(path+'.zstd-pages').glob('*')) if file.exists()]
         if remaining:
             raise LifecycleError('WARM capacity retained: snapshot files remain after reclamation: '
                                  + ', '.join(remaining) + '; inspect Cube cleanup and retry')
@@ -995,6 +1079,20 @@ class CubeSandboxLifecycle:
                     self.client.kill_sandbox(self.sandbox_id)
                     if self.numa_borrower is not None:
                         self.numa_borrower.release_destroyed(self.sandbox_id)
+                # Cube only knows its native snapshot files.  Compressed page
+                # containers are owned by ClawBox and must be removed before
+                # WARM capacity is credited as released.
+                if self.snapshot_compression == "zstd-page":
+                    from .snapshot_compression import remove_compressed_snapshot
+                    for path in self._warm_paths:
+                        remove_compressed_snapshot(path)
+                    if (self._snapshot_key is not None
+                            and self._snapshot_tier is SnapshotTier.COLD
+                            and self.cold_snapshot_root and self.sandbox_id):
+                        remove_compressed_snapshot(
+                            f"{self.cold_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
+                            f"{self.role}-g{self._snapshot_key.generation}.mem"
+                        )
                 self._verify_warm_files_removed()
                 if (self._snapshot_key is not None and
                         self._snapshot_tier is SnapshotTier.WARM and

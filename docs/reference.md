@@ -286,6 +286,28 @@ is measured and withheld from new reservations. `warm-only` has no disk fallback
 `tiered` can use COLD or spill eligible WARM snapshots. Incremental CoW uses lazy
 restore. These snapshot choices take effect when idle reclaim is enabled.
 
+Page-local snapshot compression is configured under `environment.resources`,
+because it is fixed for every arm in one run:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `snapshot_compression` | `none` | `none` preserves Cube's native sparse/CoW snapshot; `zstd-page` stores each host page as ZERO, Zstd level 1, or RAW |
+| `snapshot_compression_binary` | `clawbox-zstd-page-snapshot` | Absolute path or executable name of the native helper |
+
+Build the helper once on a host that provides `libzstd.so.1`:
+
+```bash
+sudo bash scripts/build-zstd-page-snapshot.sh /usr/local/bin/clawbox-zstd-page-snapshot
+```
+
+WARM and COLD use the same format and parameters. ClawBox restores Cube's native
+sparse files before resume or relocation, and does not compress external template
+layers or an inode with references outside the snapshot. Compression changes need
+a new run ID and fresh qualification, but no host apply, VM image rebuild, or KB
+retraining. WARM allocated-byte savings are released tmpfs DRAM while parked;
+COLD allocated-byte savings are disk savings only. Pool admission remains charged
+at the conservative native allocation because restore temporarily recreates it.
+
 ## Prediction and evidence
 
 `conditions.prediction_source` maps `kb` to CLI mode `runtime`, `cold-start-kb`

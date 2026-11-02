@@ -299,6 +299,8 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
                     warm_snapshot_root=spec.resources.warm_snapshot_root,
                     cold_snapshot_root=spec.resources.cold_snapshot_root,
                     snapshot_mechanism=spec.resources.snapshot_mechanism,
+                    snapshot_compression=spec.resources.snapshot_compression,
+                    snapshot_compression_binary=spec.resources.snapshot_compression_binary,
                     lazy_restore=spec.resources.lazy_restore,
                     snapshot_storage=spec.resources.snapshot_storage, snapshot_pool=pool,
                     default_snapshot_tier=spec.resources.default_snapshot_tier,
