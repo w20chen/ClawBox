@@ -754,10 +754,7 @@ class WatermarkController:
         reclaim_tier = 'cold' if self.arm.resources.snapshot_destination == 'cold' else 'warm'
         if reclaim_candidate is not None and reclaim_tier == 'warm':
             pool = self.shared_pool.snapshot()
-            warm_usage = (
-                int(pool['borrowed_bytes']) + int(pool['reserved_bytes'])
-                + int(pool['committed_bytes'])
-            )
+            warm_usage = int(pool['accounted_bytes'])
             required = int(
                 reclaim_candidate.get('snapshot_reservation_bytes') or 0
             )
@@ -975,6 +972,7 @@ class WatermarkController:
     def _sample_once(self, elapsed: float, above_high: bool) -> bool:
         """Apply one deterministic watermark decision; split out for audit tests."""
         local, shared, combined = self.sampler.tier_usage()
+        accounted_excess = self.shared_pool.observe_shared_live(shared)
         pool = self.shared_pool.snapshot()
         snapshot_claim = int(pool["reserved_bytes"]) + int(pool["committed_bytes"])
         # Current shared residency already includes its pre-run cache. Only
@@ -992,6 +990,28 @@ class WatermarkController:
                 f"external_warm={external_warm} "
                 f"capacity={pool['capacity_bytes']}"
             )
+        if accounted_excess:
+            try:
+                spilled = self.shared_pool.spill_observed_excess()
+            except WarmCapacityError as exc:
+                self.events.write({
+                    "event": "warm_resident_headroom_blocked",
+                    "compute_node": self.node_id,
+                    "accounted_excess_bytes": accounted_excess,
+                    "shared_live_used_bytes": shared,
+                    "error": str(exc),
+                })
+            else:
+                self.events.write({
+                    "event": "warm_resident_headroom_restored",
+                    "compute_node": self.node_id,
+                    "accounted_excess_bytes": accounted_excess,
+                    "shared_live_used_bytes": shared,
+                    "spilled_generations": len(spilled),
+                    "spilled_allocated_bytes": sum(
+                        item.allocated_bytes for item in spilled
+                    ),
+                })
         self.high_overshoot_byte_seconds += max(0, local - self.high) * elapsed
         self.hard_overshoot_byte_seconds += max(0, local - self.hard) * elapsed
         if local > self.high:
@@ -2406,6 +2426,11 @@ class ExperimentWorker:
         snapshot_pool = WarmSnapshotPool(
             arm.resources.warm_memory_capacity_mib * 1024 * 1024,
             borrow_capacity_bytes=(shared_borrow_mib or 0) * 1024 * 1024,
+            borrow_resident_headroom_bytes=(
+                arm.resources.shared_memory_resident_headroom_mib * 1024 * 1024
+                if arm.resources.shared_memory_resident_headroom_mib is not None
+                else None
+            ),
             external_shared_live_bytes=initial_shared_live,
             external_warm_bytes=initial_warm_files,
             transfer_concurrency=arm.resources.pool_transfer_concurrency,

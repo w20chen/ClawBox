@@ -60,6 +60,7 @@ class WarmSnapshotPool:
 
     def __init__(self, capacity_bytes: int, *,
                  borrow_capacity_bytes: int = 0,
+                 borrow_resident_headroom_bytes: int | None = None,
                  external_shared_live_bytes: int = 0,
                  external_warm_bytes: int = 0,
                  transfer_concurrency: int = 1,
@@ -71,18 +72,27 @@ class WarmSnapshotPool:
             raise ValueError("capacity_bytes must be non-negative")
         if borrow_capacity_bytes < 0 or borrow_capacity_bytes > capacity_bytes:
             raise ValueError("borrow_capacity_bytes must be between zero and capacity")
+        if (borrow_resident_headroom_bytes is not None
+                and not 0 < borrow_resident_headroom_bytes < capacity_bytes):
+            raise ValueError(
+                "borrow resident headroom must be positive and smaller than capacity"
+            )
+        if borrow_resident_headroom_bytes is not None and borrow_capacity_bytes == 0:
+            raise ValueError("borrow resident headroom requires borrow capacity")
         external_occupied_bytes = external_shared_live_bytes + external_warm_bytes
         if (external_shared_live_bytes < 0 or external_warm_bytes < 0
                 or external_occupied_bytes > capacity_bytes):
             raise ValueError("pre-existing shared occupancy must be between zero and capacity")
         self.capacity_bytes = capacity_bytes
         self.borrow_capacity_bytes = borrow_capacity_bytes
+        self.borrow_resident_headroom_bytes = borrow_resident_headroom_bytes
         # Measured before this run starts allocating: existing shared-node
         # cache and WARM files are outside its borrow/manifest ledgers. Keep
         # their space unavailable rather than promise it to new generations.
         self.external_occupied_bytes = external_occupied_bytes
         self.external_shared_live_bytes = external_shared_live_bytes
         self.external_warm_bytes = external_warm_bytes
+        self._observed_shared_live_bytes = external_shared_live_bytes
         if transfer_concurrency < 1 or transfer_timeout_seconds <= 0:
             raise ValueError("transfer concurrency and timeout must be positive")
         if snapshot_transfer_concurrency is None:
@@ -111,6 +121,11 @@ class WarmSnapshotPool:
         self._admission_lock = Lock()
         self._reservations: dict[SnapshotKey, int] = {}
         self._borrow_reservations: dict[str, int] = {}
+        # A new rebind keeps its complete configured footprint charged until a
+        # post-rebind parent-cgroup observation proves its physical residency.
+        # Periodic accounting remains one O(1) aggregate update, not one NUMA
+        # file read and lock acquisition per borrowed VM.
+        self._unobserved_borrows: set[str] = set()
         self._manifests: dict[SnapshotKey, SnapshotManifest] = {}
         self._spillers: dict[SnapshotKey, Callable[[SnapshotManifest], None]] = {}
         self._warm_admissions = 0
@@ -169,24 +184,36 @@ class WarmSnapshotPool:
 
     @property
     def borrowed_bytes(self) -> int:
+        """Configured upper bounds retained for identity and borrow-limit checks."""
         with self._lock:
             return sum(self._borrow_reservations.values())
+
+    @property
+    def accounted_bytes(self) -> int:
+        with self._lock:
+            return self._usage_locked()
 
     @property
     def borrow_headroom_bytes(self) -> int:
         """Current reservation headroom; reserve_borrow still commits atomically."""
         with self._lock:
+            first_borrow_headroom = (
+                self.borrow_resident_headroom_bytes
+                if (self.borrow_resident_headroom_bytes is not None
+                    and not self._borrow_reservations)
+                else 0
+            )
             return max(0, min(
                 self.borrow_capacity_bytes - sum(self._borrow_reservations.values()),
-                self.capacity_bytes - self._usage_locked(),
+                self.capacity_bytes - self._usage_locked() - first_borrow_headroom,
             ))
 
     def reserve_borrow(self, sandbox_id: str, upper_bound_bytes: int) -> None:
         """Reserve live VM capacity on the shared NUMA node.
 
-        The configured VM footprint is reserved rather than its current RSS so
-        future guest growth cannot silently consume space already promised to
-        an in-flight checkpoint.
+        The configured VM footprint remains the borrow-limit charge. In
+        resident mode it is also a temporary pool charge until the completed
+        rebind is covered by a parent-cgroup residency observation.
         """
         if not sandbox_id:
             raise ValueError("sandbox_id must be non-empty")
@@ -197,9 +224,17 @@ class WarmSnapshotPool:
                 raise RuntimeError(f"duplicate shared-memory borrow: {sandbox_id}")
             if self.borrowed_bytes + upper_bound_bytes > self.borrow_capacity_bytes:
                 raise WarmCapacityError("shared live-borrow capacity exceeded")
-            if self._usage_locked() + upper_bound_bytes > self.capacity_bytes:
+            first_borrow_headroom = (
+                self.borrow_resident_headroom_bytes
+                if (self.borrow_resident_headroom_bytes is not None
+                    and not self._borrow_reservations)
+                else 0
+            )
+            if (self._usage_locked() + upper_bound_bytes + first_borrow_headroom
+                    > self.capacity_bytes):
                 raise WarmCapacityError("shared NUMA capacity exceeded")
             self._borrow_reservations[sandbox_id] = upper_bound_bytes
+            self._unobserved_borrows.add(sandbox_id)
             self._assert_capacity_locked()
             self._changed.notify_all()
 
@@ -209,8 +244,26 @@ class WarmSnapshotPool:
                 released = self._borrow_reservations.pop(sandbox_id)
             except KeyError as exc:
                 raise RuntimeError(f"unknown shared-memory borrow: {sandbox_id}") from exc
+            self._unobserved_borrows.discard(sandbox_id)
             self._changed.notify_all()
             return released
+
+    def observe_shared_live(self, shared_live_bytes: int, *,
+                            settle_borrow: str | None = None) -> int:
+        """Publish one aggregate NUMA sample and return accounting overage.
+
+        Growth is external to this lock, so an overage is a pressure signal for
+        proactive WARM-to-COLD spill rather than an accounting assertion.
+        """
+        if shared_live_bytes < 0:
+            raise ValueError("shared_live_bytes must be non-negative")
+        with self._lock:
+            self._observed_shared_live_bytes = shared_live_bytes
+            if settle_borrow is not None:
+                self._unobserved_borrows.discard(settle_borrow)
+            excess = max(0, self._usage_locked() - self.capacity_bytes)
+            self._changed.notify_all()
+            return excess
 
     def reserve(self, key: SnapshotKey, upper_bound_bytes: int) -> None:
         if upper_bound_bytes <= 0:
@@ -354,6 +407,15 @@ class WarmSnapshotPool:
                         item.pinned -= 1
                 self._changed.notify_all()
 
+    def spill_observed_excess(self) -> tuple[SnapshotManifest, ...]:
+        """Restore configured headroom after aggregate shared-live growth."""
+        with self._admission_lock:
+            # This is a physical safety action, not a value comparison against
+            # a new candidate. Any spillable generation may move to COLD.
+            return self.spill_for_admission(
+                0, candidate_retention_value_seconds=float("inf")
+            )
+
     def abort(self, key: SnapshotKey) -> None:
         with self._lock:
             self._reservations.pop(key, None)
@@ -428,9 +490,18 @@ class WarmSnapshotPool:
         expected restore-time saving per allocated byte and rejects a lower
         value candidate so its lifecycle can write it directly to SSD.
         """
-        if required_bytes <= 0:
-            return ()
-        if required_bytes > self.capacity_bytes - self.external_occupied_bytes:
+        if required_bytes < 0:
+            raise ValueError("required_bytes must be non-negative")
+        if required_bytes == 0:
+            with self._lock:
+                if self._usage_locked() <= self.capacity_bytes:
+                    return ()
+        if required_bytes > self.capacity_bytes:
+            raise WarmSnapshotTooLarge(
+                f"snapshot reservation {required_bytes} exceeds WARM capacity"
+            )
+        if (required_bytes > 0
+                and required_bytes > self.capacity_bytes - self.external_occupied_bytes):
             raise WarmSnapshotTooLarge(
                 f"snapshot reservation {required_bytes} exceeds WARM capacity "
                 f"{self.capacity_bytes - self.external_occupied_bytes} remaining "
@@ -484,6 +555,9 @@ class WarmSnapshotPool:
                 "reserved_bytes": sum(self._reservations.values()),
                 "committed_bytes": sum(item.allocated_bytes for item in self._manifests.values()),
                 "borrowed_bytes": sum(self._borrow_reservations.values()),
+                "borrow_accounted_bytes": self._borrow_charge_locked(),
+                "accounted_bytes": self._usage_locked(),
+                "observed_shared_live_bytes": self._observed_shared_live_bytes,
                 "external_warm_bytes": self.external_warm_bytes,
                 "external_shared_live_bytes": self.external_shared_live_bytes,
                 "external_occupied_bytes": self.external_occupied_bytes,
@@ -509,7 +583,12 @@ class WarmSnapshotPool:
                     item.allocated_bytes for item in self._manifests.values()
                 ),
                 "borrow_capacity_bytes": self.borrow_capacity_bytes,
+                "borrow_resident_headroom_bytes": self.borrow_resident_headroom_bytes,
                 "borrowed_bytes": sum(self._borrow_reservations.values()),
+                "borrow_accounted_bytes": self._borrow_charge_locked(),
+                "accounted_bytes": self._usage_locked(),
+                "observed_shared_live_bytes": self._observed_shared_live_bytes,
+                "unobserved_borrows": sorted(self._unobserved_borrows),
                 "borrow_reservations": dict(sorted(self._borrow_reservations.items())),
                 "reservations": {
                     repr(key): value for key, value in self._reservations.items()
@@ -536,13 +615,30 @@ class WarmSnapshotPool:
             }
 
     def _usage_locked(self) -> int:
-        return self.external_occupied_bytes + sum(self._borrow_reservations.values()) + sum(self._reservations.values()) + sum(
+        return self.external_warm_bytes + self._borrow_charge_locked() + sum(self._reservations.values()) + sum(
             item.allocated_bytes for item in self._manifests.values()
         )
 
+    def _borrow_charge_locked(self) -> int:
+        configured = sum(self._borrow_reservations.values())
+        if self.borrow_resident_headroom_bytes is None:
+            return self.external_shared_live_bytes + configured
+        observed = max(
+            self.external_shared_live_bytes, self._observed_shared_live_bytes,
+        )
+        pending = sum(
+            self._borrow_reservations[sandbox_id]
+            for sandbox_id in self._unobserved_borrows
+            if sandbox_id in self._borrow_reservations
+        )
+        growth_headroom = (
+            self.borrow_resident_headroom_bytes if self._borrow_reservations else 0
+        )
+        return observed + growth_headroom + pending
+
     def _assert_capacity_locked(self) -> None:
         usage = self._usage_locked()
-        if usage > self.capacity_bytes:
+        if usage > self.capacity_bytes and self.borrow_resident_headroom_bytes is None:
             raise AssertionError(
                 f"WARM accounting invariant violated: {usage} > {self.capacity_bytes}"
             )

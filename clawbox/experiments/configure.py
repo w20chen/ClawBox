@@ -728,6 +728,9 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
         ),
         "borrow_cooldown_seconds": spec.resources.borrow_cooldown_seconds,
         "return_cooldown_seconds": spec.resources.return_cooldown_seconds,
+        "shared_memory_resident_headroom_mib": (
+            spec.resources.shared_memory_resident_headroom_mib
+        ),
         "memory_action_costs": (
             spec.resources.memory_action_costs.model_dump(mode="json")
             if spec.resources.memory_action_costs is not None else None

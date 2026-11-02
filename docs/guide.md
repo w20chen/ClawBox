@@ -287,6 +287,27 @@ not occupy an actual-create slot. Tool calls have no corresponding global
 single-worker limit. See [execution options](reference.md#execution) for Cube
 request, lifecycle-transfer, package-install, and Runtime readiness limits.
 
+For a pressure run that has a large preparation queue while CPU is already
+saturated, reduce offered `--concurrency` first and keep arrival policy
+unchanged so only one workload dimension changes. If WARM is underused because
+borrowed VMs are charged at their configured maxima, enable bounded resident
+accounting in the generated YAML:
+
+```yaml
+mechanisms:
+  shared_memory:
+    shared_memory_resident_headroom_mib: 8192
+  checkpoint:
+    storage: tiered
+```
+
+The 8192 MiB value is a starting safety reserve, not measured usage. The
+controller uses one aggregate shared-NUMA sample, keeps a full-VM reservation
+during each rebind, and spills eligible WARM generations to COLD when observed
+growth consumes the reserve. Use a new run ID. No host apply, image rebuild, or
+retraining is required. Confirm the chosen reserve against the run's peak WARM
+growth between samples before reducing it further.
+
 Keep `execution.control_timing_details: false` for normal throughput runs.
 Required traces, errors, resource measurements, and compact timings remain
 enabled; expensive diagnostic detail is opt-in.

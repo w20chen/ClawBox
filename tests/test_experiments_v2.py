@@ -89,6 +89,13 @@ def test_shared_memory_watermarks_are_ordered_and_use_half_pool() -> None:
         local_numa_node=0, warm_numa_node=1,
     )
     assert resources.shared_memory_borrow_limit_mib * 2 == resources.warm_memory_capacity_mib
+    resident = resources.__class__.model_validate(
+        resources.model_dump() | {
+            "snapshot_storage": "tiered",
+            "shared_memory_resident_headroom_mib": 8192,
+        }
+    )
+    assert resident.shared_memory_resident_headroom_mib == 8192
     arm = SimpleNamespace(resources=resources)
     assert policy_progress_budget_mib(arm) == 36864
     with pytest.raises(ValidationError, match="LOW < HIGH < LOCAL hard"):
@@ -100,6 +107,13 @@ def test_shared_memory_watermarks_are_ordered_and_use_half_pool() -> None:
     with pytest.raises(ValidationError, match="shared NUMA pool"):
         resources.__class__.model_validate(
             resources.model_dump() | {"shared_memory_borrow_limit_mib": 131073}
+        )
+    with pytest.raises(ValidationError, match="not warm-only"):
+        resources.__class__.model_validate(
+            resources.model_dump() | {
+                "snapshot_storage": "warm-only",
+                "shared_memory_resident_headroom_mib": 8192,
+            }
         )
 
 

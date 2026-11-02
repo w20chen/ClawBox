@@ -213,7 +213,7 @@ validation checks their dependencies.
 | `runtime` | `memory_protection: false`; `cpu_release_boost: false`; `proactive_memory_reclaim: false`; `runtime_poll_interval_seconds: 0.5`; nested `pressure_control` below |
 | `placement` | `policy: round_robin` (`os_default`, `round_robin`, `explicit`, `load_aware`); `template_affinity: false`; `placement_cpu_overcommit: 1024.0`; `template_balance_slack: 0.10`; `session_compute_nodes: []`; Tool-call CPU fields below |
 | `idle_reclaim` | `policy: off` (`off`, `wait`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024` |
-| `shared_memory` | `borrow: off` (`off`, `hard`, `pressure`); `borrow_cooldown_seconds: 5`; `return_cooldown_seconds: 5` |
+| `shared_memory` | `borrow: off` (`off`, `hard`, `pressure`); `borrow_cooldown_seconds: 5`; `return_cooldown_seconds: 5`; `shared_memory_resident_headroom_mib: null` |
 | `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`); transfer limits below |
 | `deployment` | `mode: managed` (`managed`, `os-default`); `resident_capacity_accounting: false`; `lifecycle_reservation_scale: 1.0` |
 | `coordination` | `action_selection: reclaim_first` (`reclaim_first`, `measured_cost`) |
@@ -229,6 +229,17 @@ The below-LOW routing shortcut is automatic for resident Tools whose sampled
 LOCAL use, nominal claims, new reservation, and headroom fit below LOW. It skips
 pressure routing but retains admission accounting unless the small-call bypass
 also applies.
+
+`mechanisms.shared_memory.shared_memory_resident_headroom_mib` enables
+aggregate-resident WARM accounting. `null` keeps the default conservative rule
+that charges every borrowed VM's configured capacity. A positive MiB value
+charges sampled shared-NUMA live residency plus that fixed growth reserve;
+in-progress rebinds still charge their full configured capacity. The field
+requires shared-memory borrowing and must be smaller than
+`environment.resources.warm_memory_capacity_mib`. Use it with `tiered` storage
+so eligible WARM snapshots can spill to COLD when live growth consumes the
+reserve. Changing it requires a new run ID, but no host apply, image rebuild,
+retraining, or repeated capability qualification.
 
 Resident-capacity accounting requires managed deployment, Tool admission off,
 and no shared-memory borrowing or proactive reclaim. Its scale must be greater

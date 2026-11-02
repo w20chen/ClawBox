@@ -353,6 +353,7 @@ class ResourcesSpec(StrictFrozenModel):
     local_memory_low_watermark_mib: int | None = Field(default=None, ge=1)
     local_memory_high_watermark_mib: int | None = Field(default=None, ge=1)
     shared_memory_borrow_limit_mib: int | None = Field(default=None, ge=0)
+    shared_memory_resident_headroom_mib: int | None = Field(default=None, ge=1)
     emergency_free_memory_mib: int = Field(ge=1)
     startup_headroom_mib: int = Field(default=256, ge=0)
     admission_margin_mib: int = Field(default=256, ge=0)
@@ -426,6 +427,22 @@ class ResourcesSpec(StrictFrozenModel):
             )
         if self.resident_capacity_accounting and self.shared_memory_borrow_limit_mib:
             raise ValueError("resident capacity accounting does not support shared-memory borrowing")
+        if (self.shared_memory_resident_headroom_mib is not None
+                and not self.shared_memory_borrow_limit_mib):
+            raise ValueError(
+                "shared_memory_resident_headroom_mib requires shared-memory borrowing"
+            )
+        if (self.shared_memory_resident_headroom_mib is not None
+                and self.shared_memory_resident_headroom_mib >= self.warm_memory_capacity_mib):
+            raise ValueError(
+                "shared_memory_resident_headroom_mib must be smaller than WARM capacity"
+            )
+        if (self.shared_memory_resident_headroom_mib is not None
+                and self.snapshot_storage == "warm-only"):
+            raise ValueError(
+                "resident shared-memory accounting requires tiered or disk snapshots, "
+                "not warm-only"
+            )
         if self.lifecycle_reservation_scale != 1 and not self.resident_capacity_accounting:
             raise ValueError("discounted lifecycle reservations require resident capacity accounting")
         if self.resident_capacity_accounting and self.lifecycle_admission != "configured-capacity":

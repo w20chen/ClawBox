@@ -108,6 +108,53 @@ def test_preexisting_shared_cache_and_files_remain_inside_the_same_capacity():
     assert pool.committed_bytes + pool.borrowed_bytes + 6 == 100
 
 
+def test_resident_borrow_accounting_keeps_full_charge_until_observed():
+    pool = WarmSnapshotPool(
+        100, borrow_capacity_bytes=100, borrow_resident_headroom_bytes=10,
+        external_shared_live_bytes=5, external_warm_bytes=2,
+    )
+    pool.reserve_borrow("vm-a", 60)
+    assert pool.borrowed_bytes == 60
+    assert pool.snapshot()["unobserved_borrows"] == ["vm-a"]
+    assert pool.accounted_bytes == 77
+
+    assert pool.observe_shared_live(8, settle_borrow="vm-a") == 0
+    state = pool.snapshot()
+    assert state["borrowed_bytes"] == 60  # configured-limit ledger is unchanged
+    assert state["borrow_accounted_bytes"] == 18
+    assert state["accounted_bytes"] == 20
+    assert state["unobserved_borrows"] == []
+
+    fresh = WarmSnapshotPool(
+        100, borrow_capacity_bytes=100, borrow_resident_headroom_bytes=10,
+    )
+    with pytest.raises(WarmCapacityError, match="shared NUMA"):
+        fresh.reserve_borrow("too-large-during-rebind", 91)
+
+
+def test_resident_growth_spills_warm_state_before_physical_capacity():
+    pool = WarmSnapshotPool(
+        100, borrow_capacity_bytes=100, borrow_resident_headroom_bytes=10,
+        snapshot_aware=True,
+    )
+    pool.reserve_borrow("vm-a", 60)
+    pool.observe_shared_live(20, settle_borrow="vm-a")
+    spilled = []
+    pool.reserve(key(1), 60)
+    pool.commit(
+        key(1), path="/warm/1", logical_bytes=60, allocated_bytes=60,
+        transferred_bytes=60, retention_value_seconds=100,
+        spiller=spilled.append,
+    )
+    assert pool.accounted_bytes == 90
+
+    assert pool.observe_shared_live(35) == 5
+    victims = pool.spill_observed_excess()
+    assert [item.key for item in victims] == [key(1)]
+    assert [item.key for item in spilled] == [key(1)]
+    assert pool.accounted_bytes == 45
+
+
 def test_external_occupancy_cannot_be_reclaimed_by_snapshot_spill():
     pool = WarmSnapshotPool(100, external_shared_live_bytes=4, external_warm_bytes=2)
     with pytest.raises(WarmSnapshotTooLarge):

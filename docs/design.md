@@ -64,8 +64,11 @@ introduced by a training policy.
 Creation and restore reserve configured capacity until measurements account for
 growth. Tool admission reserves additional growth without counting resident
 pages again. Each compute domain has a LOCAL budget; one atomic ledger accounts
-for shared-pool claims. A live borrower reserves configured VM capacity so future
-guest growth remains covered. Snapshots and live borrowing share that budget.
+for shared-pool claims. By default a live borrower reserves configured VM
+capacity. When `shared_memory_resident_headroom_mib` is configured, completed
+borrows instead use one aggregate `memory.numa_stat` residency sample plus the
+fixed growth headroom; an in-progress rebind still reserves the VM's complete
+configured capacity. Snapshots and live borrowing share that budget.
 
 By default, reservations at or below **4 MiB** bypass memory-ledger accounting.
 This includes eligible fixed-budget filesystem and maintenance calls. Calls
@@ -125,7 +128,9 @@ until its next command.
 Source RAM and destination pages coexist during checkpoint copy. WARM uses an
 initial conservative reservation, then actual allocated snapshot bytes.
 `warm-only` has no disk fallback. `tiered` can place new snapshots on disk or
-spill eligible WARM generations.
+spill eligible WARM generations. With resident WARM accounting, sampled live
+growth that consumes the configured headroom proactively spills eligible WARM
+generations to COLD. Retained lazy-restore generations remain unspillable.
 
 Incremental CoW snapshots can reference an immutable template RAM base. A logical
 reference alone does not prove physical sharing. Template-aware qualification

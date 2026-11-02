@@ -32,7 +32,8 @@ RESOURCE_FIELDS = {
     'runtime': ('pressure_control', 'runtime_poll_interval_seconds'),
     'placement': (),
     'idle_reclaim': ('checkpoint_restore_headroom_mib',),
-    'shared_memory': ('borrow_cooldown_seconds', 'return_cooldown_seconds'),
+    'shared_memory': ('borrow_cooldown_seconds', 'return_cooldown_seconds',
+                      'shared_memory_resident_headroom_mib'),
     'checkpoint': ('pool_transfer_concurrency', 'snapshot_transfer_concurrency',
                    'pool_transfer_timeout_seconds'),
 }
@@ -221,6 +222,7 @@ def lower_arm(design, name, m):
         raise ValueError(f'{name}: disk/tiered snapshots require cold_snapshot_root')
     if shared['borrow'] == 'off':
         r['shared_memory_borrow_limit_mib'] = None
+        r['shared_memory_resident_headroom_mib'] = None
     r['memory_action_costs'] = e['memory_action_costs'] if coordination['action_selection'] == 'measured_cost' else None
     r['memory_scheduling'] = ('joint' if shared['borrow'] == 'pressure' else
                               'static' if shared['borrow'] == 'hard' else

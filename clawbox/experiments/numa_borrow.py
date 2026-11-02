@@ -406,6 +406,13 @@ class SandboxNumaBorrower:
         released = not reserve and after.shared_bytes == 0
         if released:
             self.shared_pool.release_borrow(sandbox_id)
+        # One parent-cgroup read after a rebind settles the temporary full-VM
+        # pool charge. Periodic controller samples keep this aggregate current;
+        # no per-VM residency scan is added to the steady-state path.
+        self.shared_pool.observe_shared_live(
+            self._shared_usage(self.cgroup_root),
+            settle_borrow=sandbox_id if reserve else None,
+        )
         if reserve:
             physical_effect = (
                 "allocation_policy_changed_with_observed_shared_growth"

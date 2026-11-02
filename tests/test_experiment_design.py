@@ -67,6 +67,23 @@ def test_host_live_options_roundtrip_and_reject_invalid_scope():
         ExperimentSpec.model_validate(raw)
 
 
+def test_resident_warm_headroom_is_public_and_disabled_with_borrowing():
+    raw = base()
+    raw['mechanisms']['shared_memory'].update(
+        borrow='pressure', shared_memory_resident_headroom_mib=8192,
+    )
+    raw['mechanisms']['idle_reclaim']['policy'] = 'wait'
+    raw['mechanisms']['checkpoint']['storage'] = 'tiered'
+    raw['comparison']['arms'] = [
+        {'name': 'resident-warm'},
+        {'name': 'no-borrow', 'override': {'shared_memory.borrow': 'off'}},
+    ]
+    spec = ExperimentSpec.model_validate(raw)
+    arms = {arm.policy.name: arm for arm in expand_matrix(spec)}
+    assert arms['resident-warm'].resources.shared_memory_resident_headroom_mib == 8192
+    assert arms['no-borrow'].resources.shared_memory_resident_headroom_mib is None
+
+
 @pytest.mark.parametrize('recipe,axis,count', [
     ('resident-capacity', None, 3), ('admission', None, 3), ('runtime', None, 4), ('placement', None, 3),
     ('idle-reclaim', None, 3), ('shared-memory', None, 3), ('coordination', None, 2), ('memory-reclaim', None, 2),
