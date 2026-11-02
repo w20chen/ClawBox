@@ -81,6 +81,18 @@ static int read_full(int fd, void *buffer, size_t size, off_t offset) {
 
 static uint64_t allocated_bytes(const struct stat *st) { return (uint64_t)st->st_blocks * 512U; }
 
+static long exec_peak_rss_kib(void) {
+    FILE *stream = fopen("/proc/self/status", "r");
+    char line[256];
+    long value = 0;
+    if (!stream) return 0;
+    while (fgets(line, sizeof(line), stream)) {
+        if (sscanf(line, "VmHWM: %ld kB", &value) == 1) break;
+    }
+    fclose(stream);
+    return value;
+}
+
 static void report(const char *operation, const struct stat *input, const struct stat *output,
                    const struct header *h, uint64_t zero, uint64_t zstd, uint64_t raw,
                    uint64_t payload, double wall, double cpu, long peak_kib) {
@@ -159,7 +171,7 @@ static int compress_file(const char *input_path, const char *output_path) {
     clock_gettime(CLOCK_MONOTONIC, &wall_b); getrusage(RUSAGE_SELF, &usage_b);
     if (fstat(out, &out_st) < 0) { perror("stat output"); goto done; }
     report("compress", &in_st, &out_st, &h, zero, zstd, raw, payload,
-           seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), usage_b.ru_maxrss);
+           seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), exec_peak_rss_kib());
     rc = 0;
 done:
     if (in >= 0) close(in);
@@ -205,7 +217,7 @@ static int decompress_file(const char *input_path, const char *output_path) {
     clock_gettime(CLOCK_MONOTONIC, &wall_b); getrusage(RUSAGE_SELF, &usage_b);
     if (fstat(out, &out_st) < 0) goto done;
     report("decompress", &in_st, &out_st, &h, zero, zstd, raw, payload,
-           seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), usage_b.ru_maxrss);
+           seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), exec_peak_rss_kib());
     rc = 0;
 done:
     if (in >= 0) close(in);
