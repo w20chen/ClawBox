@@ -1,4 +1,4 @@
-"""Lossless page-local Zstd storage for native Cube RAM snapshot layers."""
+"""Lossless sparse-chunk Zstd storage for native Cube RAM snapshot layers."""
 from __future__ import annotations
 
 import json

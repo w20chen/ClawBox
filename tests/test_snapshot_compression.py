@@ -62,9 +62,10 @@ def test_page_container_roundtrip_preserves_lineage_and_shared_base(tmp_path: Pa
 
     assert is_compressed(snapshot)
     assert not snapshot.exists() and not private.exists()
-    assert compressed["zero_pages"] == 1
+    assert compressed["page_size"] == 1024 * 1024
+    assert compressed["zero_pages"] == 0
     assert compressed["zstd_pages"] == 1
-    assert compressed["raw_pages"] == 1
+    assert compressed["raw_pages"] == 0
     assert external.stat().st_ino == external_inode
     assert _digest(external) == external_digest
 

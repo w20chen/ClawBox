@@ -24,6 +24,7 @@ const char *ZSTD_getErrorName(size_t code);
 #define ENCODING_ZERO 0U
 #define ENCODING_ZSTD 1U
 #define ENCODING_RAW 2U
+#define CHUNK_BYTES (1024U * 1024U)
 
 struct __attribute__((packed)) header {
     char magic[8];
@@ -79,6 +80,19 @@ static int read_full(int fd, void *buffer, size_t size, off_t offset) {
     return 0;
 }
 
+static int write_sparse(int fd, const uint8_t *buffer, size_t size, off_t offset) {
+    long host_page = sysconf(_SC_PAGESIZE);
+    if (host_page <= 0) { errno = EINVAL; return -1; }
+    for (size_t cursor = 0; cursor < size; cursor += (size_t)host_page) {
+        size_t length = size - cursor < (size_t)host_page
+                      ? size - cursor : (size_t)host_page;
+        if (!all_zero(buffer + cursor, length)
+                && write_full(fd, buffer + cursor, length, offset + (off_t)cursor) < 0)
+            return -1;
+    }
+    return 0;
+}
+
 static uint64_t allocated_bytes(const struct stat *st) { return (uint64_t)st->st_blocks * 512U; }
 
 static long exec_peak_rss_kib(void) {
@@ -120,8 +134,7 @@ static int compress_file(const char *input_path, const char *output_path) {
     uint64_t zero = 0, zstd = 0, raw = 0, payload = 0;
     struct timespec wall_a, wall_b;
     struct rusage usage_a, usage_b;
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size <= 0 || page_size > (1 << 20)) { fprintf(stderr, "invalid host page size\n"); return 1; }
+    long page_size = CHUNK_BYTES;
     if ((in = open(input_path, O_RDONLY | O_CLOEXEC)) < 0 || fstat(in, &in_st) < 0) { perror(input_path); goto done; }
     if (!S_ISREG(in_st.st_mode)) { fprintf(stderr, "input is not a regular file\n"); goto done; }
     memcpy(h.magic, MAGIC, 8); h.version = VERSION; h.page_size = (uint32_t)page_size;
@@ -135,35 +148,27 @@ static int compress_file(const char *input_path, const char *output_path) {
     if ((out = open(output_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, in_st.st_mode & 0777)) < 0) { perror(output_path); goto done; }
     if (ftruncate(out, (off_t)h.data_offset) < 0 || write_full(out, &h, sizeof(h), 0) < 0) { perror("initialize output"); goto done; }
     clock_gettime(CLOCK_MONOTONIC, &wall_a); getrusage(RUSAGE_SELF, &usage_a);
-    off_t cursor = 0;
-    while ((uint64_t)cursor < h.logical_size) {
-        off_t data = lseek(in, cursor, SEEK_DATA);
+    for (off_t position = 0; (uint64_t)position < h.logical_size; position += page_size) {
+        size_t valid = (size_t)(((uint64_t)position + (uint64_t)page_size <= h.logical_size)
+                     ? (uint64_t)page_size : h.logical_size - (uint64_t)position);
+        off_t data = lseek(in, position, SEEK_DATA);
         if (data < 0) { if (errno == ENXIO) break; perror("SEEK_DATA"); goto done; }
-        off_t hole = lseek(in, data, SEEK_HOLE);
-        if (hole < 0) { perror("SEEK_HOLE"); goto done; }
-        off_t first = data - data % page_size;
-        off_t limit = ((hole + page_size - 1) / page_size) * page_size;
-        if ((uint64_t)limit > h.logical_size) limit = (off_t)h.logical_size;
-        for (off_t position = first; position < limit; position += page_size) {
-            size_t valid = (size_t)(((uint64_t)position + (uint64_t)page_size <= h.logical_size)
-                         ? (uint64_t)page_size : h.logical_size - (uint64_t)position);
-            memset(page, 0, (size_t)page_size);
-            if (read_full(in, page, valid, position) < 0) { perror("read page"); goto done; }
-            uint64_t index = (uint64_t)position / h.page_size;
-            if (all_zero(page, valid)) continue;
-            size_t encoded = ZSTD_compress(compressed, ZSTD_compressBound(valid), page, valid, 1);
-            if (ZSTD_isError(encoded)) { fprintf(stderr, "zstd: %s\n", ZSTD_getErrorName(encoded)); goto done; }
-            const void *source; size_t stored; uint8_t kind;
-            if (encoded < valid) { source = compressed; stored = encoded; kind = ENCODING_ZSTD; ++zstd; }
-            else { source = page; stored = valid; kind = ENCODING_RAW; ++raw; }
-            off_t target = (off_t)(h.data_offset + payload);
-            if (write_full(out, source, stored, target) < 0) { perror("write payload"); goto done; }
-            entries[index].offset = (uint64_t)target;
-            entries[index].length = (uint32_t)stored;
-            entries[index].encoding = kind;
-            payload += stored;
-        }
-        cursor = hole;
+        if ((uint64_t)data >= (uint64_t)position + valid) continue;
+        memset(page, 0, (size_t)page_size);
+        if (read_full(in, page, valid, position) < 0) { perror("read chunk"); goto done; }
+        uint64_t index = (uint64_t)position / h.page_size;
+        if (all_zero(page, valid)) continue;
+        size_t encoded = ZSTD_compress(compressed, ZSTD_compressBound(valid), page, valid, 1);
+        if (ZSTD_isError(encoded)) { fprintf(stderr, "zstd: %s\n", ZSTD_getErrorName(encoded)); goto done; }
+        const void *source; size_t stored; uint8_t kind;
+        if (encoded < valid) { source = compressed; stored = encoded; kind = ENCODING_ZSTD; ++zstd; }
+        else { source = page; stored = valid; kind = ENCODING_RAW; ++raw; }
+        off_t target = (off_t)(h.data_offset + payload);
+        if (write_full(out, source, stored, target) < 0) { perror("write payload"); goto done; }
+        entries[index].offset = (uint64_t)target;
+        entries[index].length = (uint32_t)stored;
+        entries[index].encoding = kind;
+        payload += stored;
     }
     zero = h.page_count - zstd - raw;
     if (write_full(out, entries, (size_t)(h.page_count * sizeof(*entries)), (off_t)h.index_offset) < 0
@@ -210,7 +215,7 @@ static int decompress_file(const char *input_path, const char *output_path) {
             ++zstd;
         } else if (e->encoding == ENCODING_RAW && e->length == valid) { memcpy(page, payload_buffer, valid); ++raw; }
         else { fprintf(stderr, "invalid encoding\n"); goto done; }
-        if (write_full(out, page, valid, (off_t)(i * h.page_size)) < 0) { perror("write page"); goto done; }
+        if (write_sparse(out, page, valid, (off_t)(i * h.page_size)) < 0) { perror("write chunk"); goto done; }
         payload += e->length;
     }
     if (fsync(out) < 0) { perror("sync output"); goto done; }
