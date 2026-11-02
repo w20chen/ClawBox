@@ -110,6 +110,42 @@ def test_joint_borrows_at_high_when_no_safe_idle_victim():
     assert events[-1]['cost_model'] == 'uncalibrated_deterministic_fallback'
 
 
+def test_checkpoint_http_timeout_rejects_one_victim_without_killing_controller():
+    class ApiError(RuntimeError):
+        status_code = 408
+
+    c, calls, events = controller('joint')
+    c.coordinator.evict_one_for_watermark = lambda: (_ for _ in ()).throw(
+        ApiError('HTTP 408')
+    )
+
+    assert c._joint_relieve_pressure(reason='test-pressure') == 'borrow'
+    assert calls == ['borrow']
+    assert c._error is None
+    assert c.checkpoint_timeout_count == 1
+    assert events[0] == {
+        'event': 'memory_pressure_reclaim_rejected',
+        'compute_node': 'n0',
+        'action': 'reclaim',
+        'reason': 'test-pressure',
+        'status_code': 408,
+        'error_type': 'ApiError',
+        'error': 'HTTP 408',
+        'controller_continues': True,
+    }
+    assert events[-1]['action'] == 'borrow'
+
+
+def test_non_timeout_checkpoint_failure_remains_controller_fatal():
+    c, _, _ = controller('joint')
+    c.coordinator.evict_one_for_watermark = lambda: (_ for _ in ()).throw(
+        RuntimeError('snapshot accounting corrupt')
+    )
+
+    with pytest.raises(RuntimeError, match='snapshot accounting corrupt'):
+        c._joint_relieve_pressure(reason='test-pressure')
+
+
 def test_concurrent_pressure_does_not_queue_behind_slow_borrow():
     c, calls, events = controller('joint')
     lifecycle = SimpleNamespace()

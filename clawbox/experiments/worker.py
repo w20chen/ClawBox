@@ -524,6 +524,7 @@ class WatermarkController:
         self.return_count = 0
         self.return_release_count = 0
         self.return_service_seconds = 0.0
+        self.checkpoint_timeout_count = 0
         self.low_route_fast_path_count = 0
         self._last_reactive_borrow_local_bytes: int | None = None
         self.memory_scheduling = getattr(arm.resources, 'memory_scheduling', 'static')
@@ -642,6 +643,35 @@ class WatermarkController:
             'physical_effect': effect,
             'pool': self.shared_pool.snapshot()})
 
+    def _reclaim_one(self, *, reason: str,
+                     tier: SnapshotTier | None = None) -> bool:
+        """Keep one timed-out Cube victim from killing the shared controller."""
+        try:
+            if tier is None:
+                return self.coordinator.evict_one_for_watermark()
+            return self.coordinator.evict_one_for_watermark(tier=tier)
+        except Exception as exc:
+            # Cube reports a server-side request timeout as ApiError(408).
+            # The lifecycle has already reconciled the remote state and keeps
+            # an ambiguous VM UNKNOWN; PolicyCoordinator also excludes the
+            # claimed victim when it releases the claim.  This is therefore a
+            # candidate failure, not a failure of this shared controller.
+            if (type(exc).__name__ != 'ApiError'
+                    or getattr(exc, 'status_code', None) != 408):
+                raise
+            self.checkpoint_timeout_count += 1
+            self.events.write({
+                'event': 'memory_pressure_reclaim_rejected',
+                'compute_node': self.node_id,
+                'action': 'reclaim',
+                'reason': reason,
+                'status_code': 408,
+                'error_type': type(exc).__name__,
+                'error': str(exc),
+                'controller_continues': True,
+            })
+            return False
+
     def _next_borrow_candidate(self) -> CubeSandboxLifecycle | None:
         if self.borrower is None:
             return None
@@ -684,7 +714,7 @@ class WatermarkController:
         if borrowing_enabled and not borrow_available:
             self._last_borrow_rejection = 'borrow_in_progress'
         if self.action_cost_model is None:
-            if self.coordinator.evict_one_for_watermark():
+            if self._reclaim_one(reason=reason):
                 self._decision('reclaim', reason)
                 return 'reclaim'
             borrowed = borrow_available and (
@@ -751,8 +781,8 @@ class WatermarkController:
         order.extend(action for action in ('reclaim', 'borrow') if action not in order)
         for action in order:
             if action == 'reclaim' and reclaim_candidate is not None:
-                if self.coordinator.evict_one_for_watermark(
-                    tier=SnapshotTier(reclaim_tier),
+                if self._reclaim_one(
+                    tier=SnapshotTier(reclaim_tier), reason=reason,
                 ):
                     self._decision('reclaim', reason, candidates=candidates,
                                    estimates=estimates)
@@ -2954,7 +2984,8 @@ class ExperimentWorker:
                     "low", "high", "hard", "peak_local_bytes", "high_crossings",
                     "high_overshoot_byte_seconds", "high_overshoot_seconds",
                     "hard_overshoot_byte_seconds", "hard_overshoot_seconds", "borrow_count",
-                    "return_count", "return_release_count", "low_route_fast_path_count",
+                    "return_count", "return_release_count", "checkpoint_timeout_count",
+                    "low_route_fast_path_count",
                 )} if c else None,
             }
         if arm.resources.compute_nodes:
@@ -2974,7 +3005,7 @@ class ExperimentWorker:
                     "high_overshoot_seconds", "hard_overshoot_byte_seconds", "hard_overshoot_seconds",
                     "borrow_count", "borrow_service_seconds", "return_count",
                     "return_release_count", "return_service_seconds",
-                    "low_route_fast_path_count",
+                    "checkpoint_timeout_count", "low_route_fast_path_count",
                 )
             }, peak_local_bytes=memory.peak_used_delta_bytes, **{
                 name: max(getattr(c, name) for c in controllers) for name in (
@@ -3150,6 +3181,10 @@ class ExperimentWorker:
                 ),
                 "shared_memory_return_service_seconds": (
                     watermark_controller.return_service_seconds
+                    if watermark_controller is not None else None
+                ),
+                "checkpoint_timeout_count": (
+                    watermark_controller.checkpoint_timeout_count
                     if watermark_controller is not None else None
                 ),
                 "low_route_fast_path_count": (
