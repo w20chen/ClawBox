@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from clawbox.experiments.worker import WatermarkController, observed_tool_concurrency
+from clawbox.experiments.policy import PressureReclaimRejected
 from clawbox.experiments.snapshot_pool import WarmSnapshotPool
 from clawbox.experiments.snapshot_pool import SnapshotKey
 from clawbox.experiments.memory_actions import MemoryActionCostModel
@@ -122,18 +123,34 @@ def test_checkpoint_http_timeout_rejects_one_victim_without_killing_controller()
     assert c._joint_relieve_pressure(reason='test-pressure') == 'borrow'
     assert calls == ['borrow']
     assert c._error is None
+    assert c.reclaim_rejection_count == 1
     assert c.checkpoint_timeout_count == 1
     assert events[0] == {
         'event': 'memory_pressure_reclaim_rejected',
         'compute_node': 'n0',
         'action': 'reclaim',
         'reason': 'test-pressure',
+        'rejection_reason': 'cube_checkpoint_http_timeout',
         'status_code': 408,
         'error_type': 'ApiError',
         'error': 'HTTP 408',
         'controller_continues': True,
     }
     assert events[-1]['action'] == 'borrow'
+
+
+def test_stale_pressure_candidate_does_not_kill_shared_controller():
+    c, calls, events = controller('joint')
+    c.coordinator.evict_one_for_watermark = lambda: (_ for _ in ()).throw(
+        PressureReclaimRejected('Runtime agent ended before pressure checkpoint')
+    )
+
+    assert c._joint_relieve_pressure(reason='test-pressure') == 'borrow'
+    assert calls == ['borrow']
+    assert c.reclaim_rejection_count == 1
+    assert c.checkpoint_timeout_count == 0
+    assert events[0]['rejection_reason'] == 'pressure_candidate_unavailable'
+    assert events[0]['controller_continues'] is True
 
 
 def test_non_timeout_checkpoint_failure_remains_controller_fatal():

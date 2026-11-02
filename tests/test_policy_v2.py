@@ -571,6 +571,31 @@ def test_high_watermark_proactively_evicts_a_safe_waiting_pair(include_runtime) 
     assert coordinator.evict_one_for_watermark() is False
 
 
+def test_runtime_fence_failure_happens_before_either_pair_checkpoint() -> None:
+    policy = PolicySpec(
+        name="final", admission="predicted", reclamation="snapshot_pause",
+        eviction="wait_aware_pressure", restore="reactive", runtime_snapshot=True,
+    )
+    coordinator = PolicyCoordinator(
+        policy, budget_mib=32, emergency_free_mib=0,
+        operation_headroom_mib=0,
+    )
+    tool, runtime = Lifecycle(), Lifecycle()
+    coordinator.register("waiting", tool)
+    coordinator.register_runtime(
+        "waiting", runtime,
+        before_pair_pause=lambda: (_ for _ in ()).throw(
+            RuntimeError("Runtime agent is gone")
+        ),
+    )
+    coordinator.begin_model_wait("waiting", "wait-1")
+
+    with pytest.raises(RuntimeError, match="Runtime agent is gone"):
+        coordinator.evict_one_for_watermark()
+    assert tool.pauses == runtime.pauses == 0
+    assert coordinator.evict_one_for_watermark() is False
+
+
 def test_actual_model_response_removes_unpredicted_idle_candidate() -> None:
     policy = PolicySpec(
         name="wait", admission="predicted", reclamation="snapshot_pause",

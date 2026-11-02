@@ -34,6 +34,7 @@ class SessionState:
     eviction_in_progress: bool = False
     last_used: float = 0.0
     runtime_lifecycle: Pausable | None = None
+    pair_before_pause: Callable[[], None] | None = None
     runtime_before_pause: Callable[[], None] | None = None
     wait_id: str | None = None
     wait_started_monotonic_s: float | None = None
@@ -52,6 +53,10 @@ class AdmissionRequest:
 
 class AdmissionTimeout(RuntimeError):
     pass
+
+
+class PressureReclaimRejected(RuntimeError):
+    """The claimed session cannot safely complete this pressure checkpoint."""
 
 
 @contextmanager
@@ -247,10 +252,12 @@ class PolicyCoordinator:
 
     def register_runtime(
         self, session_id: str, lifecycle: Pausable, *,
+        before_pair_pause: Callable[[], None] | None = None,
         before_pause: Callable[[], None] | None = None,
     ) -> None:
         with self._condition:
             self._sessions[session_id].runtime_lifecycle = lifecycle
+            self._sessions[session_id].pair_before_pause = before_pair_pause
             self._sessions[session_id].runtime_before_pause = before_pause
 
     def begin_model_wait(self, session_id: str, wait_id: str) -> None:
@@ -1425,6 +1432,11 @@ class PolicyCoordinator:
         try:
             with checkpoint_reservations((victim.lifecycle, runtime), tier) as tier:
                 reservations_ready = True
+                # Validate and fence Runtime before checkpointing either half
+                # of the pair.  If the waiting Agent has already exited, leave
+                # Tool resident too and let the owning session clean itself up.
+                if runtime is not None and victim.pair_before_pause is not None:
+                    victim.pair_before_pause()
                 tool_elapsed = (victim.lifecycle.checkpoint_and_evict()
                                 if tier is None else victim.lifecycle.checkpoint_and_evict(tier=tier))
                 runtime_elapsed = None

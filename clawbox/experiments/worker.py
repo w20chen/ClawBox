@@ -58,7 +58,7 @@ from .openclaw_driver import (
     native_tool_workspace_setup_command,
     run_openclaw,
 )
-from .policy import PolicyCoordinator, PolicyEventExecutor
+from .policy import PolicyCoordinator, PolicyEventExecutor, PressureReclaimRejected
 from .congestion import locate_cgroup
 from .control_timing import monitor_gc, span, timed_lock, trace_callback, trace_scope, operation, timing_details, worker_cyclic_gc
 from .pressure import PressureControl
@@ -487,6 +487,10 @@ def policy_event_workers(arm: ExperimentArm) -> int:
             or arm.resources.pool_transfer_concurrency)
 
 
+class OpenClawAgentUnavailable(RuntimeError):
+    """The session's Runtime agent is no longer a safe checkpoint victim."""
+
+
 class WatermarkController:
     """Enforce LOW/HIGH LOCAL hysteresis with shared-memory OOM protection."""
 
@@ -524,6 +528,7 @@ class WatermarkController:
         self.return_count = 0
         self.return_release_count = 0
         self.return_service_seconds = 0.0
+        self.reclaim_rejection_count = 0
         self.checkpoint_timeout_count = 0
         self.low_route_fast_path_count = 0
         self._last_reactive_borrow_local_bytes: int | None = None
@@ -656,16 +661,26 @@ class WatermarkController:
             # an ambiguous VM UNKNOWN; PolicyCoordinator also excludes the
             # claimed victim when it releases the claim.  This is therefore a
             # candidate failure, not a failure of this shared controller.
-            if (type(exc).__name__ != 'ApiError'
-                    or getattr(exc, 'status_code', None) != 408):
+            checkpoint_timeout = (
+                type(exc).__name__ == 'ApiError'
+                and getattr(exc, 'status_code', None) == 408
+            )
+            if not checkpoint_timeout and not isinstance(
+                    exc, PressureReclaimRejected):
                 raise
-            self.checkpoint_timeout_count += 1
+            self.reclaim_rejection_count += 1
+            if checkpoint_timeout:
+                self.checkpoint_timeout_count += 1
             self.events.write({
                 'event': 'memory_pressure_reclaim_rejected',
                 'compute_node': self.node_id,
                 'action': 'reclaim',
                 'reason': reason,
-                'status_code': 408,
+                'rejection_reason': (
+                    'cube_checkpoint_http_timeout' if checkpoint_timeout
+                    else 'pressure_candidate_unavailable'
+                ),
+                'status_code': getattr(exc, 'status_code', None),
                 'error_type': type(exc).__name__,
                 'error': str(exc),
                 'controller_continues': True,
@@ -2984,7 +2999,8 @@ class ExperimentWorker:
                     "low", "high", "hard", "peak_local_bytes", "high_crossings",
                     "high_overshoot_byte_seconds", "high_overshoot_seconds",
                     "hard_overshoot_byte_seconds", "hard_overshoot_seconds", "borrow_count",
-                    "return_count", "return_release_count", "checkpoint_timeout_count",
+                    "return_count", "return_release_count", "reclaim_rejection_count",
+                    "checkpoint_timeout_count",
                     "low_route_fast_path_count",
                 )} if c else None,
             }
@@ -3005,7 +3021,8 @@ class ExperimentWorker:
                     "high_overshoot_seconds", "hard_overshoot_byte_seconds", "hard_overshoot_seconds",
                     "borrow_count", "borrow_service_seconds", "return_count",
                     "return_release_count", "return_service_seconds",
-                    "checkpoint_timeout_count", "low_route_fast_path_count",
+                    "reclaim_rejection_count", "checkpoint_timeout_count",
+                    "low_route_fast_path_count",
                 )
             }, peak_local_bytes=memory.peak_used_delta_bytes, **{
                 name: max(getattr(c, name) for c in controllers) for name in (
@@ -3185,6 +3202,10 @@ class ExperimentWorker:
                 ),
                 "checkpoint_timeout_count": (
                     watermark_controller.checkpoint_timeout_count
+                    if watermark_controller is not None else None
+                ),
+                "memory_reclaim_rejection_count": (
+                    watermark_controller.reclaim_rejection_count
                     if watermark_controller is not None else None
                 ),
                 "low_route_fast_path_count": (
@@ -3562,9 +3583,16 @@ class ExperimentWorker:
                                   "error_type": type(exc).__name__})
                     raise
 
+            def before_pair_idle_pause() -> None:
+                try:
+                    wait_state["runtime_agent_pid_before_pause"] = observe_openclaw_agent_pid(
+                        "before_runtime_pause")
+                except OpenClawAgentUnavailable as exc:
+                    raise PressureReclaimRejected(
+                        "Runtime agent ended before pressure checkpoint"
+                    ) from exc
+
             def before_runtime_idle_pause() -> None:
-                wait_state["runtime_agent_pid_before_pause"] = observe_openclaw_agent_pid(
-                    "before_runtime_pause")
                 gateway_session.invalidate_pending_delivery()
 
             def restore_runtime_for_model_wait_locked(
@@ -3786,6 +3814,10 @@ class ExperimentWorker:
         coordinator.register(session_id, lifecycle)
         coordinator.register_runtime(
             session_id, runtime_lifecycle,
+            before_pair_pause=(
+                before_pair_idle_pause
+                if gateway_session is not None else None
+            ),
             before_pause=(
                 before_runtime_idle_pause
                 if gateway_session is not None else None
@@ -3943,13 +3975,13 @@ class ExperimentWorker:
                     15,
                 )
                 if result.exit_code:
-                    raise RuntimeError(
+                    raise OpenClawAgentUnavailable(
                         f"OpenClaw agent PID is not alive during {phase}: {result.stderr[-500:]}"
                     )
                 try:
                     pid = int(result.stdout.strip())
                 except ValueError as exc:
-                    raise RuntimeError(
+                    raise OpenClawAgentUnavailable(
                         f"OpenClaw agent PID was invalid during {phase}: {result.stdout!r}"
                     ) from exc
                 agent_pid_observations.append({"phase": phase, "pid": pid})
