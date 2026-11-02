@@ -291,7 +291,7 @@ because it is fixed for every arm in one run:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `snapshot_compression` | `none` | `none` preserves Cube's native sparse/CoW snapshot; `zstd-page` stores independent 1 MiB sparse chunks as ZERO, Zstd level 1, or RAW |
+| `snapshot_compression` | `none` | `none` preserves Cube's native sparse/CoW snapshot; `zstd-page` omits all-zero 1 MiB sparse chunks and stores every remaining chunk as an independent Zstd level 1 frame |
 | `snapshot_compression_binary` | `clawbox-zstd-page-snapshot` | Absolute path or executable name of the native helper |
 
 Build the helper once on a host that provides `libzstd.so.1`:

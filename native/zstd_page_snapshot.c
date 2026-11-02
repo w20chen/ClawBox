@@ -19,19 +19,18 @@ size_t ZSTD_decompress(void *dst, size_t dstCapacity, const void *src, size_t co
 unsigned ZSTD_isError(size_t code);
 const char *ZSTD_getErrorName(size_t code);
 
-#define MAGIC "CBZPG001"
-#define VERSION 1U
-#define ENCODING_ZERO 0U
+#define MAGIC "CBZPG002"
+#define VERSION 2U
+#define ENCODING_HOLE 0U
 #define ENCODING_ZSTD 1U
-#define ENCODING_RAW 2U
 #define CHUNK_BYTES (1024U * 1024U)
 
 struct __attribute__((packed)) header {
     char magic[8];
     uint32_t version;
-    uint32_t page_size;
+    uint32_t chunk_size;
     uint64_t logical_size;
-    uint64_t page_count;
+    uint64_t chunk_count;
     uint64_t index_offset;
     uint64_t data_offset;
     uint64_t reserved[2];
@@ -108,20 +107,20 @@ static long exec_peak_rss_kib(void) {
 }
 
 static void report(const char *operation, const struct stat *input, const struct stat *output,
-                   const struct header *h, uint64_t zero, uint64_t zstd, uint64_t raw,
+                   const struct header *h, uint64_t holes, uint64_t zstd,
                    uint64_t payload, double wall, double cpu, long peak_kib) {
     uint64_t in_alloc = input ? allocated_bytes(input) : 0;
     uint64_t out_alloc = output ? allocated_bytes(output) : 0;
     double mib = h->logical_size / 1048576.0;
-    printf("{\"operation\":\"%s\",\"page_size\":%u,\"logical_bytes\":%" PRIu64
-           ",\"page_count\":%" PRIu64 ",\"zero_pages\":%" PRIu64
-           ",\"zstd_pages\":%" PRIu64 ",\"raw_pages\":%" PRIu64
+    printf("{\"operation\":\"%s\",\"chunk_size\":%u,\"logical_bytes\":%" PRIu64
+           ",\"chunk_count\":%" PRIu64 ",\"hole_chunks\":%" PRIu64
+           ",\"zstd_chunks\":%" PRIu64
            ",\"index_bytes\":%" PRIu64 ",\"payload_bytes\":%" PRIu64
            ",\"input_allocated_bytes\":%" PRIu64 ",\"output_allocated_bytes\":%" PRIu64
            ",\"wall_seconds\":%.9f,\"cpu_seconds\":%.9f,\"logical_mib_per_second\":%.3f"
            ",\"peak_rss_kib\":%ld}\n",
-           operation, h->page_size, h->logical_size, h->page_count, zero, zstd, raw,
-           h->page_count * (uint64_t)sizeof(struct entry), payload, in_alloc, out_alloc,
+           operation, h->chunk_size, h->logical_size, h->chunk_count, holes, zstd,
+           h->chunk_count * (uint64_t)sizeof(struct entry), payload, in_alloc, out_alloc,
            wall, cpu, wall > 0 ? mib / wall : 0.0, peak_kib);
 }
 
@@ -131,51 +130,49 @@ static int compress_file(const char *input_path, const char *output_path) {
     struct header h = {0};
     struct entry *entries = NULL;
     uint8_t *page = NULL, *compressed = NULL;
-    uint64_t zero = 0, zstd = 0, raw = 0, payload = 0;
+    uint64_t holes = 0, zstd = 0, payload = 0;
     struct timespec wall_a, wall_b;
     struct rusage usage_a, usage_b;
-    long page_size = CHUNK_BYTES;
+    long chunk_size = CHUNK_BYTES;
     if ((in = open(input_path, O_RDONLY | O_CLOEXEC)) < 0 || fstat(in, &in_st) < 0) { perror(input_path); goto done; }
     if (!S_ISREG(in_st.st_mode)) { fprintf(stderr, "input is not a regular file\n"); goto done; }
-    memcpy(h.magic, MAGIC, 8); h.version = VERSION; h.page_size = (uint32_t)page_size;
+    memcpy(h.magic, MAGIC, 8); h.version = VERSION; h.chunk_size = (uint32_t)chunk_size;
     h.logical_size = (uint64_t)in_st.st_size;
-    h.page_count = (h.logical_size + h.page_size - 1) / h.page_size;
-    h.index_offset = sizeof(h); h.data_offset = sizeof(h) + h.page_count * sizeof(struct entry);
-    if (h.page_count > SIZE_MAX / sizeof(struct entry)) { fprintf(stderr, "snapshot too large\n"); goto done; }
-    entries = calloc((size_t)h.page_count, sizeof(*entries));
-    page = malloc((size_t)page_size); compressed = malloc(ZSTD_compressBound((size_t)page_size));
+    h.chunk_count = (h.logical_size + h.chunk_size - 1) / h.chunk_size;
+    h.index_offset = sizeof(h); h.data_offset = sizeof(h) + h.chunk_count * sizeof(struct entry);
+    if (h.chunk_count > SIZE_MAX / sizeof(struct entry)) { fprintf(stderr, "snapshot too large\n"); goto done; }
+    entries = calloc((size_t)h.chunk_count, sizeof(*entries));
+    page = malloc((size_t)chunk_size); compressed = malloc(ZSTD_compressBound((size_t)chunk_size));
     if (!entries || !page || !compressed) { perror("allocate"); goto done; }
     if ((out = open(output_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, in_st.st_mode & 0777)) < 0) { perror(output_path); goto done; }
     if (ftruncate(out, (off_t)h.data_offset) < 0 || write_full(out, &h, sizeof(h), 0) < 0) { perror("initialize output"); goto done; }
     clock_gettime(CLOCK_MONOTONIC, &wall_a); getrusage(RUSAGE_SELF, &usage_a);
-    for (off_t position = 0; (uint64_t)position < h.logical_size; position += page_size) {
-        size_t valid = (size_t)(((uint64_t)position + (uint64_t)page_size <= h.logical_size)
-                     ? (uint64_t)page_size : h.logical_size - (uint64_t)position);
+    for (off_t position = 0; (uint64_t)position < h.logical_size; position += chunk_size) {
+        size_t valid = (size_t)(((uint64_t)position + (uint64_t)chunk_size <= h.logical_size)
+                     ? (uint64_t)chunk_size : h.logical_size - (uint64_t)position);
         off_t data = lseek(in, position, SEEK_DATA);
         if (data < 0) { if (errno == ENXIO) break; perror("SEEK_DATA"); goto done; }
         if ((uint64_t)data >= (uint64_t)position + valid) continue;
-        memset(page, 0, (size_t)page_size);
+        memset(page, 0, (size_t)chunk_size);
         if (read_full(in, page, valid, position) < 0) { perror("read chunk"); goto done; }
-        uint64_t index = (uint64_t)position / h.page_size;
+        uint64_t index = (uint64_t)position / h.chunk_size;
         if (all_zero(page, valid)) continue;
         size_t encoded = ZSTD_compress(compressed, ZSTD_compressBound(valid), page, valid, 1);
         if (ZSTD_isError(encoded)) { fprintf(stderr, "zstd: %s\n", ZSTD_getErrorName(encoded)); goto done; }
-        const void *source; size_t stored; uint8_t kind;
-        if (encoded < valid) { source = compressed; stored = encoded; kind = ENCODING_ZSTD; ++zstd; }
-        else { source = page; stored = valid; kind = ENCODING_RAW; ++raw; }
         off_t target = (off_t)(h.data_offset + payload);
-        if (write_full(out, source, stored, target) < 0) { perror("write payload"); goto done; }
+        if (write_full(out, compressed, encoded, target) < 0) { perror("write payload"); goto done; }
         entries[index].offset = (uint64_t)target;
-        entries[index].length = (uint32_t)stored;
-        entries[index].encoding = kind;
-        payload += stored;
+        entries[index].length = (uint32_t)encoded;
+        entries[index].encoding = ENCODING_ZSTD;
+        payload += encoded;
+        ++zstd;
     }
-    zero = h.page_count - zstd - raw;
-    if (write_full(out, entries, (size_t)(h.page_count * sizeof(*entries)), (off_t)h.index_offset) < 0
+    holes = h.chunk_count - zstd;
+    if (write_full(out, entries, (size_t)(h.chunk_count * sizeof(*entries)), (off_t)h.index_offset) < 0
         || ftruncate(out, (off_t)(h.data_offset + payload)) < 0 || fsync(out) < 0) { perror("finalize output"); goto done; }
     clock_gettime(CLOCK_MONOTONIC, &wall_b); getrusage(RUSAGE_SELF, &usage_b);
     if (fstat(out, &out_st) < 0) { perror("stat output"); goto done; }
-    report("compress", &in_st, &out_st, &h, zero, zstd, raw, payload,
+    report("compress", &in_st, &out_st, &h, holes, zstd, payload,
            seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), exec_peak_rss_kib());
     rc = 0;
 done:
@@ -190,38 +187,37 @@ static int decompress_file(const char *input_path, const char *output_path) {
     struct stat in_st, out_st;
     struct header h = {0}; struct entry *entries = NULL;
     uint8_t *page = NULL, *payload_buffer = NULL; size_t payload_capacity = 0;
-    uint64_t zero = 0, zstd = 0, raw = 0, payload = 0;
+    uint64_t holes = 0, zstd = 0, payload = 0;
     struct timespec wall_a, wall_b; struct rusage usage_a, usage_b;
     if ((in = open(input_path, O_RDONLY | O_CLOEXEC)) < 0 || fstat(in, &in_st) < 0) { perror(input_path); goto done; }
     if (read_full(in, &h, sizeof(h), 0) < 0 || memcmp(h.magic, MAGIC, 8) || h.version != VERSION
-        || h.page_size == 0 || h.page_count != (h.logical_size + h.page_size - 1) / h.page_size
-        || h.index_offset != sizeof(h) || h.data_offset != sizeof(h) + h.page_count * sizeof(struct entry)) {
-        fprintf(stderr, "invalid zstd page snapshot\n"); goto done;
+        || h.chunk_size == 0 || h.chunk_count != (h.logical_size + h.chunk_size - 1) / h.chunk_size
+        || h.index_offset != sizeof(h) || h.data_offset != sizeof(h) + h.chunk_count * sizeof(struct entry)) {
+        fprintf(stderr, "invalid zstd chunk snapshot\n"); goto done;
     }
-    if (h.page_count > SIZE_MAX / sizeof(struct entry)) goto done;
-    entries = malloc((size_t)(h.page_count * sizeof(*entries))); page = malloc(h.page_size);
-    if (!entries || !page || read_full(in, entries, (size_t)(h.page_count * sizeof(*entries)), (off_t)h.index_offset) < 0) { perror("read index"); goto done; }
+    if (h.chunk_count > SIZE_MAX / sizeof(struct entry)) goto done;
+    entries = malloc((size_t)(h.chunk_count * sizeof(*entries))); page = malloc(h.chunk_size);
+    if (!entries || !page || read_full(in, entries, (size_t)(h.chunk_count * sizeof(*entries)), (off_t)h.index_offset) < 0) { perror("read index"); goto done; }
     if ((out = open(output_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600)) < 0 || ftruncate(out, (off_t)h.logical_size) < 0) { perror(output_path); goto done; }
     clock_gettime(CLOCK_MONOTONIC, &wall_a); getrusage(RUSAGE_SELF, &usage_a);
-    for (uint64_t i = 0; i < h.page_count; ++i) {
-        struct entry *e = &entries[i]; size_t valid = (size_t)(((i + 1) * h.page_size <= h.logical_size) ? h.page_size : h.logical_size - i * h.page_size);
-        if (e->encoding == ENCODING_ZERO) { ++zero; continue; }
-        if (e->length == 0 || e->offset < h.data_offset) { fprintf(stderr, "invalid page entry\n"); goto done; }
+    for (uint64_t i = 0; i < h.chunk_count; ++i) {
+        struct entry *e = &entries[i]; size_t valid = (size_t)(((i + 1) * h.chunk_size <= h.logical_size) ? h.chunk_size : h.logical_size - i * h.chunk_size);
+        if (e->encoding == ENCODING_HOLE) { ++holes; continue; }
+        if (e->length == 0 || e->offset < h.data_offset) { fprintf(stderr, "invalid chunk entry\n"); goto done; }
         if (e->length > payload_capacity) { uint8_t *next = realloc(payload_buffer, e->length); if (!next) { perror("payload buffer"); goto done; } payload_buffer = next; payload_capacity = e->length; }
         if (read_full(in, payload_buffer, e->length, (off_t)e->offset) < 0) { perror("read payload"); goto done; }
         if (e->encoding == ENCODING_ZSTD) {
             size_t decoded = ZSTD_decompress(page, valid, payload_buffer, e->length);
             if (ZSTD_isError(decoded) || decoded != valid) { fprintf(stderr, "zstd decode failed\n"); goto done; }
             ++zstd;
-        } else if (e->encoding == ENCODING_RAW && e->length == valid) { memcpy(page, payload_buffer, valid); ++raw; }
-        else { fprintf(stderr, "invalid encoding\n"); goto done; }
-        if (write_sparse(out, page, valid, (off_t)(i * h.page_size)) < 0) { perror("write chunk"); goto done; }
+        } else { fprintf(stderr, "invalid encoding\n"); goto done; }
+        if (write_sparse(out, page, valid, (off_t)(i * h.chunk_size)) < 0) { perror("write chunk"); goto done; }
         payload += e->length;
     }
     if (fsync(out) < 0) { perror("sync output"); goto done; }
     clock_gettime(CLOCK_MONOTONIC, &wall_b); getrusage(RUSAGE_SELF, &usage_b);
     if (fstat(out, &out_st) < 0) goto done;
-    report("decompress", &in_st, &out_st, &h, zero, zstd, raw, payload,
+    report("decompress", &in_st, &out_st, &h, holes, zstd, payload,
            seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), exec_peak_rss_kib());
     rc = 0;
 done:

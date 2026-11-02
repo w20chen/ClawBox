@@ -20,7 +20,7 @@ def main() -> None:
     compression_wall = sum(item["compression"]["compress_wall_seconds"] for item in records)
     decompression_wall = sum(item["decompression"]["decompress_wall_seconds"] for item in records)
     logical = sum(item["compression"]["logical_bytes"] for item in records)
-    pages = sum(item["compression"]["page_count"] for item in records)
+    chunks = sum(item["compression"]["chunk_count"] for item in records)
     summary = {
         "schema_version": 1,
         "snapshot_count": len(records),
@@ -32,10 +32,9 @@ def main() -> None:
         "warm_net_dram_saved_bytes": sum(item["warm_net_dram_saved_bytes"] or 0 for item in records),
         "cold_disk_saved_bytes": sum(item["cold_disk_saved_bytes"] or 0 for item in records),
         "logical_bytes": logical,
-        "page_count": pages,
-        "zero_pages": sum(item["compression"]["zero_pages"] for item in records),
-        "zstd_pages": sum(item["compression"]["zstd_pages"] for item in records),
-        "raw_pages": sum(item["compression"]["raw_pages"] for item in records),
+        "chunk_count": chunks,
+        "hole_chunks": sum(item["compression"]["hole_chunks"] for item in records),
+        "zstd_chunks": sum(item["compression"]["zstd_chunks"] for item in records),
         "compress_wall_seconds": compression_wall,
         "compress_cpu_seconds": sum(item["compression"]["compress_cpu_seconds"] for item in records),
         "compress_mib_per_second": logical / 1048576 / compression_wall if compression_wall else 0,
@@ -47,9 +46,9 @@ def main() -> None:
         "all_content_verified": all(item["content_verified"] for item in records),
         "snapshots": records,
     }
-    for encoding in ("zero", "zstd", "raw"):
-        summary[f"{encoding}_page_percent"] = (
-            summary[f"{encoding}_pages"] / pages * 100 if pages else 0
+    for encoding in ("hole", "zstd"):
+        summary[f"{encoding}_chunk_percent"] = (
+            summary[f"{encoding}_chunks"] / chunks * 100 if chunks else 0
         )
     args.json.parent.mkdir(parents=True, exist_ok=True)
     args.json.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

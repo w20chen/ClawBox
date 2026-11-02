@@ -78,8 +78,8 @@ def main() -> None:
                     row.update({
                         "codec_action": "compress",
                         **{key: compression.get(key) for key in (
-                            "algorithm", "zstd_level", "page_size", "logical_bytes",
-                            "page_count", "zero_pages", "zstd_pages", "raw_pages",
+                            "algorithm", "zstd_level", "chunk_size", "logical_bytes",
+                            "chunk_count", "hole_chunks", "zstd_chunks",
                             "index_bytes", "payload_bytes", "baseline_allocated_bytes",
                             "compressed_allocated_bytes", "saved_allocated_bytes",
                             "space_saving_fraction", "compress_wall_seconds",
@@ -94,10 +94,9 @@ def main() -> None:
                         "algorithm": decompression.get("algorithm"),
                         "zstd_level": decompression.get("zstd_level"),
                         "logical_bytes": original.get("logical_bytes"),
-                        "page_count": original.get("page_count"),
-                        "zero_pages": original.get("zero_pages"),
-                        "zstd_pages": original.get("zstd_pages"),
-                        "raw_pages": original.get("raw_pages"),
+                        "chunk_count": original.get("chunk_count"),
+                        "hole_chunks": original.get("hole_chunks"),
+                        "zstd_chunks": original.get("zstd_chunks"),
                         "baseline_allocated_bytes": original.get("baseline_allocated_bytes"),
                         "compressed_allocated_bytes": original.get("compressed_allocated_bytes"),
                         "saved_allocated_bytes": original.get("saved_allocated_bytes"),
@@ -114,7 +113,7 @@ def main() -> None:
     rows.sort(key=lambda item: (float(item["started_unix_s"]), str(item["role"])))
     compressed = [row for row in rows if row["codec_action"] == "compress"]
     decompressed = [row for row in rows if row["codec_action"] == "decompress"]
-    total_pages = sum(int(row.get("page_count") or 0) for row in compressed)
+    total_chunks = sum(int(row.get("chunk_count") or 0) for row in compressed)
     compressed_logical = sum(int(row.get("logical_bytes") or 0) for row in compressed)
     decompressed_logical = sum(int(row.get("logical_bytes") or 0) for row in decompressed)
     baseline = sum(int(row.get("baseline_allocated_bytes") or 0) for row in compressed)
@@ -133,10 +132,9 @@ def main() -> None:
         "compressed_allocated_bytes": stored,
         "saved_allocated_bytes": baseline - stored,
         "space_saving_percent": (baseline - stored) / baseline * 100 if baseline else 0,
-        "page_count": total_pages,
-        "zero_pages": sum(int(row.get("zero_pages") or 0) for row in compressed),
-        "zstd_pages": sum(int(row.get("zstd_pages") or 0) for row in compressed),
-        "raw_pages": sum(int(row.get("raw_pages") or 0) for row in compressed),
+        "chunk_count": total_chunks,
+        "hole_chunks": sum(int(row.get("hole_chunks") or 0) for row in compressed),
+        "zstd_chunks": sum(int(row.get("zstd_chunks") or 0) for row in compressed),
         "compression_logical_bytes": compressed_logical,
         "compression_wall_seconds": compression_wall,
         "compression_cpu_seconds": sum(float(row.get("compress_cpu_seconds") or 0) for row in compressed),
@@ -200,9 +198,9 @@ def main() -> None:
             "compress_wall_seconds_mean": mean(tier_rows, "compress_wall_seconds"),
             "compress_cpu_seconds_mean": mean(tier_rows, "compress_cpu_seconds"),
         }
-    for encoding in ("zero", "zstd", "raw"):
-        summary[f"{encoding}_page_percent"] = (
-            summary[f"{encoding}_pages"] / total_pages * 100 if total_pages else 0
+    for encoding in ("hole", "zstd"):
+        summary[f"{encoding}_chunk_percent"] = (
+            summary[f"{encoding}_chunks"] / total_chunks * 100 if total_chunks else 0
         )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "snapshots.json").write_text(
