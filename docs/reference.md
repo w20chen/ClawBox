@@ -302,10 +302,11 @@ because it is fixed for every arm in one run:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `snapshot_compression` | `none` | `none` preserves Cube's native sparse/CoW snapshot; `zstd-page` omits all-zero 1 MiB sparse chunks and stores every remaining chunk as an independent Zstd level 1 frame |
-| `snapshot_compression_binary` | `clawbox-zstd-page-snapshot` | Absolute path or executable name of the native helper |
+| `snapshot_compression` | `zstd-page` | The standard encoding omits all-zero 1 MiB sparse chunks and stores every remaining chunk as an independent Zstd level 1 frame; `none` explicitly selects an uncompressed baseline |
+| `snapshot_compression_binary` | `/usr/local/bin/clawbox-zstd-page-snapshot` | Absolute path of the native helper installed by the host setup instructions |
 
-Build the helper once on a host that provides `libzstd.so.1`:
+Build the standard helper once per installed ClawBox native-helper revision on
+a host that provides `libzstd.so.1`:
 
 ```bash
 sudo bash scripts/build-zstd-page-snapshot.sh /usr/local/bin/clawbox-zstd-page-snapshot
@@ -314,8 +315,8 @@ sudo bash scripts/build-zstd-page-snapshot.sh /usr/local/bin/clawbox-zstd-page-s
 WARM and COLD use the same format and parameters. ClawBox restores Cube's native
 sparse files before resume or relocation, and does not compress external template
 layers or an inode with references outside the snapshot. Compression changes need
-a new run ID and fresh qualification, but no host apply, VM image rebuild, or KB
-retraining. WARM allocated-byte savings are released tmpfs DRAM while parked;
+a new run ID and fresh qualification, but no VM image rebuild or KB retraining.
+WARM allocated-byte savings are released tmpfs DRAM while parked;
 COLD allocated-byte savings are disk savings only. Pool admission remains charged
 at the conservative native allocation because restore temporarily recreates it.
 

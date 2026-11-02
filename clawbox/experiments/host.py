@@ -77,6 +77,7 @@ class HostConfig(BaseModel):
     cube_scheduler_overcommit: dict[str, CubeOvercommitRatio] | None = Field(default=None, min_length=1)
     cube_scheduler_vm_count_ratio: dict[str, float] | None = Field(default=None, min_length=1)
     cube_master_log_level: Literal["debug", "info", "warn", "error"] | None = None
+    snapshot_compression_binary: str = "/usr/local/bin/clawbox-zstd-page-snapshot"
 
     @field_validator("cube_scheduler_vm_count_ratio")
     @classmethod
@@ -124,6 +125,12 @@ class HostConfig(BaseModel):
                 raise ValueError(f"{key}: use an absolute Linux path without spaces or '..'")
             if str(Path(value)) == "/":
                 raise ValueError(f"{key}: root directory is not a dedicated path")
+        if (not re.fullmatch(r"/[A-Za-z0-9_./-]+", self.snapshot_compression_binary)
+                or ".." in Path(self.snapshot_compression_binary).parts
+                or Path(self.snapshot_compression_binary) == Path("/")):
+            raise ValueError(
+                "snapshot_compression_binary must be an absolute Linux file path"
+            )
         warm = Path(self.warm_root)
         for key in ("cold_root", "cubelet_data_root", "output_root", "cube_source"):
             other = Path(getattr(self, key))
@@ -145,6 +152,21 @@ def _run(*argv: str) -> str:
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout).strip() or f"exit {result.returncode}")
     return result.stdout.strip()
+
+
+def snapshot_compression_helper(path: str) -> dict[str, object]:
+    helper = Path(path)
+    if not helper.is_file() or not os.access(helper, os.X_OK):
+        raise RuntimeError(f"snapshot compression helper is not executable: {helper}")
+    result = subprocess.run(
+        [str(helper)], capture_output=True, text=True, timeout=5,
+    )
+    output = (result.stderr or result.stdout).strip()
+    if not output.startswith("usage:"):
+        raise RuntimeError(
+            f"snapshot compression helper did not return its usage contract: {helper}"
+        )
+    return {"path": str(helper), "format": "zstd-page-v2"}
 
 
 def apply_network(config: HostConfig) -> None:
@@ -408,7 +430,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
                 high_gib=n["high_watermark_mib"] // 1024) for n in profile["compute_nodes"]]
         for target, source in (("node", "node"), ("cube_source", "cube_source"),
                                ("local_node", "local_numa_node"), ("warm_node", "warm_numa_node"),
-                               ("warm_root", "warm_root"), ("cold_root", "cold_root")):
+                               ("warm_root", "warm_root"), ("cold_root", "cold_root"),
+                               ("snapshot_compression_binary", "snapshot_compression_binary")):
             if profile.get(source) is not None:
                 values[target] = profile[source]
         for key in ('output_root', 'cubelet_data_root'):
@@ -529,6 +552,12 @@ def check(config: HostConfig) -> dict:
           "Start Docker and enable this user's Docker access; docs/installation.md step 1.")
     for name in ("findmnt", "mount", "numactl", "systemctl"):
         probe(name, lambda n=name: shutil.which(n) is not None, "Install host tools from docs/installation.md step 1.")
+    probe(
+        "Zstd snapshot helper",
+        lambda: snapshot_compression_helper(config.snapshot_compression_binary),
+        "Run sudo bash scripts/build-zstd-page-snapshot.sh "
+        f"{config.snapshot_compression_binary}, then rerun host check.",
+    )
     from clawbox.lab import SERVICES, CONTAINERS, template_record, sdk, _snapshot_sdk_info
     for unit in SERVICES:
         probe(unit, lambda u=unit: _run("systemctl", "show", u, "-p", "LoadState", "--value") == "loaded",

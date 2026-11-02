@@ -229,6 +229,10 @@ def configure_experiment(
         resources["warm_memory_capacity_mib"] = host_profile.get("warm_capacity_mib", 0)
         resources["warm_snapshot_root"] = host_profile.get("warm_root")
         resources["cold_snapshot_root"] = host_profile.get("cold_root")
+        resources["snapshot_compression_binary"] = host_profile.get(
+            "snapshot_compression_binary",
+            "/usr/local/bin/clawbox-zstd-page-snapshot",
+        )
         resources["pool_memory_budget_mib"] = (
             host_profile.get("local_memory_high_watermark_mib")
             or host_profile["local_memory_capacity_mib"]
@@ -726,6 +730,8 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             spec.resources.snapshot_transfer_concurrency
             or spec.resources.pool_transfer_concurrency
         ),
+        "snapshot_compression": spec.resources.snapshot_compression,
+        "snapshot_compression_binary": spec.resources.snapshot_compression_binary,
         "borrow_cooldown_seconds": spec.resources.borrow_cooldown_seconds,
         "return_cooldown_seconds": spec.resources.return_cooldown_seconds,
         "shared_memory_resident_headroom_mib": (

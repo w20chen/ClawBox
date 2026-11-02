@@ -73,6 +73,10 @@ def test_incremental_snapshot_is_default() -> None:
     resources = ResourcesSpec(target_node="node-a", pool_memory_budget_mib=8192,
                               emergency_free_memory_mib=512)
     assert resources.snapshot_mechanism == "incremental-cow"
+    assert resources.snapshot_compression == "zstd-page"
+    assert resources.snapshot_compression_binary == (
+        "/usr/local/bin/clawbox-zstd-page-snapshot"
+    )
     assert resources.model_copy(update={"snapshot_mechanism": "full-copy"}).snapshot_mechanism == "full-copy"
 
 

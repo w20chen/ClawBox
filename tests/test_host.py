@@ -19,6 +19,7 @@ from clawbox.experiments.host import HostConfig, apply, init_config, load_config
     {"cube_proxy_connect_timeout_seconds": 2},
     {"cube_proxy_connect_timeout_seconds": True},
     {"cubelet_tap_init_num": 0}, {"cubelet_tap_init_num": True},
+    {"snapshot_compression_binary": "clawbox-zstd-page-snapshot"},
 ])
 def test_invalid_host_plan_rejected(values):
     with pytest.raises(ValidationError):
@@ -30,9 +31,26 @@ def test_host_init_never_overwrites(tmp_path):
     init_config(path)
     before = path.read_bytes()
     assert load_config(path).local_node == 0
+    assert load_config(path).snapshot_compression_binary == (
+        "/usr/local/bin/clawbox-zstd-page-snapshot"
+    )
     with pytest.raises(FileExistsError):
         init_config(path)
     assert path.read_bytes() == before
+
+
+def test_snapshot_compression_helper_contract(tmp_path, monkeypatch):
+    from clawbox.experiments import host
+    helper = tmp_path / "clawbox-zstd-page-snapshot"
+    helper.write_bytes(b"native")
+    monkeypatch.setattr(host.os, "access", lambda *_: True)
+    monkeypatch.setattr(
+        host.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=1, stdout="", stderr="usage: helper MODE INPUT OUTPUT\n",
+        ),
+    )
+    assert host.snapshot_compression_helper(str(helper))["format"] == "zstd-page-v2"
 
 
 def test_network_setting_is_explicit_verified_and_idempotent(monkeypatch):

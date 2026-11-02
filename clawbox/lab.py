@@ -461,6 +461,10 @@ def setup(args) -> dict:
         warm_root=args.warm_root if args.warm else None,
         warm_capacity_mib=args.warm_gib * 1024 if args.warm else 0,
         warm_numa_node=args.warm_node if args.warm else None,
+        snapshot_compression_binary=getattr(
+            args, "snapshot_compression_binary",
+            "/usr/local/bin/clawbox-zstd-page-snapshot",
+        ),
     )
     if cube_source:
         profile["cube_source"] = str(Path(cube_source).expanduser().resolve())

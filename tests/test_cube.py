@@ -1475,6 +1475,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                        "emergency_free_memory_mib": 1, "checkpoint_restore_headroom_mib": 1,
                        "static_tool_memory_mib": 1,
                        "small_tool_admission_bypass_mib": 0,
+                           "snapshot_compression": "none",
                        "cold_snapshot_root": str(tmp_path / "cold")},
         "policies": [{"name": "snapshot", "admission": "fixed",
                       "runtime_control": "off",
@@ -1890,6 +1891,7 @@ def test_public_snapshot_qualification_exercises_selected_scope(tmp_path, monkey
     resources = spec.resources.model_copy(update={
         "compute_nodes": (), "shared_memory_borrow_limit_mib": None,
         "snapshot_mechanism": "full-copy", "snapshot_storage": "warm-only",
+            "snapshot_compression": "none",
         "warm_memory_capacity_mib": 16384, "warm_snapshot_root": str(tmp_path / "warm"),
         "snapshot_destination": "warm",
     })

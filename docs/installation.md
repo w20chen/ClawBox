@@ -34,7 +34,7 @@ The following package names target Ubuntu 24.04 ARM64:
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3.12 python3.12-venv python3-dev git docker.io \
-  docker-buildx build-essential curl jq rsync numactl e2fsprogs util-linux
+  docker-buildx build-essential libzstd1 curl jq rsync numactl e2fsprogs util-linux
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
 ```
@@ -54,6 +54,9 @@ cd "$HOME/src"
 git clone https://github.com/w20chen/ClawBox.git
 cd ClawBox
 
+sudo bash scripts/build-zstd-page-snapshot.sh \
+  /usr/local/bin/clawbox-zstd-page-snapshot
+
 read -r -p 'Source SSH address (user@host): ' ASSET_HOST
 sudo install -d -o "$USER" -g "$(id -gn)" /data/clawbox-transfer
 rsync -a "$ASSET_HOST:/data/clawbox-transfer/" /data/clawbox-transfer/
@@ -70,6 +73,8 @@ Reuse existing packages and environments when they satisfy these checks. Use
 `--direct-network` only when the installation must bypass inherited proxy
 settings. ClawTune, the host Python package, and both VM images must share a
 compatible integration contract.
+The native Zstd helper is a standard host component. `experiment host check`
+verifies its executable and format contract before host apply or a run.
 
 ## 2. Build and install CubeSandbox
 
@@ -341,6 +346,7 @@ new run ID; `launch` reuses qualification when its capability inputs still match
 | Change | Required action |
 | --- | --- |
 | ClawBox Python, scheduling, reporting, or CLI | Update the checkout. An editable installation sees the changes in new processes; bootstrap again when dependencies change. No image rebuild. |
+| Zstd snapshot helper source or a host missing the standard helper | Run `sudo bash scripts/build-zstd-page-snapshot.sh /usr/local/bin/clawbox-zstd-page-snapshot`, then rerun `experiment host check`. Use a new run ID; no service restart or VM-image rebuild. |
 | Host-side ClawTune predictor or selected prediction artifact | Update the host source/artifact and experiment evidence path. No Tool-image rebuild. Update Runtime separately if its predictor or seed must also change. |
 | Runtime predictor, seed, prepared cache, or plugin | Rebuild and register **one shared Runtime template**. Start fresh Runtime state and qualify the new template. Reuse all task-specific Tool templates. |
 | Tool collector, Tool Bridge, guest measurement contract, or guest dependencies | Rebuild the affected Tool image layers and register new Tool templates. For a corpus, use the [collector refresh](workloads.md#refresh-tool-collectors) to preserve task dependencies. |

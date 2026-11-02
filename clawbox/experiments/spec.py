@@ -369,8 +369,10 @@ class ResourcesSpec(StrictFrozenModel):
     local_memory_capacity_mib: int | None = Field(default=None, ge=1)
     warm_memory_capacity_mib: int = Field(default=0, ge=0)
     snapshot_mechanism: Literal["full-copy", "incremental-cow"] = "incremental-cow"
-    snapshot_compression: Literal["none", "zstd-page"] = "none"
-    snapshot_compression_binary: str = Field(default="clawbox-zstd-page-snapshot", min_length=1)
+    snapshot_compression: Literal["none", "zstd-page"] = "zstd-page"
+    snapshot_compression_binary: str = Field(
+        default="/usr/local/bin/clawbox-zstd-page-snapshot", min_length=1,
+    )
     snapshot_storage: Literal["tiered", "warm-only"] = "tiered"
     snapshot_destination: Literal["auto", "cold", "warm"] = "auto"
     lazy_restore: bool = True
