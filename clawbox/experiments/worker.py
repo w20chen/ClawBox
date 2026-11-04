@@ -5272,6 +5272,9 @@ class ExperimentWorker:
                         session_id, reason="session_cleanup",
                     ),
                 )
+            study = locals().get('boundary_study')
+            if study is not None and not discard_failed_policy_session:
+                cleanup_step('tool placement snapshots', study.release_snapshots)
             if discard_failed_gateway_session:
                 cleanup_step("failed model gateway event", lambda: events.write({
                     "event": "model_gateway_session_discarded",

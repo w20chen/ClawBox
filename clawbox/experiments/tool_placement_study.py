@@ -141,7 +141,7 @@ class BoundaryStudy:
         self.counts, self.ordinal = Counter(), 0
         self.pending, self.finished = {}, set()
         self.probe_ready = False
-        self.latest_snapshot = None
+        self.snapshots = []
         if self.case not in catalog.prefixes:
             raise ValueError(f'placement manifest has no prefix for {self.case}')
 
@@ -187,16 +187,13 @@ class BoundaryStudy:
         write(directory/'request.json', request)
         write(directory/'pre-tool-witness.json', witness)
         snapshot = self.client.create_snapshot(vm, self.ownership)
-        # Native incremental snapshots use the previous committed memory base.
-        # Keep that base until the next independent snapshot has been committed.
-        previous_snapshot = self.latest_snapshot
-        self.latest_snapshot = snapshot
-        if previous_snapshot is not None:
-            self.client.delete_snapshot(previous_snapshot)
+        # The source VM retains runtime references to committed memory bases.
+        # Release snapshots only after that VM and its replicas have stopped.
+        self.snapshots.append(snapshot)
         write(directory/'snapshot.json', {'snapshot_id': snapshot,
             'source_sandbox_id': self.client.sandbox_id(vm), 'witness': witness,
             'source_template': self.arm.sandbox.template, 'observed_prefix_ordinal': self.ordinal,
-            'retention': 'native snapshot held through trials and the next snapshot commit; manifests and witnesses retained afterward'})
+            'retention': 'native snapshots held until the source VM exits; manifests and witnesses retained afterward'})
         self.pending[request['execution_id']] = (target, snapshot, witness, directory)
         self.emit({'event': 'tool_placement_snapshot_ready', 'case_id': self.case,
                    'target_id': target['target_id'], 'snapshot_id': snapshot})
@@ -261,11 +258,22 @@ class BoundaryStudy:
         missing = sorted(expected-self.finished)
         write(self.root/'coverage.json', {'expected': len(expected), 'attempted': len(self.finished),
                                          'missing_target_ids': missing})
-        if self.latest_snapshot is not None:
-            self.client.delete_snapshot(self.latest_snapshot)
-            self.latest_snapshot = None
         if missing:
             raise RuntimeError(f'{len(missing)} selected tools did not reach their replay boundary; see placement coverage')
+
+    def release_snapshots(self):
+        released, deferred = [], []
+        for snapshot in reversed(self.snapshots):
+            try:
+                self.client.delete_snapshot(snapshot)
+                released.append(snapshot)
+            except Exception as exc:
+                if '130409' not in str(exc):
+                    raise
+                # The owned-resource arm cleanup verifies final removal after
+                # any asynchronous runtime reference release has completed.
+                deferred.append({'snapshot_id': snapshot, 'reason': str(exc)})
+        write(self.root/'snapshot-cleanup.json', {'released': released, 'deferred_to_owned_cleanup': deferred})
 
 
 def qualify_placement(spec, *, artifact_root):
