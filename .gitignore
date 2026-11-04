@@ -49,6 +49,7 @@ htmlcov/
 /junit.xml
 /working_set_plan.json
 /.tmp-*/
+/.codex-tmp-*/
 /deploy/rec-a-*.inspect.jsonl
 *.bundle
 *.log
