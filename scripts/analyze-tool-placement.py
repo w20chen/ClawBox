@@ -9,6 +9,11 @@ from pathlib import Path
 import statistics
 
 
+def has_special_case(row):
+    return bool(row['special_case_flags'] or row['baseline_exit_code']
+                or row.get('network_command_candidate', False))
+
+
 def analyze(roots, output):
     output.mkdir(parents=True, exist_ok=False)
     rows = []
@@ -62,7 +67,7 @@ def analyze(roots, output):
         selected = list(unique.values())
         summary = {'measured_unique_targets': len(selected), 'comparison': comparison, 'strata': {}}
         for label, subset in [('all', selected), ('clean_success', [r for r in selected
-                              if not r['special_case_flags'] and r['baseline_exit_code'] == 0])]:
+                              if not has_special_case(r)])]:
             x = np.array([r['llc_hits_per_kinst'] for r in subset], dtype=float)
             y = np.array([r['sensitivity_median'] for r in subset], dtype=float)
             stat = {'targets': len(subset)}
@@ -98,8 +103,8 @@ def analyze(roots, output):
                         'spearman_rho': float(spearmanr(mx[indices],my[indices]).statistic)
                             if len(indices) >= 3 and np.ptp(mx[indices]) and np.ptp(my[indices]) else None})
         fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
-        for flagged, color, label in [(False, 'tab:blue', 'No special flag'), (True, 'tab:orange', 'Network/environment/exit flag')]:
-            subset = [r for r in selected if bool(r['special_case_flags'] or r['baseline_exit_code']) == flagged]
+        for flagged, color, label in [(False, 'tab:blue', 'No special flag'), (True, 'tab:orange', 'Network candidate/environment/exit flag')]:
+            subset = [r for r in selected if has_special_case(r) == flagged]
             for r in (r for r in subset if r['repeat_uncertainty_available']):
                 x, y = r['llc_hits_per_kinst'], r['sensitivity_median']*100
                 axes[0].errorbar(x, y, yerr=[[y-r['sensitivity_min']*100], [r['sensitivity_max']*100-y]],
@@ -124,6 +129,7 @@ def analyze(roots, output):
         plt.close(fig)
         summaries[comparison] = summary
     summary = {'comparisons': summaries, 'rows': len(rows),
+        'clean_success_definition': 'Exit zero, no special-case evidence flags, and not a network-command candidate. A candidate label does not prove network transfer.',
         'definition': 'sensitivity = packed makespan / spread makespan - 1; positive favors spread',
         'uncertainty': 'Single pairs have no repeat uncertainty. Repeated pairs retain their range. Spearman CI uses trace-cluster bootstrap, not repeated timing.',
         'limits': ['Cross-NUMA spread changes memory locality and bandwidth as well as cache placement.',

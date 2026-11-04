@@ -415,6 +415,9 @@ and raw artifact paths alongside these keys. Each prefix row is
 with all Agent executions in observed order. Matching uses each operation/hash
 occurrence within the recorded trace; random execution IDs are not portable
 between replays. The observed replay prefix is retained for comparison.
+For analysis, preserve `network_command_candidate` when available: the
+`clean_success` subset requires a zero exit, no special-case flags and no network
+candidate label. Candidate commands remain in the full results.
 
 The primary makespan is the Runtime controller monotonic interval from common SSH launch
 release to the last of four SSH process completions. It includes command dispatch

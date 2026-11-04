@@ -315,6 +315,8 @@ includes raw paired timing summaries, standalone plots and memory-footprint
 strata. Nonzero exits and network/environment flags remain visible; mismatched
 exit outcomes are excluded from timing comparisons. Memory footprint is a proxy
 and does not directly measure the cache working set.
+The `clean_success` subset also excludes network-command candidates; that label
+screens commands and does not prove that a download occurred.
 Keep resident VMs and admission/runtime control off. Launch the edited YAML with
 the usual `clawbox experiment launch placement.yaml --run-id UNIQUE_ID` command.
 Qualification checks native snapshot forks, memory/filesystem restoration and
