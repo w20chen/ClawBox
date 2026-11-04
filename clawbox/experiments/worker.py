@@ -4194,6 +4194,7 @@ class ExperimentWorker:
                         catalog=self._tool_placement_catalog, arm=arm, client=self.client,
                         domain=priority_domain, ownership=tool_ownership, credentials=ssh_credentials,
                         parent_cpus=priority_domain.placements[index][0],
+                        create_gate=sandbox_create_gate,
                         runtime_vm=lambda: runtime_lifecycle.sandbox, tool_vm=lambda: lifecycle.sandbox,
                         network_allow_out=tool_allow_out,
                         network_deny_out=_runtime_network_deny_out(arm.sandbox.allow_internet_access, tool_allow_out),

@@ -7,6 +7,7 @@ task image for a pre-tool snapshot or retries a payload that might have run.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 import hashlib
 import base64
@@ -152,7 +153,7 @@ def run_four_replica_trial(*, client: Any, domain: Any, snapshot_id: str,
                            timeout_seconds: float, output: Path,
                            allow_internet_access: bool, network_allow_out: list[str],
                            network_deny_out: list[str], stdin_eof: bool = True,
-                           verify_state=None, runtime_vm=None, real_ssh='/usr/bin/ssh') -> dict:
+                           verify_state=None, runtime_vm=None, real_ssh='/usr/bin/ssh', create_gate=None) -> dict:
     """Restore four replicas, release SSH launches together and preserve evidence.
 
     Host monotonic release-to-last-reap time is the primary makespan. It includes
@@ -190,10 +191,11 @@ def run_four_replica_trial(*, client: Any, domain: Any, snapshot_id: str,
         p = placements[replica_index]
         domain.prepare(p.domain_index, 'tool')
         vm_ownership = replace(ownership, session_id=f'{ownership.session_id}-r{replica_index}')
-        vm = client.create_sandbox(template=snapshot_id, node_name=node_name,
-            ownership=vm_ownership, env_vars={'CLAWBOX_CGROUP_TOKEN': domain.token(p.domain_index, 'tool')},
-            allow_internet_access=allow_internet_access,
-            network_allow_out=network_allow_out, network_deny_out=network_deny_out)
+        with create_gate if create_gate is not None else nullcontext():
+            vm = client.create_sandbox(template=snapshot_id, node_name=node_name,
+                ownership=vm_ownership, env_vars={'CLAWBOX_CGROUP_TOKEN': domain.token(p.domain_index, 'tool')},
+                allow_internet_access=allow_internet_access,
+                network_allow_out=network_allow_out, network_deny_out=network_deny_out)
         live.append(vm)
         evidence = domain.verify(p.domain_index, 'tool', client.sandbox_id(vm))
         route = native_ssh_route(client.get_tcp_endpoint(vm, 2222), epoch=1)

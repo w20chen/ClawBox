@@ -392,6 +392,8 @@ field names and required ranges; `describe` reports which arms need each model.
 replay, managed resident C0 placement, exclusive parent session slots, and
 admission/runtime control off. Each group holds one parent Runtime/Tool pair and
 up to four additional Tool VMs; configured capacity checks include these replicas.
+Replica restores share `execution.sandbox_create_concurrency` with parent VM
+creation; this limits preparation, while ready tool groups can run concurrently.
 
 | Field | Default | Meaning |
 | --- | --- | --- |

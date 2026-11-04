@@ -127,9 +127,10 @@ class StudyCatalog:
 
 class BoundaryStudy:
     def __init__(self, *, catalog, arm, client, domain, ownership, credentials,
-                 runtime_vm, tool_vm, network_allow_out, network_deny_out, emit, parent_cpus):
+                 runtime_vm, tool_vm, network_allow_out, network_deny_out, emit, parent_cpus, create_gate):
         self.catalog, self.arm, self.client, self.domain = catalog, arm, client, domain
         self.ownership, self.credentials = ownership, credentials
+        self.create_gate = create_gate
         self.runtime_vm, self.tool_vm = runtime_vm, tool_vm
         self.allow_out, self.deny_out, self.emit = network_allow_out, network_deny_out, emit
         self.case = arm.case.case_id
@@ -140,6 +141,7 @@ class BoundaryStudy:
         self.counts, self.ordinal = Counter(), 0
         self.pending, self.finished = {}, set()
         self.probe_ready = False
+        self.latest_snapshot = None
         if self.case not in catalog.prefixes:
             raise ValueError(f'placement manifest has no prefix for {self.case}')
 
@@ -185,10 +187,16 @@ class BoundaryStudy:
         write(directory/'request.json', request)
         write(directory/'pre-tool-witness.json', witness)
         snapshot = self.client.create_snapshot(vm, self.ownership)
+        # Native incremental snapshots use the previous committed memory base.
+        # Keep that base until the next independent snapshot has been committed.
+        previous_snapshot = self.latest_snapshot
+        self.latest_snapshot = snapshot
+        if previous_snapshot is not None:
+            self.client.delete_snapshot(previous_snapshot)
         write(directory/'snapshot.json', {'snapshot_id': snapshot,
             'source_sandbox_id': self.client.sandbox_id(vm), 'witness': witness,
             'source_template': self.arm.sandbox.template, 'observed_prefix_ordinal': self.ordinal,
-            'retention': 'native snapshot held for all paired trials; manifest and witnesses retained afterward'})
+            'retention': 'native snapshot held through trials and the next snapshot commit; manifests and witnesses retained afterward'})
         self.pending[request['execution_id']] = (target, snapshot, witness, directory)
         self.emit({'event': 'tool_placement_snapshot_ready', 'case_id': self.case,
                    'target_id': target['target_id'], 'snapshot_id': snapshot})
@@ -235,7 +243,8 @@ class BoundaryStudy:
                         allow_internet_access=self.arm.sandbox.allow_internet_access,
                         network_allow_out=self.allow_out, network_deny_out=self.deny_out,
                         verify_state=verify, runtime_vm=self.runtime_vm(),
-                        real_ssh=openclaw_real_ssh_path(self.ownership.session_id.removesuffix('-tool')))
+                        real_ssh=openclaw_real_ssh_path(self.ownership.session_id.removesuffix('-tool')),
+                        create_gate=self.create_gate)
                     results.append({'repeat': repeat, 'layout': name, 'status': result['status'],
                                     'makespan_seconds': result.get('makespan_seconds'), 'artifact': str(trial/'trial.json')})
                     self.emit({'event': 'tool_placement_trial_complete', 'target_id': target['target_id'], **results[-1]})
@@ -244,14 +253,17 @@ class BoundaryStudy:
             self.finished.add(target['target_id'])
         finally:
             write(directory/'paired-trials.json', results)
-            self.client.delete_snapshot(snapshot)
-            write(directory/'snapshot-released.json', {'snapshot_id': snapshot, 'raw_evidence_preserved': True})
+            write(directory/'snapshot-retained.json', {'snapshot_id': snapshot,
+                  'reason': 'base for the next native incremental snapshot', 'raw_evidence_preserved': True})
 
     def finish(self):
         expected = {t['target_id'] for t in self.catalog.targets[self.case].values()}
         missing = sorted(expected-self.finished)
         write(self.root/'coverage.json', {'expected': len(expected), 'attempted': len(self.finished),
                                          'missing_target_ids': missing})
+        if self.latest_snapshot is not None:
+            self.client.delete_snapshot(self.latest_snapshot)
+            self.latest_snapshot = None
         if missing:
             raise RuntimeError(f'{len(missing)} selected tools did not reach their replay boundary; see placement coverage')
 
