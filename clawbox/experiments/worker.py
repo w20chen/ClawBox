@@ -2680,6 +2680,7 @@ class ExperimentWorker:
         )
         self._runtime_memory = None
         self._priority_domain = None
+        self._tool_placement_catalog = None
         if arm.resources.local_memory_cgroup:
             # All supported policies use neutral per-VM leaves.
             self._priority_domain = PriorityDomain(Path(arm.resources.local_memory_cgroup),
@@ -2700,6 +2701,10 @@ class ExperimentWorker:
                     and not arm.policy.template_aware_placement else {})
             try:
                 self._priority_domain.start()
+                if arm.execution.tool_placement is not None:
+                    from .tool_placement_study import StudyCatalog
+                    self._tool_placement_catalog = StudyCatalog(arm, self.output_root/'tool-placement')
+                    self._tool_placement_catalog.register(self._priority_domain)
                 self._runtime_memory = PressureControl(
                     Path(arm.resources.local_memory_cgroup), mode=arm.policy.runtime_control,
                     options=arm.resources.pressure_control,
@@ -4182,6 +4187,17 @@ class ExperimentWorker:
                 active_cpu_placements: set[str] = set()
                 pending_admissions: set[str] = set()
                 reservation_lock = Lock()
+                boundary_study = None
+                if self._tool_placement_catalog is not None:
+                    from .tool_placement_study import BoundaryStudy
+                    boundary_study = BoundaryStudy(
+                        catalog=self._tool_placement_catalog, arm=arm, client=self.client,
+                        domain=priority_domain, ownership=tool_ownership, credentials=ssh_credentials,
+                        parent_cpus=priority_domain.placements[index][0],
+                        runtime_vm=lambda: runtime_lifecycle.sandbox, tool_vm=lambda: lifecycle.sandbox,
+                        network_allow_out=tool_allow_out,
+                        network_deny_out=_runtime_network_deny_out(arm.sandbox.allow_internet_access, tool_allow_out),
+                        emit=events.write)
 
                 @trace_callback('tool_admission_timing', events.write, session_id)
                 def admit_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
@@ -4414,6 +4430,8 @@ class ExperimentWorker:
                                     "service_seconds": time.monotonic() - identity_started,
                                 })
                             control_marks["restore_and_route"] = time.monotonic()
+                            if boundary_study is not None:
+                                boundary_study.before(request)
                             memory_baseline_timing = coordinator.bind_tool_memory(session_id)
                             control_marks["memory_baseline"] = time.monotonic()
                             if (arm.execution.tool_call_cpu_policy == 'c2'
@@ -4660,6 +4678,8 @@ class ExperimentWorker:
                                   "exit_code": request.get("exit_code"),
                                   "ssh_reaped_at": timestamps["ssh_reaped_at"],
                                   "endpoint_epoch": expected_route[1]})
+                    if boundary_study is not None:
+                        boundary_study.after(request)
                     return {"status": "COMPLETED"}
 
                 def abandon_openclaw_tool(
@@ -4862,6 +4882,9 @@ class ExperimentWorker:
                             configuration={
                                 **inference_configuration,
                                 "command_timeout_seconds": arm.execution.command_timeout_seconds,
+                                "tool_placement_control_timeout_seconds": (
+                                    arm.execution.tool_placement.control_timeout_seconds
+                                    if arm.execution.tool_placement else None),
                                 "host_live": arm.resources.prediction_mode == 'host-live',
                                 "kb_http_timeout_seconds": arm.execution.kb_http_timeout_seconds,
                                 "repository": arm.case.repository or arm.case.case_id,
@@ -4895,6 +4918,8 @@ class ExperimentWorker:
                         raise
                     if outcome.get("agent_pid_file") != agent_pid_file:
                         raise RuntimeError("OpenClaw agent PID witness path was not initialized")
+                    if boundary_study is not None:
+                        boundary_study.finish()
                     timeline["final_response_observed"] = outcome["final_response_observed_unix_s"]
                     with span('finalize.mark_active'):
                         coordinator.set_tool_active(session_id, True)

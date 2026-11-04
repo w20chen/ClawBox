@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import re
+import select
 import shlex
 import signal
 import subprocess
@@ -243,7 +244,7 @@ def _post(path: str, body: dict[str, Any], *, attempts: int) -> dict[str, Any]:
     last_error: Exception | None = None
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(request, timeout=3600) as response:
+            with urllib.request.urlopen(request, timeout=float(os.environ.get('CLAWBOX_POLICY_TIMEOUT_SECONDS', '3600'))) as response:
                 return json.load(response)
         except urllib.error.HTTPError:
             raise
@@ -287,7 +288,7 @@ def _admission_route(admission: dict[str, Any]) -> dict[str, Any]:
 
 
 def _wait_for_ssh(argv: list[str], execution_id: str,
-                  timeout_seconds: float | None = None) -> int:
+                  timeout_seconds: float | None = None, *, capture: dict | None = None) -> int:
     """Forward OpenClaw cancellation, but reap SSH before reporting completion."""
     child = None
     cancellation_requested = False
@@ -314,6 +315,8 @@ def _wait_for_ssh(argv: list[str], execution_id: str,
             cancelling = False
 
     handlers = {}
+    pump = None
+    stop_input = threading.Event()
     if threading.current_thread() is threading.main_thread():
         for name in ("SIGTERM", "SIGINT", "SIGHUP"):
             sig = getattr(signal, name, None)
@@ -322,7 +325,40 @@ def _wait_for_ssh(argv: list[str], execution_id: str,
     try:
         # A process-group kill from OpenClaw must not bypass our completion
         # callback by killing the original OpenSSH child at the same time.
-        child = subprocess.Popen(argv, start_new_session=True)
+        child = subprocess.Popen(argv, start_new_session=True,
+                                 **({'stdin': subprocess.PIPE} if capture is not None else {}))
+        if capture is not None:
+            def copy_input():
+                data = bytearray()
+                eof = False
+                error = None
+                try:
+                    incoming = sys.stdin.fileno()
+                    outgoing = child.stdin.fileno()
+                    os.set_blocking(outgoing, False)
+                    pending = b''
+                    while not stop_input.is_set():
+                        if pending:
+                            if select.select([], [outgoing], [], .05)[1]:
+                                count = os.write(outgoing, pending)
+                                data.extend(pending[:count])
+                                pending = pending[count:]
+                        elif select.select([incoming], [], [], .05)[0]:
+                            pending = os.read(incoming, 65536)
+                            if not pending:
+                                eof = True
+                                break
+                except BrokenPipeError:
+                    pass  # SSH finished before consuming the entire producer stream.
+                except Exception as exc:
+                    error = f'{type(exc).__name__}: {exc}'
+                finally:
+                    child.stdin.close()
+                    capture.update(stdin_b64=base64.b64encode(data).decode(),
+                                   stdin_eof=eof, stdin_bytes=len(data),
+                                   stdin_sha256=hashlib.sha256(data).hexdigest(), capture_error=error)
+            pump = threading.Thread(target=copy_input, name='placement-stdin', daemon=True)
+            pump.start()
         if cancellation_requested:
             cancel(None, None)
         if timeout_seconds is None:
@@ -342,6 +378,11 @@ def _wait_for_ssh(argv: list[str], execution_id: str,
                 child.wait()
             return 124
     finally:
+        if pump is not None:
+            stop_input.set()
+            pump.join(timeout=5)
+            if pump.is_alive():
+                raise RuntimeError('placement input capture did not finish after SSH reap')
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
 
@@ -412,7 +453,7 @@ def _ssh_args_for_route(argv: list[str], route: dict[str, Any]) -> list[str]:
     return [*prefix, *overrides, *argv[target_index:]]
 
 
-def main() -> int:
+def _main() -> int:
     real_ssh = os.environ.get("CLAWBOX_REAL_SSH", "/usr/bin/ssh")
     ssh_argv = list(sys.argv[1:])
     parsed = _envelope(ssh_argv)
@@ -466,6 +507,18 @@ def main() -> int:
         "runtime_request_at": time.time(),
         "tool_timeout_seconds": tool_timeout_seconds,
     }
+    capture = None
+    capture_path = None
+    capture_root = os.environ.get('CLAWBOX_PLACEMENT_CAPTURE_ROOT')
+    if capture_root and request['execution_scope'] == 'agent-tool':
+        if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', execution_id):
+            raise ValueError('unsafe placement capture identity')
+        capture_path = Path(capture_root) / (execution_id + '.json')
+        capture = {'execution_id': execution_id, 'profile_command_sha256': command_sha256,
+                   'effective_command_sha256': effective_command_sha256,
+                   'remote_command': ssh_argv[-1], 'complete': False}
+        capture_path.write_text(json.dumps(capture), encoding='utf-8')
+        request['placement_capture_path'] = str(capture_path)
     try:
         _audit("admission_requested", execution_id=execution_id,
                operation=request["operation"], execution_scope=request["execution_scope"])
@@ -515,6 +568,7 @@ def main() -> int:
         return_code = _wait_for_ssh(
             [real_ssh, *_ssh_args_for_route(ssh_argv, route)], execution_id,
             timeout_seconds=tool_timeout_seconds,
+            **({'capture': capture} if capture is not None else {}),
         )
     except Exception as exc:
         _audit("ssh_start_failed", execution_id=execution_id, error=str(exc))
@@ -522,6 +576,9 @@ def main() -> int:
         return_code = 127
     ssh_reaped_at = time.time()
     execution_completed_at = time.time()
+    if capture is not None:
+        capture['complete'] = 'stdin_b64' in capture and capture.get('capture_error') is None
+        capture_path.write_text(json.dumps(capture), encoding='utf-8')
     completion = {
         **request,
         "execution_started_at": execution_started_at,
@@ -544,6 +601,20 @@ def main() -> int:
         print(f"ClawBox policy completion failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 125
     return return_code
+
+
+def main() -> int:
+    capture_root = os.environ.get('CLAWBOX_PLACEMENT_CAPTURE_ROOT')
+    if not capture_root:
+        return _main()
+    # Serializing the entire SSH lifecycle also prevents a later prefix command
+    # from competing with replicas while the preceding completion is measured.
+    import fcntl
+    root = Path(capture_root)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (root / 'session.lock').open('a') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _main()
 
 
 if __name__ == "__main__":

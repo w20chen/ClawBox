@@ -35,7 +35,7 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
 from .worker import atomic_json, session_case_for, session_worker_count
 
 
-QUALIFICATION_SCHEMA_VERSION = 17
+QUALIFICATION_SCHEMA_VERSION = 18
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
 
 
@@ -271,9 +271,10 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
         active = session_worker_count(arm)
         # Completion order is unknown: reserve for the largest possible active
         # set independently for each resource, not merely the first batch.
-        arms.append(dict(vm_count=2 * active,
-            cpu_milli=(active * arm.runtime.vcpu + sum(sorted((t.vcpu for t in assigned), reverse=True)[:active])) * 1000,
-            memory_mib=active * arm.runtime.memory_mib + sum(sorted((t.memory_mib for t in assigned), reverse=True)[:active])))
+        tool_multiplier = 5 if arm.execution.tool_placement is not None else 1
+        arms.append(dict(vm_count=(1 + tool_multiplier) * active,
+            cpu_milli=(active * arm.runtime.vcpu + tool_multiplier * sum(sorted((t.vcpu for t in assigned), reverse=True)[:active])) * 1000,
+            memory_mib=active * arm.runtime.memory_mib + tool_multiplier * sum(sorted((t.memory_mib for t in assigned), reverse=True)[:active])))
     demand = dict(
         **{key: max(arm[key] for arm in arms) for key in ('vm_count', 'cpu_milli', 'memory_mib')},
         max_vm_cpu_milli=max(spec.runtime.vcpu, *(t.vcpu for t in tools)) * 1000,
@@ -957,6 +958,10 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         "arrival_schedule": ArrivalSchedule.BURST,
         "stagger_interval_seconds": 0.0,
     }
+    if spec.execution.tool_placement is not None:
+        # Corpus smokes cover images/SSH; the separate native placement gate
+        # below proves snapshot fork, placement, state restoration and raw PMU.
+        execution_updates.update(tool_placement=None, session_cpu_slots=(), max_active_sessions=level)
     branching = spec.execution.snapshot_branching
     if branching is not None:
         # Exercise both logical nodes and a cross-node choice without turning
@@ -992,13 +997,23 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         })
     execution = spec.execution.model_copy(update=execution_updates)
     validation = spec.validation.model_copy(update={"command": "true"})
-    return spec.model_copy(update={
+    qualified = spec.model_copy(update={
         "experiment_id": spec.experiment_id + "-qualification",
         "workload": workload,
         "inference": inference,
         "execution": execution,
         "validation": validation,
     })
+    if spec.execution.tool_placement is not None and spec.schema_version == 4:
+        # Freeze the same declared design the subprocess will load. Editing only
+        # lowered policy overrides changes arm IDs after YAML serialization.
+        from .design import export_design
+        raw = export_design(qualified)
+        raw['mechanisms']['placement']['session_cpu_slots'] = []
+        for arm in raw['comparison']['arms']:
+            arm['override'].pop('placement.session_cpu_slots', None)
+        qualified = ExperimentSpec.model_validate(raw)
+    return qualified
 
 
 def _sandbox_pids(sandbox_id: str) -> list[int]:
@@ -1480,6 +1495,8 @@ def qualify(
     template_sharing_test = template_base_sharing_test(
         spec, artifact_root=probe_root / "template-base-sharing",
     )
+    from .tool_placement_study import qualify_placement
+    placement_test = qualify_placement(spec, artifact_root=probe_root/'tool-placement')
     results = ExperimentSupervisor(
         qualified, run_id=run_id, attempt_id=attempt_id,
         owner_id=run_id, output_root=run_root,
@@ -1517,11 +1534,12 @@ def qualify(
         "live_borrow_roundtrip_test": borrow_test,
         "runtime_control_test": runtime_test,
         "template_base_sharing_test": template_sharing_test,
+        "tool_placement_test": placement_test,
         "arm_ids": [arm.arm_id for arm in expand_matrix(qualified)],
         "cleanup_verified": all(
             item.correctness.get("cleanup_verified") is True for item in results
         ) and snapshot_test["passed"] and borrow_test["passed"] and runtime_test['passed']
-        and template_sharing_test["passed"],
+        and template_sharing_test["passed"] and placement_test['passed'],
         "status": "succeeded",
     }
     if not receipt["cleanup_verified"]:
@@ -1555,6 +1573,8 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
     mismatches = [
         key for key, value in expected.items() if receipt.get(key) != value
     ]
+    if spec.execution.tool_placement is not None and not receipt.get('tool_placement_test', {}).get('passed'):
+        mismatches.append('tool_placement_test')
     # Concurrency is the maximum simultaneous smoke size, not the number of
     # covered cases or evidence of target performance. Separate receipt fields
     # prove that one qualification session executed for every workload case.

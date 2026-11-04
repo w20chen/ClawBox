@@ -298,6 +298,34 @@ count. Separate CPU clusters can still share the outer L3 cache. Use a new run
 ID and qualification; apply the host configuration first if adding allowed
 CPU/NUMA pools. Images and trained models do not need rebuilding.
 
+For a four-replica placement study, configure `execution.tool_placement` with
+the measured target inventory, recorded prefix sequence, and host-specific CPU
+layouts described in the [option reference](reference.md#tool-placement-study).
+Use one parent session slot per group, on cores outside every replica layout.
+Groups reserve disjoint domains, including their parent slots. The default
+`isolation_domain: llc` reserves outer LLC domains; `cluster` permits more groups
+on disjoint hardware clusters that still share the upper LLC. List groups in
+parent-slot order. Set `repetitions: 1` for one packed/spread pair per tool;
+this gives no estimate of repeat variability.
+
+After a run, summarize preserved trials with
+`python scripts/analyze-tool-placement.py RUN_ROOT --output NEW_DIRECTORY`
+(requires NumPy, SciPy and Matplotlib in the analysis environment). The output
+includes raw paired timing summaries, standalone plots and memory-footprint
+strata. Nonzero exits and network/environment flags remain visible; mismatched
+exit outcomes are excluded from timing comparisons. Memory footprint is a proxy
+and does not directly measure the cache working set.
+Keep resident VMs and admission/runtime control off. Launch the edited YAML with
+the usual `clawbox experiment launch placement.yaml --run-id UNIQUE_ID` command.
+Qualification checks native snapshot forks, memory/filesystem restoration and
+four-event PMU coverage; normal corpus smokes check image and SSH capability.
+Every selected tool is reached through its recorded prefix. Its pre-tool snapshot
+is reused for paired trials, with fresh replicas each time. Native snapshots are
+released after those trials; invocation inputs, boundary/state witnesses, raw
+measurements and snapshot identities remain under the run's `tool-placement`
+directory. This needs a new run ID and qualification, but no image rebuild,
+retraining, or host apply when the configured CPU/NUMA pools already exist.
+
 `execution.sandbox_create_concurrency` defaults to 8 VM pairs. Preparation and
 actual creation have separate limits of this size, so waiting for memory does
 not occupy an actual-create slot. Tool calls have no corresponding global

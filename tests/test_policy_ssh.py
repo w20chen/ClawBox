@@ -24,6 +24,35 @@ policy_ssh = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(policy_ssh)
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='Unix pipe capture in Runtime VM')
+@pytest.mark.parametrize('close_input', [False, True])
+def test_placement_capture_preserves_binary_input_and_open_stdin(tmp_path, monkeypatch, close_input):
+    reader, writer = os.pipe()
+    payload = b'binary\x00input\xff' if close_input else b''
+    if payload:
+        os.write(writer, payload)
+    if close_input:
+        os.close(writer)
+    observed = tmp_path/'observed.bin'
+    code = (f'import sys,pathlib; pathlib.Path({str(observed)!r}).write_bytes(sys.stdin.buffer.read())'
+            if close_input else
+            'import select,sys; sys.exit(1 if select.select([sys.stdin],[],[],.1)[0] else 0)')
+    capture = {}
+    try:
+        with os.fdopen(reader, 'rb') as stream:
+            monkeypatch.setattr(policy_ssh.sys, 'stdin', stream)
+            assert policy_ssh._wait_for_ssh([sys.executable, '-c', code], 'capture-test',
+                                           timeout_seconds=3, capture=capture) == 0
+        assert base64.b64decode(capture['stdin_b64']) == payload
+        assert capture['stdin_eof'] is close_input
+        assert capture['capture_error'] is None
+        if close_input:
+            assert observed.read_bytes() == payload
+    finally:
+        if not close_input:
+            os.close(writer)
+
+
 def test_post_accepts_sanitizer_safe_policy_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

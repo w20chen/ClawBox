@@ -501,6 +501,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_TOOL_SANDBOX_ID={shlex.quote(ssh.sandbox_id)} "
         f"CLAWBOX_SSH_HOST_KEY_ALIAS={shlex.quote(host_key_alias)} "
         + exec_yield_export
+        + (f"CLAWBOX_PLACEMENT_CAPTURE_ROOT={shlex.quote(home + '/placement-inputs')} "
+           f"CLAWBOX_POLICY_TIMEOUT_SECONDS={int(configuration['tool_placement_control_timeout_seconds'])} "
+           if configuration.get('tool_placement_control_timeout_seconds') else '')
         + f"CLAWTUNE_RUN_ID={shlex.quote(session_id)} CLAWTUNE_SESSION_ID={shlex.quote(session_id)}; "
     )
     # Apply --import only to the native agent launch. The preload restores

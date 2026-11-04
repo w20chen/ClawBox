@@ -386,6 +386,43 @@ field names and required ranges; `describe` reports which arms need each model.
 
 ## Execution
 
+### Tool placement study
+
+`execution.tool_placement` defaults to `null`. When enabled, it requires OpenClaw
+replay, managed resident C0 placement, exclusive parent session slots, and
+admission/runtime control off. Each group holds one parent Runtime/Tool pair and
+up to four additional Tool VMs; configured capacity checks include these replicas.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `targets_file` | required | JSONL measured-tool inventory; one row per target |
+| `prefix_sequences_file` | required | JSONL ordered Agent execution identities per trace |
+| `groups` | required | List of `{parent_node_id, packed, spread, within_numa?}`, in parent session-slot order; each layout lists four logical CPU IDs, one physical core per replica |
+| `isolation_domain` | `llc` | Reserve disjoint outer LLC domains across groups, or use `cluster` to reserve disjoint four-core hardware clusters while permitting shared upper-level LLC |
+| `strata` | `[long, short]` | Inventory strata selected for measurement |
+| `repetitions` | `1` | Paired repetitions per target, at least 1; every layout runs once per repetition. A single pair has no repeat uncertainty estimate |
+| `random_seed` | `0` | Reproducible randomized layout order within each repetition |
+| `control_timeout_seconds` | `86400` | Seconds allowed for a measurement callback; original Tool execution deadlines remain separate |
+| `max_targets_per_case` | `null` | Optional target limit for a small real-VM gate; omit for full selected coverage |
+
+Inventory rows require `target_id` (stable hexadecimal identity), `case_id`,
+`operation`, `profile_command_sha256`, and `stratum` (`long`, `short`, or an
+explicit excluded stratum such as `censored`). Preserve measured baseline fields
+and raw artifact paths alongside these keys. Each prefix row is
+`{"case_id":"CASE","executions":[{"target_id":"HEX","operation":"exec","profile_command_sha256":"SHA256"}]}`
+with all Agent executions in observed order. Matching uses each operation/hash
+occurrence within the recorded trace; random execution IDs are not portable
+between replays. The observed replay prefix is retained for comparison.
+
+The primary makespan is the Runtime controller monotonic interval from common SSH launch
+release to the last of four SSH process completions. It includes command dispatch
+and collector finalization, excludes restore/artifact copying/cleanup, and retains
+launch skew plus raw guest timing for interpretation. Very short calls require
+care with this overhead. Different tool groups cannot share their configured isolation domains;
+cross-NUMA layouts also change memory locality/bandwidth and are not an LLC-only
+causal comparison. All parameters require a new run ID and qualification; none
+requires rebuilding task images or retraining.
+
 Fields are under `execution`:
 
 | Field | Default | Meaning |

@@ -749,11 +749,11 @@ class PriorityDomain:
             'events': list(self.topology_events),
         }
 
-    def _journal(self):
+    def _journal(self, *, update=False):
         if self.journal is None:
             return
         self.journal.parent.mkdir(parents=True, exist_ok=True)
-        with self.journal.open('x', encoding='utf-8') as stream:
+        with self.journal.open('w' if update else 'x', encoding='utf-8') as stream:
             os.chmod(self.journal, 0o600)
             json.dump({'parent':str(self.parent),'prefix':self.prefix,
                        'priorities':self.priorities,'tokens':list(self.tokens.values()),
@@ -828,6 +828,17 @@ class PriorityDomain:
 
     def token(self, index: int, role: str) -> str:
         return self.tokens[index, role]
+
+    def register_replica_slot(self, index: int, cpu: int, numa_node: int) -> None:
+        """Register an extra native VM slot inside the worker's existing domain."""
+        with self._topology_lock:
+            if self.legacy or index in self.priorities:
+                raise ValueError('replica slots require a new index in the native domain')
+            self.priorities[index] = 'neutral'
+            for role in ('runtime', 'tool'):
+                self.tokens[index, role] = uuid.uuid4().hex
+            self.configure_topology_placement(index, str(cpu), numa_node)
+            self._journal(update=True)
 
     def prepare(self, index: int, role: str):
         if not self.legacy:

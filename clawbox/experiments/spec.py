@@ -23,6 +23,32 @@ class StrictFrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class ToolPlacementGroup(StrictFrozenModel):
+    parent_node_id: str = Field(min_length=1)
+    packed: tuple[int, int, int, int]
+    spread: tuple[int, int, int, int]
+    within_numa: tuple[int, int, int, int] | None = None
+
+    @field_validator('packed', 'spread', 'within_numa')
+    @classmethod
+    def distinct_cpus(cls, value):
+        if value is not None and (len(set(value)) != 4 or min(value) < 0):
+            raise ValueError('each layout requires four distinct nonnegative CPU IDs')
+        return value
+
+
+class ToolPlacementStudySpec(StrictFrozenModel):
+    targets_file: str = Field(min_length=1)
+    prefix_sequences_file: str = Field(min_length=1)
+    groups: tuple[ToolPlacementGroup, ...] = Field(min_length=1)
+    strata: tuple[Literal['long', 'short'], ...] = ('long', 'short')
+    repetitions: int = Field(default=1, ge=1)
+    isolation_domain: Literal['llc', 'cluster'] = 'llc'
+    random_seed: int = 0
+    control_timeout_seconds: int = Field(default=86400, ge=3600)
+    max_targets_per_case: int | None = Field(default=None, ge=1)
+
+
 class MemoryActionCostSpec(StrictFrozenModel):
     """Empirical costs used to compare live borrowing with WARM eviction.
 
@@ -314,6 +340,7 @@ class ExecutionSpec(StrictFrozenModel):
         default=0.001, gt=0, le=0.1, allow_inf_nan=False)
     worker_cyclic_gc_enabled: bool = False
     snapshot_branching: SnapshotBranchingSpec | None = None
+    tool_placement: ToolPlacementStudySpec | None = None
     randomized_order: bool = True
     random_seed: int = 0
     # Every supported run is supervised at the process boundary.  An
@@ -845,6 +872,24 @@ class ExperimentSpec(StrictFrozenModel):
         assignment = self.execution.session_compute_nodes
         nodes = self.resources.compute_nodes
         slots = self.execution.session_cpu_slots
+        study = self.execution.tool_placement
+        if study is not None:
+            if (not slots or self.agent.driver is not AgentDriver.OPENCLAW
+                    or self.inference.backend is not InferenceBackend.REPLAY
+                    or any(p.admission is not AdmissionPolicy.OFF or p.runtime_control.adaptive
+                           or p.reclamation is not ReclamationPolicy.RESIDENT for p in self.policies)):
+                raise ValueError('tool_placement requires OpenClaw replay, exclusive session slots, resident VMs and admission/runtime control off')
+            parents = [g.parent_node_id for g in study.groups]
+            if parents != [s.node_id for s in slots]:
+                raise ValueError('tool_placement groups must correspond to parent session slots in order')
+            allowed = set().union(*(parse_cpu_list(node.cpus) for node in nodes))
+            for group, slot in zip(study.groups, slots):
+                trial_cpus = set(group.packed + group.spread + (group.within_numa or ()))
+                if not trial_cpus <= allowed:
+                    raise ValueError('tool_placement CPUs must belong to configured compute nodes')
+                parent_cpus = parse_cpu_list(slot.cpus)
+                if trial_cpus & parent_cpus:
+                    raise ValueError('tool_placement parent VMs must use separate cores from measured replicas')
         if slots:
             if (not nodes or not self.resources.local_memory_cgroup
                     or self.execution.placement_policy != 'round_robin'
