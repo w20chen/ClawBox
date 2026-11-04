@@ -315,7 +315,8 @@ Fields are under `mechanisms.placement`:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `tool_call_cpu_policy` | `c0` | Full selected NUMA CPU pool; `c2` allows temporary one-LLC-cluster placement |
+| `tool_call_cpu_policy` | `c0` | Selected NUMA CPU pool, or leased `session_cpu_slots` mask; `c2` allows temporary CPU-cluster placement |
+| `session_cpu_slots` | `[]` | List of `{node_id, cpus}` slots; `cpus` is a Linux logical CPU list. Each slot serves one complete Runtime/Tool pair at a time. Both VMs' vCPU threads stay in that mask; reuse occurs after session cleanup. Requires managed resident C0 `round_robin` placement, compute nodes and a managed cgroup. Masks must be within their node and must not share physical cores, including SMT siblings. Effective concurrency is also capped by slot count. CPU-cluster masks may still share outer L3 cache. Requires a new run ID and qualification; host apply only if the allowed node/CPU pools change, no image rebuild or retraining. |
 | `tool_call_cpu_min_duration_seconds` | 1 | Delay before an eligible `agent-tool` `exec` may narrow |
 | `tool_call_cpu_group_max_active` | 2 | Maximum narrowed VMs per group; not exclusive core ownership |
 | `tool_call_cpu_pressure_ratio` | 0.10 | CPU PSI threshold for expansion |
@@ -396,6 +397,7 @@ Fields are under `execution`:
 | `kb_observation_retries` | 2 | 0–5 additional observation delivery attempts within that deadline. Commands are never retried. |
 | `retain_clause_telemetry_artifacts` | `false` | Write full Tool clause-telemetry files for diagnostics. Compact learning and integrity records are always retained. |
 | `concurrency_levels` | `[1]` | Positive offered session counts |
+| `max_active_sessions` | `null` | Optional positive limit on simultaneously live sessions (Runtime/Tool VM pairs). All offered sessions still run; freed slots admit the next session. Host quota and storage preflight use the largest possible active set. A new run ID is required; no host apply, image rebuild, or retraining. |
 | `sandbox_create_concurrency` | 8 | Independent preparation and actual-create limits, each in VM pairs; a pair can issue two concurrent creates, subject to lifecycle limits |
 | `dependency_install_concurrency` | `null` | Optional arm-wide bound on active apt/apt-get/pip installs |
 | `apt_cache_proxy_url` | `null` | Explicit Tool-only `http://host:port` APT proxy, with either internet policy. Requires a reachable proxy; change requires a new run ID, no image rebuild. |

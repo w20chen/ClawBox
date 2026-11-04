@@ -16,7 +16,7 @@ from .spec_types import (
     AdmissionPolicy, AgentDriver, ArrivalSchedule, EvictionPolicy, InferenceBackend,
     ReclamationPolicy, RestorePolicy, RuntimeControl, SessionAssignment, SnapshotTier, WorkloadSource,
 )
-from .topology import ComputeNode, validate_compute_nodes
+from .topology import ComputeNode, parse_cpu_list, validate_compute_nodes
 
 
 class StrictFrozenModel(BaseModel):
@@ -252,6 +252,11 @@ def resolve_case_sandbox(
 WorkloadCase.model_rebuild()
 
 
+class SessionCpuSlot(StrictFrozenModel):
+    node_id: str = Field(min_length=1)
+    cpus: str = Field(min_length=1)
+
+
 class ExecutionSpec(StrictFrozenModel):
     kb_scope_policy: Literal['pair'] = 'pair'
     retain_clause_telemetry_artifacts: bool = False
@@ -280,7 +285,10 @@ class ExecutionSpec(StrictFrozenModel):
     tool_call_cpu_min_duration_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     tool_call_cpu_include_smt: bool = False
     session_compute_nodes: tuple[str, ...] = ()
+    session_cpu_slots: tuple[SessionCpuSlot, ...] = ()
     concurrency_levels: tuple[int, ...] = (1,)
+    # Replay a corpus once while bounding simultaneous live Runtime/Tool pairs.
+    max_active_sessions: int | None = Field(default=None, ge=1)
     # Limit only concurrent VM-pair creation. Once a pair is ready, its
     # session releases this slot and remains active at offered concurrency.
     sandbox_create_concurrency: int = Field(default=8, ge=1)
@@ -836,6 +844,24 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError("tiered snapshot_only/joint requires resources.cold_snapshot_root for capacity fallback")
         assignment = self.execution.session_compute_nodes
         nodes = self.resources.compute_nodes
+        slots = self.execution.session_cpu_slots
+        if slots:
+            if (not nodes or not self.resources.local_memory_cgroup
+                    or self.execution.placement_policy != 'round_robin'
+                    or self.execution.tool_call_cpu_policy != 'c0'
+                    or self.execution.snapshot_branching is not None
+                    or any(p.reclamation is not ReclamationPolicy.RESIDENT
+                           or p.deployment == 'os-default' for p in self.policies)):
+                raise ValueError('session_cpu_slots requires managed resident C0 round_robin placement, compute_nodes and local_memory_cgroup')
+            pools = {node.node_id: parse_cpu_list(node.cpus) for node in nodes}
+            occupied: set[int] = set()
+            for slot in slots:
+                selected = parse_cpu_list(slot.cpus)
+                if slot.node_id not in pools or not selected <= pools[slot.node_id]:
+                    raise ValueError('session_cpu_slots CPUs must belong to their configured compute node')
+                if selected & occupied:
+                    raise ValueError('session_cpu_slots CPU sets must not overlap')
+                occupied.update(selected)
         if self.execution.placement_policy == "explicit":
             if not nodes or len(assignment) < max(self.execution.concurrency_levels):
                 raise ValueError("explicit placement requires compute_nodes and one node ID per offered session")

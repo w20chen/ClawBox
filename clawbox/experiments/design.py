@@ -44,7 +44,7 @@ DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
                   'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim',
                   'resident_capacity_accounting', 'lifecycle_reservation_scale')
 PLACEMENT_FIELDS = (
-    'placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes',
+    'placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes', 'session_cpu_slots',
     'tool_call_cpu_policy', 'tool_call_cpu_pressure_ratio',
     'tool_call_cpu_pressure_samples', 'tool_call_cpu_group_max_active',
     'tool_call_cpu_min_duration_seconds', 'tool_call_cpu_include_smt',

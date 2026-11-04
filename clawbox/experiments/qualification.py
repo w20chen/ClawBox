@@ -32,10 +32,10 @@ from .spec import (
 )
 from .spec_types import AdmissionPolicy, ArrivalSchedule
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
-from .worker import atomic_json, session_case_for
+from .worker import atomic_json, session_case_for, session_worker_count
 
 
-QUALIFICATION_SCHEMA_VERSION = 16
+QUALIFICATION_SCHEMA_VERSION = 17
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
 
 
@@ -211,6 +211,7 @@ def qualification_contract_digest(spec: ExperimentSpec) -> str:
     execution = raw.get("execution") or {}
     for key in (
         "concurrency_levels",
+        "max_active_sessions",
         "randomized_order",
         "random_seed",
         "stabilization_seconds",
@@ -267,9 +268,12 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
             continue
         assigned = [resolve_case_sandbox(session_case_for(arm, i), arm.sandbox)
                     for i in range(arm.concurrency)]
-        arms.append(dict(vm_count=2 * arm.concurrency,
-            cpu_milli=(arm.concurrency * arm.runtime.vcpu + sum(t.vcpu for t in assigned)) * 1000,
-            memory_mib=arm.concurrency * arm.runtime.memory_mib + sum(t.memory_mib for t in assigned)))
+        active = session_worker_count(arm)
+        # Completion order is unknown: reserve for the largest possible active
+        # set independently for each resource, not merely the first batch.
+        arms.append(dict(vm_count=2 * active,
+            cpu_milli=(active * arm.runtime.vcpu + sum(sorted((t.vcpu for t in assigned), reverse=True)[:active])) * 1000,
+            memory_mib=active * arm.runtime.memory_mib + sum(sorted((t.memory_mib for t in assigned), reverse=True)[:active])))
     demand = dict(
         **{key: max(arm[key] for arm in arms) for key in ('vm_count', 'cpu_milli', 'memory_mib')},
         max_vm_cpu_milli=max(spec.runtime.vcpu, *(t.vcpu for t in tools)) * 1000,

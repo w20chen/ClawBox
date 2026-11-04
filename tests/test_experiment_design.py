@@ -34,6 +34,20 @@ def base():
                 comparison=dict(recipe='custom', arms=[dict(name='custom')]))
 
 
+def test_session_cpu_slots_roundtrip_bound_workers_and_reject_overlap():
+    from clawbox.experiments.worker import session_worker_count
+    raw = base()
+    raw['mechanisms']['placement']['session_cpu_slots'] = [
+        {'node_id': 'node0', 'cpus': '0,2,4,6'}]
+    spec = ExperimentSpec.model_validate(raw)
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    assert session_worker_count(expand_matrix(spec)[0]) == 1
+    raw['mechanisms']['placement']['session_cpu_slots'].append(
+        {'node_id': 'node0', 'cpus': '4,8'})
+    with pytest.raises(ValueError, match='must not overlap'):
+        ExperimentSpec.model_validate(raw)
+
+
 def design(recipe='custom', axis=None):
     raw = base()
     m = raw['mechanisms']

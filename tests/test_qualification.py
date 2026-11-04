@@ -46,6 +46,30 @@ def test_host_capacity_counts_assigned_shapes(assignment, count, tool_mib, tool_
     assert demand['max_vm_memory_mib'] == 16384
 
 
+def test_active_session_bound_preserves_cases_and_budgets_later_large_shapes():
+    from clawbox.experiments.spec_types import SessionAssignment
+    spec = load_experiment(EXAMPLE)
+    cases = tuple(spec.workload.cases[0].model_copy(update={
+        'case_id': f'case-{i}', 'sandbox': spec.sandbox.model_copy(update={
+            'memory_mib': memory, 'vcpu': cpus})})
+        for i, (memory, cpus) in enumerate([(1024, 2), (16384, 4), (8192, 8)]))
+    spec = spec.model_copy(update={
+        'workload': spec.workload.model_copy(update={
+            'cases': cases, 'session_assignment': SessionAssignment.UNIQUE}),
+        'execution': spec.execution.model_copy(update={
+            'concurrency_levels': (3,), 'max_active_sessions': 2})})
+    arm = expand_matrix(spec)[0]
+    assert session_worker_count(arm) == 2
+    assert arm.concurrency == 3
+    assert len(arm.session_cases) == 3
+    demand = qualification_module.host_profile_for(spec)['cube_capacity_demand']
+    assert demand['vm_count'] == 4
+    assert demand['memory_mib'] == 2 * spec.runtime.memory_mib + 16384 + 8192
+    assert demand['cpu_milli'] == (2 * spec.runtime.vcpu + 4 + 8) * 1000
+    qualified = qualification_spec(spec, concurrency=1)
+    assert session_worker_count(expand_matrix(qualified)[0]) == 1
+
+
 def test_file_mapping_totals_include_split_segments_of_the_same_ram_file(monkeypatch):
     smaps = """10000000-50000000 rw-p 00000000 08:01 42 /data/volumes/tpl-memory
 Size:            1048576 kB

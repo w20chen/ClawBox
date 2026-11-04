@@ -340,13 +340,16 @@ def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
 
 
 def session_worker_count(arm: ExperimentArm) -> int:
-    """Bound qualification residency without reducing covered sessions."""
+    """Bound live sessions without reducing offered or covered sessions."""
+    limit = min(arm.concurrency, arm.execution.max_active_sessions or arm.concurrency)
+    if arm.execution.session_cpu_slots:
+        limit = min(limit, len(arm.execution.session_cpu_slots))
     value = arm.inference.configuration.get("qualification_max_parallel_sessions")
     if value is None:
-        return arm.concurrency
+        return limit
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("qualification_max_parallel_sessions must be a positive integer")
-    return min(arm.concurrency, value)
+    return min(limit, value)
 
 
 def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
@@ -2566,7 +2569,13 @@ class ExperimentWorker:
             # One admission budget and the inherited parent cpuset, with no
             # per-VM CPU or memory-node narrowing in B0.
             domains['local'].cpus = ','.join(n.cpus for n in arm.resources.compute_nodes)
+        from .cpu_slots import SessionCpuSlots
+        cpu_slots = (SessionCpuSlots(arm.execution.session_cpu_slots)
+                     if arm.execution.session_cpu_slots else None)
+
         def session_domain(index):
+            if cpu_slots is not None:
+                return domains[cpu_slots.for_session(index).node_id]
             if not arm.resources.compute_nodes or os_default:
                 return domains["local"]
             node = place_session(arm.resources.compute_nodes, index, arm.execution.session_compute_nodes)
@@ -2760,6 +2769,18 @@ class ExperimentWorker:
                 raise ArmInfrastructureError("shared policy controller failed") from exc
 
         def run_placed_session(index):
+            if cpu_slots is not None:
+                with cpu_slots.lease(index) as slot:
+                    details = {'session_id': f'{arm.arm_id}-{index:04d}',
+                               'node_id': slot.node_id, 'cpus': slot.cpus}
+                    events.write({'event': 'session_cpu_slot_acquired', **details})
+                    try:
+                        return run_leased_session(index)
+                    finally:
+                        events.write({'event': 'session_cpu_slot_released', **details})
+            return run_leased_session(index)
+
+        def run_leased_session(index):
             session_id = f'{arm.arm_id}-{index:04d}'
             previous = recovery.previous(session_id)
             if previous:
@@ -2805,6 +2826,8 @@ class ExperimentWorker:
                          'local' if os_default else
                          place_session(arm.resources.compute_nodes, index,
                                        arm.execution.session_compute_nodes).node_id)
+                if cpu_slots is not None:
+                    fixed = cpu_slots.for_session(index).node_id
                 with trace_scope('session_placement_timing', events.write, session_id):
                     key = placement.acquire(
                         session_id, vcpus=arm.runtime.vcpu+tool_sandbox.vcpu,
@@ -2820,10 +2843,12 @@ class ExperimentWorker:
             waited = time.monotonic()-started
             try:
                 if placement is not None and not os_default:
-                    self._priority_domain.placements[index] = (domain.cpus, domain.arm.resources.local_numa_node)
+                    selected_cpus = (cpu_slots.for_session(index).cpus
+                                     if cpu_slots is not None else domain.cpus)
+                    self._priority_domain.placements[index] = (selected_cpus, domain.arm.resources.local_numa_node)
                     with trace_scope('session_topology_timing', events.write, session_id):
                         self._priority_domain.configure_topology_placement(
-                            index, domain.cpus, domain.arm.resources.local_numa_node,
+                            index, selected_cpus, domain.arm.resources.local_numa_node,
                         )
                 result = self._run_session(domain.arm, index, domain.coordinator, events,
                     policy_events, prediction_providers.get(session_case.case_id), sandbox_create_gate,

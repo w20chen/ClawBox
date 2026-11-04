@@ -276,6 +276,28 @@ For a target rate of `lambda` sessions/second and `N > 1` sessions, use an
 expected window of `(N - 1) / lambda` seconds. Set the arm timeout beyond arrival
 and execution time. The default arm timeout is 3600 seconds.
 
+For a corpus scan, set `workload.session_assignment: unique`, set
+`execution.concurrency_levels` to the number of cases, and set
+`execution.max_active_sessions: 32` to run at most 32 live VM pairs at once.
+Every case still executes; completion releases a slot for the next case.
+Set `inference.configuration.time_scale: 0` to skip recorded model waits while
+preserving Tool commands. This is an accelerated workload profile, not an
+end-to-end Agent latency comparison. These settings require a new run ID,
+but no host apply, image rebuild, or retraining.
+
+To keep concurrent traces on disjoint cores, set
+`mechanisms.placement.session_cpu_slots` to a list such as
+`[{node_id: node0, cpus: "0,2,4,6"}, {node_id: node1, cpus: "80,82,84,86"}]`.
+Use CPU IDs verified from your host's `thread_siblings_list` and
+`cluster_cpus_list`; these example IDs are not portable. A slot is leased for
+the entire trace, and both Runtime and Tool vCPU threads use its mask. With
+two slots, at most two traces run; the next trace takes whichever slot finishes.
+Use managed resident C0 `round_robin` placement. Configure enough slots for the
+desired concurrency and keep `execution.max_active_sessions` at or below that
+count. Separate CPU clusters can still share the outer L3 cache. Use a new run
+ID and qualification; apply the host configuration first if adding allowed
+CPU/NUMA pools. Images and trained models do not need rebuilding.
+
 `execution.sandbox_create_concurrency` defaults to 8 VM pairs. Preparation and
 actual creation have separate limits of this size, so waiting for memory does
 not occupy an actual-create slot. Tool calls have no corresponding global
