@@ -261,11 +261,220 @@ def write_memory_timeseries(run_root: Path) -> Path:
 
 def write_run_report_artifacts(run_root: Path) -> tuple[Path, Path]:
     """Write the human report and a plot-ready whole-run memory trace."""
+    results = _completed_results(run_root)
+    if any(
+        (result.get("provenance") or {}).get("scenario")
+        == "snapshot-aware-scheduling-across-local-and-shared-storage"
+        for result in results
+    ):
+        _write_snapshot_scheduling_csv(run_root, results)
     report = run_root / "report.md"
     temporary = report.with_name(report.name + ".tmp")
     temporary.write_text(render_run_report(run_root), encoding="utf-8")
     temporary.replace(report)
     return report, write_memory_timeseries(run_root)
+
+
+def _snapshot_value(result: dict[str, Any], key: str, *, distribution: str | None = None) -> Any:
+    value = (result.get("performance") or {}).get(key)
+    return value.get(distribution) if distribution and isinstance(value, dict) else value
+
+
+def _write_snapshot_scheduling_csv(
+    run_root: Path, results: list[dict[str, Any]],
+) -> Path:
+    output = run_root / "snapshot-scheduling-summary.csv"
+    temporary = output.with_name(output.name + ".tmp")
+    fields = [
+        "arm_id", "policy", "pressure", "repetition", "status",
+        "completed_rollouts", "offered_rollouts", "admission_failures",
+        "rollouts_per_second", "offered_rollouts_per_second", "makespan_seconds", "e2e_mean_seconds",
+        "e2e_p50_seconds", "e2e_p90_seconds", "queue_mean_seconds",
+        "transfer_mean_seconds", "restore_mean_seconds", "cross_node_restores",
+        "rootfs_transfer_bytes", "memfile_transfer_bytes", "metadata_transfer_bytes",
+        "shared_storage_read_bytes", "shared_storage_write_bytes",
+        "rootfs_cache_hit_rate", "memfile_cache_hit_rate", "transfer_savings_bytes",
+        "peak_node0_dram_bytes", "peak_node1_dram_bytes",
+        "peak_node0_storage_bytes", "peak_node1_storage_bytes",
+        "peak_shared_ssd_bytes", "peak_shared_dram_bytes",
+    ]
+    with temporary.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for result in results:
+            provenance = result.get("provenance") or {}
+            if provenance.get("scenario") != "snapshot-aware-scheduling-across-local-and-shared-storage":
+                continue
+            arm = result.get("arm") or {}
+            execution = arm.get("execution") or {}
+            scenario = execution.get("snapshot_branching") or {}
+            memory = result.get("memory") or {}
+            local_dram = memory.get("peak_local_dram_bytes") or {}
+            local_storage = memory.get("peak_local_storage_bytes") or {}
+            writer.writerow({
+                "arm_id": arm.get("arm_id"),
+                "policy": (arm.get("policy") or {}).get("name"),
+                "pressure": scenario.get("pressure"),
+                "repetition": arm.get("repetition"), "status": result.get("status"),
+                "completed_rollouts": _snapshot_value(result, "completed_rollouts"),
+                "offered_rollouts": _snapshot_value(result, "offered_rollouts"),
+                "admission_failures": _snapshot_value(result, "admission_failures"),
+                "rollouts_per_second": _snapshot_value(result, "rollouts_per_second"),
+                "offered_rollouts_per_second": _snapshot_value(result, "offered_rollouts_per_second"),
+                "makespan_seconds": _snapshot_value(result, "makespan_seconds"),
+                "e2e_mean_seconds": _snapshot_value(result, "rollout_e2e_seconds", distribution="avg"),
+                "e2e_p50_seconds": _snapshot_value(result, "rollout_e2e_seconds", distribution="p50"),
+                "e2e_p90_seconds": _snapshot_value(result, "rollout_e2e_seconds", distribution="p90"),
+                "queue_mean_seconds": _snapshot_value(result, "queue_seconds", distribution="avg"),
+                "transfer_mean_seconds": _snapshot_value(result, "snapshot_transfer_seconds", distribution="avg"),
+                "restore_mean_seconds": _snapshot_value(result, "restore_seconds", distribution="avg"),
+                "cross_node_restores": _snapshot_value(result, "cross_node_restores"),
+                "rootfs_transfer_bytes": _snapshot_value(result, "rootfs_transfer_bytes"),
+                "memfile_transfer_bytes": _snapshot_value(result, "memfile_transfer_bytes"),
+                "metadata_transfer_bytes": _snapshot_value(result, "metadata_transfer_bytes"),
+                "shared_storage_read_bytes": _snapshot_value(result, "shared_storage_read_bytes"),
+                "shared_storage_write_bytes": _snapshot_value(result, "shared_storage_write_bytes"),
+                "rootfs_cache_hit_rate": _snapshot_value(result, "rootfs_cache_hit_rate"),
+                "memfile_cache_hit_rate": _snapshot_value(result, "memfile_cache_hit_rate"),
+                "transfer_savings_bytes": _snapshot_value(result, "transfer_savings_bytes"),
+                "peak_node0_dram_bytes": local_dram.get("node0"),
+                "peak_node1_dram_bytes": local_dram.get("node1"),
+                "peak_node0_storage_bytes": local_storage.get("node0"),
+                "peak_node1_storage_bytes": local_storage.get("node1"),
+                "peak_shared_ssd_bytes": memory.get("peak_shared_ssd_bytes"),
+                "peak_shared_dram_bytes": memory.get("peak_shared_dram_bytes"),
+            })
+    temporary.replace(output)
+    return output
+
+
+def _render_snapshot_scheduling_report(
+    run_root: Path, results: list[dict[str, Any]], experiment_id: str,
+) -> str:
+    transfer_modes = {
+        str((result.get("performance") or {}).get("snapshot_transfer_mode", "shared-relay"))
+        for result in results
+    }
+    if transfer_modes == {"peer-direct"}:
+        transfer_description = (
+            "one measured source-local-XFS -> target-local-XFS copy with hash verification; "
+            "no shared-storage relay or node-to-node network delay is emulated"
+        )
+    else:
+        transfer_description = (
+            "a measured local-XFS -> shaped NFS -> target-XFS two-hop copy with hash verification"
+        )
+    lines = [
+        f"# Experiment {experiment_id}", "", f"Run: `{run_root.name}`", "",
+        "Cross-node results use a simulated data-placement path: the rootfs dependency uses "
+        f"{transfer_description}, while Cube performs a real native snapshot restore into a newly "
+        "placed sandbox. Cube does not consume the caller-staged paths. Both logical "
+        "nodes share one physical Cube node and immutable template store; base-template "
+        "placement is held constant and is not a measured scheduling variable.", "",
+        "## Per-arm comparison", "",
+        "| Policy | Pressure | Rep | Status | Completed/offered | Admission failures | "
+        "Completed/offered rollouts/s | Makespan s | E2E mean/p50/p90 s | Queue/transfer/restore mean s | "
+        "Cross-node | Rootfs/Memfile transfer GiB | Cache hit rootfs/memfile | Shared read/write GiB |",
+        "|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for result in results:
+        arm = result.get("arm") or {}
+        performance = result.get("performance") or {}
+        scenario = (arm.get("execution") or {}).get("snapshot_branching") or {}
+        e2e = performance.get("rollout_e2e_seconds") or {}
+        queue = performance.get("queue_seconds") or {}
+        transfer = performance.get("snapshot_transfer_seconds") or {}
+        restore = performance.get("restore_seconds") or {}
+        lines.append(
+            f"| {(arm.get('policy') or {}).get('name', 'unknown')} | {scenario.get('pressure', 'unknown')} | "
+            f"{arm.get('repetition', 'n/a')} | {result.get('status', 'unknown')} | "
+            f"{performance.get('completed_rollouts', 0)}/{performance.get('offered_rollouts', 0)} | "
+            f"{performance.get('admission_failures', 0)} | "
+            f"{_number(performance.get('rollouts_per_second'), 3)}/"
+            f"{_number(performance.get('offered_rollouts_per_second'), 3)} | "
+            f"{_number(performance.get('makespan_seconds'))} | "
+            f"{_number(e2e.get('avg'))}/{_number(e2e.get('p50'))}/{_number(e2e.get('p90'))} | "
+            f"{_number(queue.get('avg'))}/{_number(transfer.get('avg'))}/{_number(restore.get('avg'))} | "
+            f"{performance.get('cross_node_restores', 0)} | "
+            f"{_gib(performance.get('rootfs_transfer_bytes'))}/{_gib(performance.get('memfile_transfer_bytes'))} | "
+            f"{_number(performance.get('rootfs_cache_hit_rate'))}/{_number(performance.get('memfile_cache_hit_rate'))} | "
+            f"{_gib(performance.get('shared_storage_read_bytes'))}/{_gib(performance.get('shared_storage_write_bytes'))} |"
+        )
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for result in results:
+        arm = result.get("arm") or {}
+        policy = (arm.get("policy") or {}).get("name", "unknown")
+        pressure = ((arm.get("execution") or {}).get("snapshot_branching") or {}).get("pressure", "unknown")
+        grouped.setdefault((pressure, policy), []).append(result)
+    lines.extend([
+        "", "## Cross-repetition summary", "",
+        "Means include succeeded arms only; the succeeded/offered column keeps every formal trial visible. "
+        "Values are mean +/- sample SD when at least two repetitions succeeded.", "",
+        "| Pressure | Policy | Succeeded/offered | Rollouts/s | Makespan s | E2E mean s | Transfer mean s | "
+        "Rootfs transfer GiB | Shared read GiB | Peak node0/node1 DRAM GiB | Peak shared SSD/DRAM GiB |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for (pressure, policy), group in sorted(grouped.items()):
+        succeeded = [item for item in group if item.get("status") == "succeeded"]
+        def values(key: str, *, distribution: str | None = None, divisor: float = 1.0) -> list[float]:
+            found = []
+            for item in succeeded:
+                value = _snapshot_value(item, key, distribution=distribution)
+                if value is not None:
+                    found.append(float(value) / divisor)
+            return found
+        def memory_values(key: str, child: str | None = None) -> list[float]:
+            found = []
+            for item in succeeded:
+                value = (item.get("memory") or {}).get(key)
+                if child and isinstance(value, dict):
+                    value = value.get(child)
+                if value is not None:
+                    found.append(float(value) / 1024 ** 3)
+            return found
+        lines.append(
+            f"| {pressure} | {policy} | {len(succeeded)}/{len(group)} | "
+            f"{_mean_sd_text(values('rollouts_per_second'), 3)} | "
+            f"{_mean_sd_text(values('makespan_seconds'))} | "
+            f"{_mean_sd_text(values('rollout_e2e_seconds', distribution='avg'))} | "
+            f"{_mean_sd_text(values('snapshot_transfer_seconds', distribution='avg'))} | "
+            f"{_mean_sd_text(values('rootfs_transfer_bytes', divisor=1024 ** 3))} | "
+            f"{_mean_sd_text(values('shared_storage_read_bytes', divisor=1024 ** 3))} | "
+            f"{_mean_sd_text(memory_values('peak_local_dram_bytes', 'node0'))}/"
+            f"{_mean_sd_text(memory_values('peak_local_dram_bytes', 'node1'))} | "
+            f"{_mean_sd_text(memory_values('peak_shared_ssd_bytes'))}/"
+            f"{_mean_sd_text(memory_values('peak_shared_dram_bytes'))} |"
+        )
+
+    lines.extend([
+        "", "## Correctness and resource evidence", "",
+        "| Arm | Parent memory/rootfs | Storage isolation | Branch isolation | Immutable parent | Two-hop hash | Cache reuse | Capacity | "
+        "Local disk node0/node1 GiB | Shared SSD/DRAM GiB | Transfer savings GiB |",
+        "|---|---|---|---|---|---|---|---|---:|---:|---:|",
+    ])
+    for result in results:
+        arm = result.get("arm") or {}
+        correctness = result.get("correctness") or {}
+        memory = result.get("memory") or {}
+        local = memory.get("peak_local_storage_bytes") or {}
+        performance = result.get("performance") or {}
+        lines.append(
+            f"| {arm.get('arm_id', 'n/a')} | "
+            f"{correctness.get('vm_memory_state_verified', False)}/{correctness.get('rootfs_state_verified', False)} | "
+            f"{correctness.get('storage_isolation_verified', False)} | "
+            f"{correctness.get('branch_isolation_verified', False)} | {correctness.get('parent_snapshot_immutable', False)} | "
+            f"{correctness.get('real_two_hop_copy_verified', False)} | {correctness.get('cache_reuse_verified', False)} | "
+            f"{correctness.get('capacity_constraint_enforced', False)} | "
+            f"{_gib(local.get('node0'))}/{_gib(local.get('node1'))} | "
+            f"{_gib(memory.get('peak_shared_ssd_bytes'))}/{_gib(memory.get('peak_shared_dram_bytes'))} | "
+            f"{_gib(performance.get('transfer_savings_bytes'))} |"
+        )
+    lines.extend([
+        "", "Plot-ready rows are in `snapshot-scheduling-summary.csv`; immutable per-rollout "
+        "records and resource samples remain in each arm's artifacts.",
+    ])
+    return "\n".join(lines) + "\n"
 
 
 def render_run_report(run_root: Path) -> str:
@@ -282,6 +491,15 @@ def render_run_report(run_root: Path) -> str:
         raise ValueError(f"run has no completed arm records: {run_root}")
 
     experiment_id = rows[0]["result"].get("experiment_id", run_root.name)
+    snapshot_results = [
+        row["result"] for row in rows
+        if (row["result"].get("provenance") or {}).get("scenario")
+        == "snapshot-aware-scheduling-across-local-and-shared-storage"
+    ]
+    if snapshot_results and len(snapshot_results) == len(rows):
+        return _render_snapshot_scheduling_report(
+            run_root, snapshot_results, experiment_id,
+        )
     lines = [
         f"# Experiment {experiment_id}", "",
         f"Run: `{run_root.name}`", "",

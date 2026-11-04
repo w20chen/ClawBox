@@ -1,0 +1,30 @@
+# Kunpeng logical-node storage for snapshot-aware scheduling. Review before apply.
+schema_version: 1
+state_root: /data/clawbox-snapshot-scheduling-host
+image_root: /data/clawbox-snapshot-scheduling-host/images
+receipt: /data/clawbox-snapshot-scheduling-host/receipt.json
+export_mount: /mnt/clawbox-snapshot-shared-export
+warm_root: /mnt/clawbox-snapshot-warm
+local_capacity_mib: 49152
+shared_capacity_mib: 32768
+warm_capacity_mib: 32768
+warm_numa_node: 2
+latency_ms: 5.0
+bandwidth_mbit: 1000
+nodes:
+  node0:
+    local_mount: /mnt/clawbox-snapshot-node0
+    shared_mount: /mnt/clawbox-snapshot-shared-node0
+    netns: cbss-node0
+    host_veth: cbss0-host
+    node_veth: cbss0-node
+    host_address: 10.203.0.1/30
+    node_address: 10.203.0.2/30
+  node1:
+    local_mount: /mnt/clawbox-snapshot-node1
+    shared_mount: /mnt/clawbox-snapshot-shared-node1
+    netns: cbss-node1
+    host_veth: cbss1-host
+    node_veth: cbss1-node
+    host_address: 10.203.0.5/30
+    node_address: 10.203.0.6/30

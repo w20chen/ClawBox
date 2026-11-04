@@ -56,7 +56,7 @@ def test_public_cli_contains_only_experiment_group() -> None:
         "baselines", "configure", "describe", "validate", "plan", "run", "status",
         "setup", "doctor", "qualify", "resume", "abort", "destroy", "collect",
         "trace", "import-trace", "import-corpus", "train", "images", "report", "launch", "host", "recipes", "schema",
-        "prove-template-sharing",
+        "prove-template-sharing", "snapshot-storage",
     }
 
 

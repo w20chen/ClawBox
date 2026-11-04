@@ -255,6 +255,16 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
     ]
     arms = []
     for arm in expand_matrix(spec):
+        if arm.execution.snapshot_branching is not None:
+            # Parent snapshots are prepared one at a time and their source VM is
+            # killed before rollout admission begins.  A rollout owns only the
+            # sandbox restored from that parent snapshot, not a Runtime VM.
+            arms.append(dict(
+                vm_count=arm.concurrency,
+                cpu_milli=arm.concurrency * arm.sandbox.vcpu * 1000,
+                memory_mib=arm.concurrency * arm.sandbox.memory_mib,
+            ))
+            continue
         assigned = [resolve_case_sandbox(session_case_for(arm, i), arm.sandbox)
                     for i in range(arm.concurrency)]
         arms.append(dict(vm_count=2 * arm.concurrency,
@@ -342,6 +352,9 @@ def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> 
         })
         spec = spec.model_copy(update={'schema_version': 3, 'resources': physical})
     profile = host_profile_for(spec)
+    if spec.resources.snapshot_scheduling_storage is not None:
+        from .snapshot_scheduling import validate_applied_storage
+        validate_applied_storage(spec.resources.snapshot_scheduling_storage)
     apply_environment(profile)
     sibling_clawtune = Path(__file__).resolve().parents[3] / "ClawTune"
     if sibling_clawtune.is_dir():
@@ -351,6 +364,17 @@ def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> 
         for policy in spec.policies
     )
     failures = doctor(profile, warm=warm, current_images=current_images)
+    if spec.execution.snapshot_branching is not None:
+        # This runner creates only Tool rollout VMs in per-node PriorityDomain
+        # cgroups.  Its reviewed tmpfs is validated above and it does not use
+        # Runtime/ClawTune or the ordinary combined LOCAL/WARM live-memory tier.
+        irrelevant = {"combined live memory.max", "LOCAL/shared NUMA nodes"}
+        failures = [
+            failure for failure in failures
+            if failure not in irrelevant
+            and not failure.startswith("runtime current ClawTune")
+            and not failure.startswith("sandbox current ClawTune")
+        ]
     if failures:
         raise RuntimeError("experiment host checks failed: " + ", ".join(failures))
 
@@ -920,7 +944,7 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
     workload = spec.workload.model_copy(update={
         "cases": tuple(cases), "repetitions": 1,
     })
-    execution = spec.execution.model_copy(update={
+    execution_updates = {
         # One session per case proves heterogeneous coverage. The worker-pool
         # bound above limits how many of those sessions are live at once.
         "concurrency_levels": (max(level, len(cases)),),
@@ -928,7 +952,41 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
         "arrival_schedule": ArrivalSchedule.BURST,
         "stagger_interval_seconds": 0.0,
-    })
+    }
+    branching = spec.execution.snapshot_branching
+    if branching is not None:
+        # Exercise both logical nodes and a cross-node choice without turning
+        # qualification into another 16x8 performance run.
+        execution_updates.update({
+            "concurrency_levels": (4,),
+            "snapshot_branching": branching.model_copy(update={
+                "parent_nodes": tuple(dict.fromkeys(branching.parent_nodes)),
+                "branches_per_parent": 2,
+                "arrival_batches": (2, 2),
+                "arrival_batch_interval_seconds": min(
+                    branching.arrival_batch_interval_seconds, 0.1
+                ),
+                "per_node_concurrency": 2,
+                "per_node_memory_mib": max(2 * spec.sandbox.memory_mib, 6144),
+                "parent_memory_state_mib": min(
+                    branching.parent_memory_state_mib, 16
+                ),
+                "parent_rootfs_payload_mib": min(
+                    branching.parent_rootfs_payload_mib, 4
+                ),
+                "branch_memory_work_mib": min(
+                    branching.branch_memory_work_mib, 32
+                ),
+                "branch_file_work_mib": min(
+                    branching.branch_file_work_mib, 8
+                ),
+                "branch_disk_reservation_mib": min(
+                    branching.branch_disk_reservation_mib, 32
+                ),
+                "branch_cpu_rounds": min(branching.branch_cpu_rounds, 8),
+            }),
+        })
+    execution = spec.execution.model_copy(update=execution_updates)
     validation = spec.validation.model_copy(update={"command": "true"})
     return spec.model_copy(update={
         "experiment_id": spec.experiment_id + "-qualification",

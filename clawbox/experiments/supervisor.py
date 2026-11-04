@@ -17,7 +17,7 @@ from clawbox.cube import CubeSandboxClient, OwnedSandboxJournal
 from .configure import dump_experiment
 from .baselines import ensure_supported_experiment
 from .results import FailureCategory, ResultEnvelope, RunStatus, utcnow
-from .spec import ExperimentArm, ExperimentSpec, expand_matrix, spec_digest
+from .spec import ExperimentArm, ExperimentSpec, expand_matrix, load_experiment, spec_digest
 from .worker import atomic_json, atomic_marker, write_summary
 
 
@@ -628,6 +628,22 @@ def cleanup_run(
             failures.append(f"{arm_id}: {type(exc).__name__}: {exc}")
             arm["cleanup_verified"] = False
             arm["cleanup_error"] = str(exc)
+    try:
+        spec = load_experiment(run_root / "experiment.yaml")
+        storage = spec.resources.snapshot_scheduling_storage
+        if storage is not None:
+            from .snapshot_scheduling import cleanup_snapshot_run_storage
+            cold_roots = {
+                arm.arm_id: arm.resources.cold_snapshot_root
+                for arm in expand_matrix(spec)
+                if arm.resources.cold_snapshot_root
+            }
+            cleanup_snapshot_run_storage(
+                storage, run_id=str(state["run_id"]), arms=state.get("arms", {}),
+                cold_snapshot_roots=cold_roots,
+            )
+    except Exception as exc:
+        failures.append(f"snapshot storage: {type(exc).__name__}: {exc}")
     state["state"] = "destroyed" if not failures else "failed"
     state["phase"] = "terminal"
     state["failure"] = None if not failures else "; ".join(failures)

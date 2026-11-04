@@ -93,6 +93,36 @@ def _validate_openclaw_trace_summary(spec, case, info: dict, limit: int | None) 
         )
 
 
+def _validate_snapshot_branching_input(spec: ExperimentSpec) -> dict | None:
+    """Hash the scenario manifest without treating it as an OpenClaw replay."""
+    if spec.execution.snapshot_branching is None:
+        return None
+    traces = []
+    for case in load_workload_cases(spec.workload):
+        path = Path(case.source_reference)
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"{case.case_id}: invalid snapshot branching workload manifest {path}: {exc}"
+            ) from exc
+        case_ids = {
+            str(item.get("case_id")) for item in document.get("cases", [])
+            if isinstance(item, dict) and item.get("case_id")
+        }
+        if case.case_id not in case_ids:
+            raise ValueError(
+                f"{case.case_id}: missing from snapshot branching workload manifest {path}"
+            )
+        traces.append({
+            "case_id": case.case_id, "path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "actions": 0, "model_calls": 0, "tool_calls": 0,
+            "input_kind": "snapshot_branching_manifest",
+        })
+    return {"traces": traces, "prediction_files": []}
+
+
 def validate_launch_inputs(spec: ExperimentSpec) -> dict:
     """Perform the checks needed to launch, reusing explicit readiness evidence.
 
@@ -110,6 +140,9 @@ def validate_launch_inputs(spec: ExperimentSpec) -> dict:
                 path for result in results for path in result["prediction_files"]
             }),
         }
+    branching = _validate_snapshot_branching_input(spec)
+    if branching is not None:
+        return branching
     limit = spec.inference.configuration.get("max_model_steps")
     if limit is not None and (
         spec.inference.backend is not InferenceBackend.REPLAY
@@ -180,6 +213,9 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
         results = [validate_inputs(effective_spec(spec, p)) for p in spec.policies]
         return {'traces': results[0]['traces'],
                 'prediction_files': sorted({path for result in results for path in result['prediction_files']})}
+    branching = _validate_snapshot_branching_input(spec)
+    if branching is not None:
+        return branching
     limit = spec.inference.configuration.get("max_model_steps")
     if limit is not None and (
         spec.inference.backend is not InferenceBackend.REPLAY

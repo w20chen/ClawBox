@@ -173,6 +173,17 @@ class _Sandbox:
         return [{"sandboxID": item.sandbox_id, "templateID": item.template_id,
                  "metadata": item.metadata, "state": item.state} for item in cls.items.values()]
 
+    @classmethod
+    def delete_snapshot(cls, snapshot_id, **kwargs):
+        cls.snapshots.discard(snapshot_id)
+
+    snapshots: set[str] = set()
+
+    def create_snapshot(self, name=None):
+        snapshot_id = f"snap-{len(self.snapshots) + 1}"
+        self.snapshots.add(snapshot_id)
+        return SimpleNamespace(snapshot_id=snapshot_id, names=[name] if name else [])
+
     def pause(self, wait=True, **kwargs):
         self.state = "paused"
         if kwargs:

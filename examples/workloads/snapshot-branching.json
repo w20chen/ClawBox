@@ -1,0 +1,8 @@
+{
+  "cases": [
+    {
+      "case_id": "snapshot-branching",
+      "prompt": "Run the fixed CPU, memory and filesystem branching workload."
+    }
+  ]
+}

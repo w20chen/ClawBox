@@ -75,7 +75,20 @@ class OwnedSandboxJournal:
 
     def record(self, sandbox_id: str, ownership: Ownership, *,
                create_trace: list[dict[str, Any]] | None = None) -> None:
-        record = {"sandbox_id": sandbox_id, "ownership": asdict(ownership)}
+        self._record(
+            {"kind": "sandbox", "sandbox_id": sandbox_id,
+             "ownership": asdict(ownership)},
+            create_trace=create_trace,
+        )
+
+    def record_snapshot(self, snapshot_id: str, ownership: Ownership) -> None:
+        self._record({
+            "kind": "snapshot", "snapshot_id": snapshot_id,
+            "ownership": asdict(ownership),
+        })
+
+    def _record(self, record: dict[str, Any], *,
+                create_trace: list[dict[str, Any]] | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
         with _creation_span(create_trace, "journal_lock_wait"):
@@ -97,6 +110,12 @@ class OwnedSandboxJournal:
             self._lock.release()
 
     def sandbox_ids(self, *, task_uid: str | None = None) -> list[str]:
+        return self._ids("sandbox_id", task_uid=task_uid)
+
+    def snapshot_ids(self, *, task_uid: str | None = None) -> list[str]:
+        return self._ids("snapshot_id", task_uid=task_uid)
+
+    def _ids(self, field: str, *, task_uid: str | None = None) -> list[str]:
         if not self.path.exists():
             return []
         found: list[str] = []
@@ -104,15 +123,15 @@ class OwnedSandboxJournal:
         for line in self.path.read_text(encoding="utf-8").splitlines():
             try:
                 record = json.loads(line)
-                sandbox_id = str(record["sandbox_id"])
+                item_id = str(record[field])
                 owner = record.get("ownership") or {}
             except (ValueError, KeyError, TypeError):
                 continue
             if task_uid is not None and owner.get("task_uid") != task_uid:
                 continue
-            if sandbox_id not in seen:
-                seen.add(sandbox_id)
-                found.append(sandbox_id)
+            if item_id not in seen:
+                seen.add(item_id)
+                found.append(item_id)
         return found
 
 
@@ -793,6 +812,25 @@ class CubeSandboxClient:
         getter = getattr(sandbox, "get_metrics", None)
         return None if getter is None else getter()
 
+    def create_snapshot(self, sandbox: Any, ownership: Ownership, *,
+                        name: str | None = None) -> str:
+        method = getattr(sandbox, "create_snapshot", None)
+        if method is None:
+            raise RuntimeError("installed CubeSandbox SDK lacks create_snapshot")
+        result = method(name=name) if name is not None else method()
+        snapshot_id = str(getattr(result, "snapshot_id", "") or "")
+        if not snapshot_id:
+            raise RuntimeError("CubeSandbox create_snapshot returned no snapshot ID")
+        if self.journal is not None:
+            self.journal.record_snapshot(snapshot_id, ownership)
+        return snapshot_id
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        method = getattr(self._sandbox_class, "delete_snapshot", None)
+        if method is None:
+            raise RuntimeError("installed CubeSandbox SDK lacks delete_snapshot")
+        method(snapshot_id, **self._sdk_kwargs())
+
     def list_owned_sandboxes(self, owner_id: str) -> list[dict[str, Any]]:
         return [item for item in self._sandbox_class.list_v2(**self._sdk_kwargs())
                 if (item.get("metadata") or {}).get("clawbox.task-uid") == owner_id]
@@ -839,7 +877,22 @@ class CubeSandboxClient:
                             f"{sandbox_id}: {type(exc).__name__}: {exc}"
                         )
         remaining = self.list_owned_sandboxes(owner_id)
-        if errors or remaining:
+        snapshot_errors: list[str] = []
+        for snapshot_id in (
+            self.journal.snapshot_ids(task_uid=owner_id) if self.journal else []
+        ):
+            try:
+                self.delete_snapshot(snapshot_id)
+            except Exception as exc:
+                # Snapshot deletion is idempotent from the cleanup caller's
+                # perspective only when the SDK reports it missing.  Preserve
+                # every other failure so a leaked branch parent cannot be
+                # mistaken for successful cleanup.
+                if "not found" not in str(exc).lower() and "404" not in str(exc):
+                    snapshot_errors.append(
+                        f"{snapshot_id}: {type(exc).__name__}: {exc}"
+                    )
+        if errors or remaining or snapshot_errors:
             details = []
             if errors:
                 details.append("kill errors=" + repr(sorted(errors)))
@@ -847,6 +900,8 @@ class CubeSandboxClient:
                 details.append(
                     "remaining=" + repr([self._info_id(item) for item in remaining])
                 )
+            if snapshot_errors:
+                details.append("snapshot delete errors=" + repr(sorted(snapshot_errors)))
             raise RuntimeError(
                 f"CubeSandbox cleanup incomplete for task {owner_id}: "
                 + "; ".join(details)

@@ -2186,7 +2186,11 @@ class ExperimentWorker:
             if not arms:
                 raise ValueError("at least one experiment arm must be selected")
         self._fd_limit = ensure_worker_fd_limit(max(arm.concurrency for arm in arms))
-        requires_control = any(arm.agent.driver is AgentDriver.OPENCLAW for arm in arms)
+        requires_control = any(
+            arm.agent.driver is AgentDriver.OPENCLAW
+            and arm.execution.snapshot_branching is None
+            for arm in arms
+        )
         if requires_control and not control_host:
             raise RuntimeError("native SSH policy control requires CLAWBOX_CONTROL_HOST")
         if requires_control and not gateway_host:
@@ -2198,12 +2202,12 @@ class ExperimentWorker:
             PolicyControlServer(advertise_host=control_host, advertised_port=policy_port,
                                 bind_port=policy_port,
                                 admission_workers=max(64, max(arm.concurrency for arm in arms)))
-            if control_host else nullcontext(None)
+            if requires_control else nullcontext(None)
         )
         gateway_context = (
             ManagedModelGateway(advertise_host=gateway_host, advertised_port=gateway_port,
                                 bind_port=gateway_port)
-            if gateway_host else nullcontext(None)
+            if requires_control else nullcontext(None)
         )
         with policy_context as policy_control, gateway_context as model_gateway:
             self.policy_control = policy_control
@@ -2246,6 +2250,19 @@ class ExperimentWorker:
         started_at = utcnow()
         started = time.monotonic()
         started_process_cpu = time.process_time()
+        if arm.execution.snapshot_branching is not None:
+            from .snapshot_scheduling import SnapshotSchedulingRunner
+
+            if arm.sandbox.image_digest:
+                self.client.validate_template_image(
+                    arm.sandbox.template, arm.sandbox.image_digest,
+                )
+            return SnapshotSchedulingRunner(
+                arm=arm, client=self.client,
+                run_id=self.run_id, attempt_id=self.attempt_id,
+                task_uid=self.task_uid, experiment_id=self.spec.experiment_id,
+                output_root=self.output_root,
+            ).run(result_path=result_path, marker_path=marker_path)
         session_cases = arm.session_cases or (arm.case,)
         tool_sandboxes = {
             resolve_case_sandbox(case, arm.sandbox).template:

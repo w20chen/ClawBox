@@ -219,6 +219,31 @@ def parser() -> argparse.ArgumentParser:
         if action == "apply":
             host_command.add_argument("--profile", type=Path,
                                       default=Path.home() / ".config/clawbox/host.json")
+    snapshot_storage = sub.add_parser(
+        "snapshot-storage",
+        help="prepare isolated XFS/NFS/tmpfs storage for snapshot scheduling",
+    )
+    snapshot_storage_actions = snapshot_storage.add_subparsers(
+        dest="snapshot_storage_action", required=True,
+    )
+    snapshot_storage_init = snapshot_storage_actions.add_parser(
+        "init", help="write an editable storage plan; never overwrite",
+    )
+    snapshot_storage_init.add_argument("config", type=Path)
+    for action, help_text in (
+        ("check", "verify prerequisites and show the proposed plan"),
+        ("apply", "apply or recover an exactly matching reviewed plan"),
+    ):
+        command = snapshot_storage_actions.add_parser(action, help=help_text)
+        command.add_argument("config", type=Path)
+    snapshot_storage_cleanup = snapshot_storage_actions.add_parser(
+        "cleanup", help="preview cleanup; preserve loop image files",
+    )
+    snapshot_storage_cleanup.add_argument("config", type=Path)
+    snapshot_storage_cleanup.add_argument(
+        "--apply", action="store_true",
+        help="unmount owned storage and detach loops; image files remain",
+    )
     setup = sub.add_parser("setup", help="configure and verify this CubeSandbox host")
     setup.add_argument("--profile", type=Path,
                        default=Path.home() / ".config" / "clawbox" / "host.json")
@@ -412,7 +437,11 @@ def parser() -> argparse.ArgumentParser:
         help="absolute repository directory inside the Tool VM image",
     )
     configure.add_argument("--target-node")
-    configure.add_argument("--placement-policy", choices=("os_default", "round_robin", "load_aware", "explicit"))
+    configure.add_argument(
+        "--placement-policy",
+        choices=("os_default", "round_robin", "load_aware", "explicit",
+                 "affinity", "snapshot_aware"),
+    )
     configure.add_argument("--memory-scheduling", choices=("static", "local_only", "snapshot_only", "joint"))
     configure.add_argument("--session-compute-nodes", help="comma-separated compute node IDs for explicit placement")
     configure.add_argument("--pool-memory-gib", type=float)
@@ -652,6 +681,29 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if report["ready_for_apply"] else 2
             else:
                 emit({"ready": True, "profile": host.apply(host.load_config(args.config), args.profile)})
+            return 0
+        if args.command == "snapshot-storage":
+            from clawbox.experiments import snapshot_host
+
+            if args.snapshot_storage_action == "init":
+                snapshot_host.init(args.config)
+                emit({
+                    "config": str(args.config),
+                    "next": (
+                        "Review the plan, then run: scripts/clawbox --sudo "
+                        f"experiment snapshot-storage check {args.config}"
+                    ),
+                })
+                return 0
+            storage_spec = snapshot_host.load(args.config)
+            if args.snapshot_storage_action == "check":
+                report = snapshot_host.check(storage_spec)
+                emit(report)
+                return 0 if report["ready_for_apply"] else 2
+            if args.snapshot_storage_action == "apply":
+                emit(snapshot_host.apply(storage_spec))
+                return 0
+            emit(snapshot_host.cleanup(storage_spec, execute=args.apply))
             return 0
         if args.command == "setup":
             from clawbox.lab import setup as setup_host

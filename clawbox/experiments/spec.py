@@ -6,7 +6,7 @@ import json
 import math
 import random
 import urllib.parse
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, Any
 
 import yaml
@@ -153,6 +153,88 @@ class RuntimeSandboxSpec(SandboxSpec):
         return value.model_dump() if isinstance(value, SandboxSpec) else value
 
 
+class SnapshotBranchingSpec(StrictFrozenModel):
+    """One BPO-style parent/branch scheduling arm.
+
+    ``concurrency_levels`` remains the public bound on simultaneous rollout
+    VMs.  This object describes the fixed workload shared by all comparison
+    arms; placement policy is still selected by ``mechanisms.placement``.
+    """
+
+    pressure: Literal["compute-memory", "local-disk"]
+    transfer_mode: Literal["shared-relay", "peer-direct"] = "shared-relay"
+    parent_nodes: tuple[str, ...] = (
+        *("node0" for _ in range(12)), *("node1" for _ in range(4)),
+    )
+    branches_per_parent: int = Field(default=8, ge=1)
+    arrival_batches: tuple[int, ...] = (32, 32, 32, 32)
+    arrival_batch_interval_seconds: float = Field(
+        default=1.0, ge=0, allow_inf_nan=False,
+    )
+    per_node_concurrency: int = Field(default=32, ge=1)
+    per_node_memory_mib: int = Field(default=32768, ge=128)
+    migration_threshold_seconds: float = Field(
+        default=0.25, ge=0, allow_inf_nan=False,
+    )
+    initial_restore_seconds: float = Field(
+        default=0.5, gt=0, allow_inf_nan=False,
+    )
+    initial_transfer_mib_per_second: float = Field(
+        default=256.0, gt=0, allow_inf_nan=False,
+    )
+    parent_memory_state_mib: int = Field(default=64, ge=1)
+    parent_rootfs_payload_mib: int = Field(default=16, ge=1)
+    branch_memory_work_mib: int = Field(default=128, ge=1)
+    branch_file_work_mib: int = Field(default=64, ge=1)
+    branch_disk_reservation_mib: int = Field(default=128, ge=1)
+    branch_cpu_rounds: int = Field(default=48, ge=1)
+    command_timeout_seconds: float = Field(
+        default=300.0, gt=0, allow_inf_nan=False,
+    )
+    snapshot_version: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def complete_arrival_plan(self) -> "SnapshotBranchingSpec":
+        rollouts = len(self.parent_nodes) * self.branches_per_parent
+        if sum(self.arrival_batches) != rollouts:
+            raise ValueError(
+                "snapshot branching arrival_batches must sum to "
+                f"parents x branches ({rollouts})"
+            )
+        if len(set(self.parent_nodes)) != 2:
+            raise ValueError("snapshot branching requires exactly two logical parent nodes")
+        return self
+
+
+class SnapshotSchedulingStorageSpec(StrictFrozenModel):
+    """Applied logical-node storage used by the snapshot scheduling study."""
+
+    local_roots: dict[str, str]
+    shared_mounts: dict[str, str]
+    warm_root: str
+    local_capacity_mib: int = Field(ge=512)
+    shared_capacity_mib: int = Field(ge=512)
+    warm_capacity_mib: int = Field(default=32768, ge=1)
+    host_receipt: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def two_isolated_nodes(self) -> "SnapshotSchedulingStorageSpec":
+        nodes = set(self.local_roots)
+        if len(nodes) != 2 or set(self.shared_mounts) != nodes:
+            raise ValueError(
+                "snapshot storage requires the same two node IDs in "
+                "local_roots and shared_mounts"
+            )
+        paths = [*self.local_roots.values(), *self.shared_mounts.values(), self.warm_root]
+        for value in paths:
+            path = PurePosixPath(value)
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"snapshot storage path must be absolute without '..': {value}")
+        if len({str(PurePosixPath(value)) for value in paths}) != len(paths):
+            raise ValueError("snapshot storage roots and mounts must be distinct")
+        return self
+
+
 def resolve_case_sandbox(
     case: WorkloadCase, configured: SandboxSpec,
 ) -> SandboxSpec:
@@ -183,7 +265,10 @@ class ExecutionSpec(StrictFrozenModel):
     # retain full content only for failed requests; ``all`` is an explicit
     # full-audit mode for successful conversations too.
     model_request_content_retention: Literal["failures", "all"] = "failures"
-    placement_policy: Literal["os_default", "round_robin", "load_aware", "explicit"] = "round_robin"
+    placement_policy: Literal[
+        "os_default", "round_robin", "load_aware", "explicit",
+        "affinity", "snapshot_aware",
+    ] = "round_robin"
     placement_cpu_overcommit: float = Field(default=1024.0, ge=1, allow_inf_nan=False)
     template_balance_slack: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)
     # C0 is the pre-extension behavior: full selected-NUMA CPU masks and Linux
@@ -220,6 +305,7 @@ class ExecutionSpec(StrictFrozenModel):
     worker_thread_switch_interval_seconds: float = Field(
         default=0.001, gt=0, le=0.1, allow_inf_nan=False)
     worker_cyclic_gc_enabled: bool = False
+    snapshot_branching: SnapshotBranchingSpec | None = None
     randomized_order: bool = True
     random_seed: int = 0
     # Every supported run is supervised at the process boundary.  An
@@ -345,6 +431,7 @@ class ResourcesSpec(StrictFrozenModel):
     lifecycle_reservation_scale: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
     proactive_cache_reclaim: bool = True
     compute_nodes: tuple[ComputeNode, ...] = ()
+    snapshot_scheduling_storage: SnapshotSchedulingStorageSpec | None = None
     target_node: str = Field(min_length=1)
     pool_memory_budget_mib: int = Field(ge=1)
     cubelet_storage_root: str = "/data/cubelet/storage"
@@ -613,6 +700,59 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError('comparison requires nonempty, uniquely named arms')
             for policy in self.policies:
                 effective_spec(self, policy)
+            return self
+        branching = self.execution.snapshot_branching
+        storage = self.resources.snapshot_scheduling_storage
+        if (branching is None) != (storage is None):
+            raise ValueError(
+                "snapshot_branching and snapshot_scheduling_storage must be configured together"
+            )
+        if branching is not None:
+            node_ids = {node.node_id for node in self.resources.compute_nodes}
+            if len(node_ids) != 2:
+                raise ValueError("snapshot branching requires exactly two compute_nodes")
+            if set(branching.parent_nodes) != node_ids:
+                raise ValueError("snapshot branching parent_nodes must name both compute_nodes")
+            if set(storage.local_roots) != node_ids:
+                raise ValueError("snapshot storage node IDs must match compute_nodes")
+            if self.execution.placement_policy not in {
+                "affinity", "load_aware", "snapshot_aware",
+            }:
+                raise ValueError(
+                    "snapshot branching placement must be affinity, load_aware, or snapshot_aware"
+                )
+            if max(self.execution.concurrency_levels) > (
+                len(self.resources.compute_nodes) * branching.per_node_concurrency
+            ):
+                raise ValueError(
+                    "snapshot branching concurrency exceeds the two per-node limits"
+                )
+            if storage.warm_capacity_mib != self.resources.warm_memory_capacity_mib:
+                raise ValueError(
+                    "snapshot storage WARM capacity must equal resources.warm_memory_capacity_mib"
+                )
+            if self.sandbox.memory_mib > branching.per_node_memory_mib:
+                raise ValueError("one rollout VM exceeds the per-node memory budget")
+            if not self.resources.local_memory_cgroup:
+                raise ValueError(
+                    "snapshot branching requires resources.local_memory_cgroup for NUMA verification"
+                )
+            cold_root = (self.resources.cold_snapshot_root or "").strip()
+            if not cold_root:
+                raise ValueError(
+                    "snapshot branching requires resources.cold_snapshot_root "
+                    "for direct native memory snapshots"
+                )
+            cold_path = PurePosixPath(cold_root)
+            if not cold_path.is_absolute() or ".." in cold_path.parts:
+                raise ValueError(
+                    "snapshot branching cold_snapshot_root must be an absolute "
+                    "path without '..'"
+                )
+            if any(policy.admission is not AdmissionPolicy.OFF for policy in self.policies):
+                raise ValueError("snapshot branching uses node admission; tool admission must be off")
+            if any(policy.reclamation is not ReclamationPolicy.RESIDENT for policy in self.policies):
+                raise ValueError("snapshot branching requires resident rollout VMs")
             return self
         if self.resources.resident_capacity_accounting and any(
             p.reclamation is not ReclamationPolicy.RESIDENT for p in self.policies

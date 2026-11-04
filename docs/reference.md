@@ -32,6 +32,10 @@ they rewrite result artifacts.
 | `host check FILE` | Check the plan and prerequisites without applying it. |
 | `host apply FILE [--profile PROFILE]` | Apply a reviewed plan on an idle host; default profile is `~/.config/clawbox/host.json`. |
 | `host clean [--apply]` | Preview or remove recognized crash dumps; `--root`, `--older-than-hours` (24), `--min-size-mib` (100). |
+| `snapshot-storage init FILE` | Write a new editable two-logical-node XFS/NFS/tmpfs plan; never overwrite. |
+| `snapshot-storage check FILE` | Show the reviewed storage/network plan and verify root, tools, space, and NUMA prerequisites. |
+| `snapshot-storage apply FILE` | Create or recover the plan. Exact repeats reuse saved state; configuration mismatches fail without replacing loop images. |
+| `snapshot-storage cleanup FILE [--apply]` | Preview by default; explicit apply removes only recorded mounts/network state and preserves loop images. |
 | `setup` | Direct single-compute-node setup using template/node and LOCAL/WARM options; the editable `host` workflow is preferred. |
 | `images [--role runtime\|sandbox]` | Build/register integration images using an existing profile. Repeat `--role` or omit it for both. |
 | `configure BASE OUTPUT` | Generate an editable specification; `--profile`, `--recipe`, `--set`, `--force`, and the options below. |
@@ -124,6 +128,46 @@ Linux logical CPU IDs; vCPU counts do not reserve physical cores.
 | `evidence` | Prediction artifacts, measured cost models, sharing proof |
 | `execution` | Offered concurrency, arrivals, timeouts, concurrency bounds, diagnostics |
 | `measurement` | Sampling, stabilization, final validation, worker output fallback |
+
+### Snapshot branching scenario
+
+`execution.snapshot_branching` enables the BPO-style parent/branch runner. It is
+used with `environment.resources.snapshot_scheduling_storage`; ordinary Agent
+experiments are unchanged.
+
+| Field | Default / unit | Meaning |
+| --- | --- | --- |
+| `pressure` | required | `compute-memory` or `local-disk`; labels the fixed pressure condition. |
+| `transfer_mode` | `shared-relay` | `shared-relay` performs local-XFS -> NFS -> target-XFS; `peer-direct` performs one same-host cross-XFS copy without NFS. |
+| `parent_nodes` | 12 `node0`, 4 `node1` | Source logical node for every immutable parent; exactly two distinct node IDs. |
+| `branches_per_parent` | 8 | Independent native snapshot restores per parent. |
+| `arrival_batches` | `[32,32,32,32]` | Fixed burst sizes; the sum must equal parents times branches. |
+| `arrival_batch_interval_seconds` | 1.0 s | Interval between submitted bursts; no artificial Tool or I/O delay. |
+| `per_node_concurrency` | 32 | Hard simultaneous rollout slot limit for each logical node. |
+| `per_node_memory_mib` | 32768 MiB | Equal per-node rollout admission budget. |
+| `migration_threshold_seconds` | 0.25 s | Minimum predicted ready-time benefit required before Snapshot-Aware crosses nodes. |
+| `initial_restore_seconds` | 0.5 s | Cold-start estimate until measured restore history exists. |
+| `initial_transfer_mib_per_second` | 256 MiB/s | Cold-start stage estimate until cache state makes bytes zero; actual copies are always timed. |
+| `parent_memory_state_mib`, `parent_rootfs_payload_mib` | 64, 16 MiB | Real parent in-memory state and workload-modified rootfs payload sizes. |
+| `branch_memory_work_mib`, `branch_file_work_mib` | 128, 64 MiB | Real per-rollout memory and file work. |
+| `branch_disk_reservation_mib` | 128 MiB | Per-rollout local XFS reservation used for hard capacity admission. |
+| `branch_cpu_rounds` | 48 | SHA-256 work iterations; not a sleep duration. |
+| `command_timeout_seconds` | 300 s | Per-branch guest workload deadline. |
+| `snapshot_version` | 1 | Version component of the `Snapshot ID + Version` cache key. |
+
+Storage fields are `local_roots` and `shared_mounts` maps for the same two node
+IDs, `warm_root`, `local_capacity_mib`, `shared_capacity_mib`,
+`warm_capacity_mib`, and `host_receipt`. Local roots must resolve to two distinct
+XFS sources; shared mounts must resolve to the same NFS export; WARM must be
+tmpfs. The receipt and live capacities must match before any VM is created.
+
+The scenario accepts placement policies `affinity`, `load_aware`, and
+`snapshot_aware`. Affinity queues on the parent node. Load-Aware minimizes only
+predicted queue time among hard-feasible nodes. Snapshot-Aware minimizes queue +
+stage + restore and applies `migration_threshold_seconds`. All use the same cache
+and arrival state. Any scenario/configuration edit requires a new run ID. Storage
+or network edits require host apply as described above; workload size changes do
+not require image rebuild or retraining.
 
 Resolved results also contain internal `resources` and `policies` objects. Use
 the schema-4 locations above when editing inputs.

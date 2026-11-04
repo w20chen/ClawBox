@@ -62,6 +62,10 @@ output/
 /AGENTS.md
 /LLC.md
 /docs/experiment-validation.md
+/CURRENT_PLAN.md
+/*_HANDOFF_*.md
+/FULL_SERVICE_OVERHEAD_ATTRIBUTION_*.md
+/FULL_SERVICE_OVERHEAD_OPTIMIZATION_*.md
 
 # Host-specific placement-study helpers (retained locally, not project assets)
 /clawbox/experiments/placement_replica.py

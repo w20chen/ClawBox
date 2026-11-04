@@ -65,7 +65,10 @@ Runtime = subset('Runtime', ResourcesSpec, RESOURCE_FIELDS['runtime'],
                  proactive_memory_reclaim=(bool, False),
                  memory_protection=(bool, False), cpu_release_boost=(bool, False))
 Placement = subset('Placement', ExecutionSpec, PLACEMENT_FIELDS,
-                   policy=(Literal['os_default', 'round_robin', 'explicit', 'load_aware'], 'round_robin'),
+                   policy=(Literal[
+                       'os_default', 'round_robin', 'explicit', 'load_aware',
+                       'affinity', 'snapshot_aware',
+                   ], 'round_robin'),
                    template_affinity=(bool, False))
 IdleReclaim = subset('IdleReclaim', ResourcesSpec, RESOURCE_FIELDS['idle_reclaim'],
                      policy=(Literal['off', 'wait'], 'off'),

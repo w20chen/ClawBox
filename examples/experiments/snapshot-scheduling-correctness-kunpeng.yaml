@@ -1,0 +1,85 @@
+schema_version: 4
+experiment_id: snapshot-scheduling-correctness-kunpeng
+environment:
+  runtime:
+    template_id: tpl-256bc0d68549446a8ed87709
+    source_image_reference: 127.0.0.1:5000/clawbox/lab-runtime@sha256:0f2349beca957b7d7a0f81343f8593cd31a30d3765b49bfe1bea550c5251935d
+    image_digest: sha256:0f2349beca957b7d7a0f81343f8593cd31a30d3765b49bfe1bea550c5251935d
+    vcpu: 2
+    memory_mib: 1024
+    allow_internet_access: false
+  sandbox:
+    template_id: tpl-113c17adb9114e09bdbd7218
+    source_image_reference: 127.0.0.1:5000/clawbox/lab-sandbox@sha256:b1f74e55b2557dc2c8b78794ac1f73f5aa29c09619d81ae79d3c983850ce3a33
+    image_digest: sha256:b1f74e55b2557dc2c8b78794ac1f73f5aa29c09619d81ae79d3c983850ce3a33
+    vcpu: 2
+    memory_mib: 3072
+    workspace: /workspace
+    allow_internet_access: false
+  resources: &resources
+    compute_nodes:
+      - {node_id: node0, numa_node: 0, cpus: 0-79, memory_capacity_mib: 98304, low_watermark_mib: 86016, high_watermark_mib: 92160}
+      - {node_id: node1, numa_node: 1, cpus: 80-159, memory_capacity_mib: 98304, low_watermark_mib: 86016, high_watermark_mib: 92160}
+    target_node: 193.124.7.2
+    pool_memory_budget_mib: 184320
+    local_memory_capacity_mib: 196608
+    local_memory_low_watermark_mib: 172032
+    local_memory_high_watermark_mib: 184320
+    emergency_free_memory_mib: 1024
+    warm_memory_capacity_mib: 32768
+    warm_numa_node: 2
+    local_memory_cgroup: /sys/fs/cgroup/cube_sandbox/sandbox
+    cold_snapshot_root: /mnt/clawbox-cube/preserved-results-20261101/clawbox-cold
+    snapshot_scheduling_storage:
+      local_roots: {node0: /mnt/clawbox-snapshot-node0, node1: /mnt/clawbox-snapshot-node1}
+      shared_mounts: {node0: /mnt/clawbox-snapshot-shared-node0, node1: /mnt/clawbox-snapshot-shared-node1}
+      warm_root: /mnt/clawbox-snapshot-warm
+      local_capacity_mib: 49152
+      shared_capacity_mib: 32768
+      warm_capacity_mib: 32768
+      host_receipt: /data/clawbox-snapshot-scheduling-host/receipt.json
+workload:
+  source: synthetic
+  input: examples/workloads/snapshot-branching.json
+  repetitions: 1
+  session_assignment: single_case
+  cases:
+    - case_id: snapshot-branching
+      source: synthetic
+      source_reference: examples/workloads/snapshot-branching.json
+      prompt: Run the fixed CPU, memory and filesystem branching workload.
+inference: {backend: replay, configuration: {model: snapshot-branching}}
+mechanisms:
+  placement: {policy: affinity, placement_cpu_overcommit: 1.0}
+comparison:
+  recipe: custom
+  arms:
+    - {name: affinity}
+    - {name: load-aware, override: {placement.policy: load_aware}}
+    - {name: snapshot-aware, override: {placement.policy: snapshot_aware}}
+execution:
+  concurrency_levels: [4]
+  randomized_order: false
+  random_seed: 20261103
+  arm_timeout_seconds: 3600
+  arm_finalization_timeout_seconds: 300
+  snapshot_branching:
+    pressure: compute-memory
+    parent_nodes: [node0, node1]
+    branches_per_parent: 2
+    arrival_batches: [2, 2]
+    arrival_batch_interval_seconds: 0.5
+    per_node_concurrency: 2
+    per_node_memory_mib: 6144
+    migration_threshold_seconds: 0.1
+    parent_memory_state_mib: 16
+    parent_rootfs_payload_mib: 4
+    branch_memory_work_mib: 32
+    branch_file_work_mib: 8
+    branch_disk_reservation_mib: 32
+    branch_cpu_rounds: 8
+measurement:
+  memory_sample_interval_seconds: 0.2
+  observe_predictions: false
+  validation: {command: null}
+  output: {directory: /data/clawbox-results}

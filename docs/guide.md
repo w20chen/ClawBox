@@ -429,6 +429,101 @@ After an ambiguous VM-creation error, run `abort` before starting a replacement
 run. Preserve the failed run directory. See [results and measurements](results.md)
 for output files and timing interpretation.
 
+## Snapshot-aware branching across logical nodes
+
+This scenario uses two NUMA/cpuset compute groups, two independent loopback XFS
+filesystems, a 32 GiB NUMA-bound tmpfs WARM cache, and one XFS-backed NFS export
+reached through per-node network namespaces. The checked-in Kunpeng plan applies
+5 ms delay and 1000 Mbit/s in each direction. Review every path and address before
+applying it:
+
+```bash
+mkdir -p "$HOME/clawbox-specs"
+cp --no-clobber examples/snapshot-storage-kunpeng.yaml \
+  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml"
+bash scripts/clawbox --sudo experiment snapshot-storage check \
+  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml"
+bash scripts/clawbox --sudo experiment snapshot-storage apply \
+  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml"
+```
+
+`check` prints the proposed mounts, capacities, NUMA node, and prerequisites.
+`apply` is repeatable after reboot and reuses an exactly matching saved plan.
+The defaults/checked-in plan use MiB for capacities, milliseconds for each
+direction of delay, and Mbit/s for each direction of bandwidth. Changing a
+mount, capacity, WARM NUMA node, namespace, or address requires cleanup and host
+apply. Preserved loop images are never overwritten; after a capacity change,
+select a new `image_root`. Delay and bandwidth changes can be reapplied in place.
+
+The experiment files contain the currently selected template IDs and immutable
+image digests. Replace them from the applied host profile if the host uses
+different images. That identity change requires qualification and a new run ID,
+but no image rebuild unless the required template image itself is unavailable.
+No training is used by this replay workload.
+
+Run the small real-VM correctness matrix first, then the two formal matrices.
+Each formal file fixes 16 parents, eight branches per parent, maximum concurrency
+64, the 12:4 parent distribution, identical burst batches for all policies, and
+two repetitions per policy:
+
+```bash
+bash scripts/clawbox experiment validate \
+  examples/experiments/snapshot-scheduling-correctness-kunpeng.yaml --inputs
+bash scripts/clawbox --sudo experiment launch \
+  examples/experiments/snapshot-scheduling-correctness-kunpeng.yaml \
+  --run-id snapshot-correctness-YYYYMMDD-01 --detach
+bash scripts/clawbox experiment status snapshot-correctness-YYYYMMDD-01
+bash scripts/clawbox --sudo experiment report snapshot-correctness-YYYYMMDD-01
+
+bash scripts/clawbox experiment validate \
+  examples/experiments/snapshot-scheduling-compute-kunpeng.yaml --inputs
+bash scripts/clawbox --sudo experiment launch \
+  examples/experiments/snapshot-scheduling-compute-kunpeng.yaml \
+  --run-id snapshot-compute-YYYYMMDD-01 --detach
+
+bash scripts/clawbox experiment validate \
+  examples/experiments/snapshot-scheduling-disk-kunpeng.yaml --inputs
+bash scripts/clawbox --sudo experiment launch \
+  examples/experiments/snapshot-scheduling-disk-kunpeng.yaml \
+  --run-id snapshot-disk-YYYYMMDD-01 --detach
+```
+
+Use `status` and `report` with the same output root. Never reuse a run ID after
+editing a specification. The report writes the unified comparison to `report.md`
+and plot-ready rows to `snapshot-scheduling-summary.csv`; each arm also retains
+parent manifests, resource events, and one JSONL row per rollout.
+
+Cube's public SDK cannot restore from caller-supplied copied rootfs/memfile
+paths. Therefore a cross-node result is deliberately labelled **Simulated
+Cross-Node Restore**: ClawBox performs and hashes the real local-XFS -> shaped
+NFS -> target-XFS copy, then Cube performs a real native snapshot-to-new-sandbox
+restore bound to the selected NUMA/cpuset. The staged copy is not the input to
+Cube's restore, and this workflow is not evidence of native physical-node
+migration.
+
+Set `execution.snapshot_branching.transfer_mode: peer-direct` for the matched
+one-copy control. It copies the same rootfs payload directly from the source
+logical-node XFS to the target logical-node XFS, with the same fsync, digest,
+cache and capacity checks. This is a same-host cross-XFS proxy: it does not use
+NFS, does not emulate a node-to-node network, and the copied path is still not
+consumed by Cube restore.
+
+The two logical nodes use one physical Cube node and its shared immutable
+template store. Base-template placement is held constant
+(`placement.template_affinity: false`); the comparison schedules parent snapshot
+state and branch work, not node-specific base-template replicas.
+
+Cleanup is preview-only unless `--apply` is explicit. It unmounts only the saved
+scenario mounts, removes its namespaces and export, detaches recorded loop
+devices, and preserves the loop image files:
+
+```bash
+bash scripts/clawbox experiment snapshot-storage cleanup \
+  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml"
+bash scripts/clawbox --sudo experiment snapshot-storage cleanup \
+  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml" --apply
+```
+
 ## Reproduce the shared-cache placement comparison
 
 On a host with the frozen workload's images and topology:
