@@ -6,7 +6,17 @@ Requires numpy, scipy and matplotlib for the standalone plots and statistics.
 import argparse
 import json
 from pathlib import Path
+import re
 import statistics
+
+
+NETWORK_COMMAND = re.compile(
+    r'(?<![\w/.-])(?:(?:/[\w.+-]+)+/)?'
+    r'(?:pip3?\s+(?:install|download|wheel)\b|'
+    r'apt(?:-get)?\s+(?:-[\w-]+\s+)*(?:update|install|upgrade|download)\b|'
+    r'(?:conda|mamba)\s+(?:create|install|update)\b|'
+    r'(?:curl|wget)\s+|git\s+(?:clone|fetch|pull)\b)'
+)
 
 
 def has_special_case(row):
@@ -20,6 +30,9 @@ def analyze(roots, output):
     for root in roots:
         for path in sorted(root.rglob('paired-trials.json')):
             target = json.loads((path.parent/'baseline-target.json').read_text())
+            target['network_command_candidate'] = bool(
+                target.get('network_command_candidate')
+                or NETWORK_COMMAND.search(target.get('command', '')))
             trials = json.loads(path.read_text())
             pairs = {}
             invalid = []
@@ -66,6 +79,15 @@ def analyze(roots, output):
         unique = {r['target_id']: r for r in selected}
         selected = list(unique.values())
         summary = {'measured_unique_targets': len(selected), 'comparison': comparison, 'strata': {}}
+        summary['profiling_runs'] = {}
+        for run_id in sorted({r['baseline_run_id'] for r in selected}):
+            cohort = [r for r in selected if r['baseline_run_id'] == run_id]
+            cx = [r['llc_hits_per_kinst'] for r in cohort]
+            cy = [r['sensitivity_median'] for r in cohort]
+            summary['profiling_runs'][run_id] = {
+                'targets': len(cohort), 'traces': len({r['case_id'] for r in cohort}),
+                'spearman_rho': float(spearmanr(cx, cy).statistic)
+                    if len(cohort) >= 3 and np.ptp(cx) and np.ptp(cy) else None}
         for label, subset in [('all', selected), ('clean_success', [r for r in selected
                               if not has_special_case(r)])]:
             x = np.array([r['llc_hits_per_kinst'] for r in subset], dtype=float)

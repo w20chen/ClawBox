@@ -418,6 +418,8 @@ between replays. The observed replay prefix is retained for comparison.
 For analysis, preserve `network_command_candidate` when available: the
 `clean_success` subset requires a zero exit, no special-case flags and no network
 candidate label. Candidate commands remain in the full results.
+The analyzer also screens the saved command for common package installation and
+download commands; a path containing `conda` alone is not a network command.
 
 The primary makespan is the Runtime controller monotonic interval from common SSH launch
 release to the last of four SSH process completions. It includes command dispatch
