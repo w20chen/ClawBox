@@ -45,7 +45,7 @@ DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
                   'resident_capacity_accounting', 'lifecycle_reservation_scale')
 PLACEMENT_FIELDS = (
     'placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes', 'session_cpu_slots',
-    'tool_call_cpu_policy', 'tool_call_cpu_pressure_ratio',
+    'tool_call_cpu_policy', 'cpu_qos_policy', 'cpu_qos_group_idle', 'tool_call_cpu_pressure_ratio',
     'tool_call_cpu_pressure_samples', 'tool_call_cpu_group_max_active',
     'tool_call_cpu_min_duration_seconds', 'tool_call_cpu_include_smt',
 )
@@ -182,6 +182,13 @@ def lower_arm(design, name, m):
     snapshots = idle['policy'] != 'off'
     coordination = m['coordination']
     os_deployment = m['deployment']['mode'] == 'os-default'
+    if pl['cpu_qos_group_idle'] and pl['cpu_qos_policy'] == 'off':
+        raise ValueError(f'{name}: cpu_qos_group_idle requires idle or idle_core CPU QoS')
+    if pl['cpu_qos_policy'] != 'off' and (
+            os_deployment or pl['policy'] == 'os_default' or not r['local_memory_cgroup']):
+        raise ValueError(
+            f'{name}: CPU QoS requires managed placement and the verified local_memory_cgroup path'
+        )
     if pl['tool_call_cpu_policy'] == 'c2':
         if not r['compute_nodes'] or not r['local_memory_cgroup']:
             raise ValueError(
@@ -376,7 +383,9 @@ def recipe_arms(recipe, *, checkpoint_axis=None):
                    'deployment__lifecycle_reservation_scale': 1.0, 'admission__tool': 'off',
                    'runtime__memory_protection': False, 'runtime__cpu_release_boost': False,
                    'runtime__proactive_memory_reclaim': False, 'placement__template_affinity': False,
-                   'placement__tool_call_cpu_policy': 'c0', 'idle_reclaim__policy': 'off',
+                   'placement__tool_call_cpu_policy': 'c0', 'placement__cpu_qos_policy': 'off',
+                   'placement__cpu_qos_group_idle': False,
+                   'idle_reclaim__policy': 'off',
                    'shared_memory__borrow': 'off', 'coordination__action_selection': 'reclaim_first',
                    'checkpoint__residency': 'lru'}
         return [arm('os-default', **neutral, placement__policy='os_default', deployment__mode='os-default', placement__session_compute_nodes=[]),
@@ -395,7 +404,8 @@ def fixed_recipe_arms(recipe, *, common, checkpoint_axis=None):
         'admission.tool': 'off', 'runtime.memory_protection': False,
         'runtime.cpu_release_boost': False, 'runtime.proactive_memory_reclaim': False,
         'placement.policy': 'round_robin', 'placement.template_affinity': False,
-        'placement.tool_call_cpu_policy': 'c0',
+        'placement.tool_call_cpu_policy': 'c0', 'placement.cpu_qos_policy': 'off',
+        'placement.cpu_qos_group_idle': False,
         'placement.session_compute_nodes': [], 'idle_reclaim.policy': 'off',
         'idle_reclaim.scope': 'tool', 'shared_memory.borrow': 'off',
         'checkpoint.mechanism': 'full-copy', 'checkpoint.storage': 'disk',

@@ -48,6 +48,60 @@ def test_session_cpu_slots_roundtrip_bound_workers_and_reject_overlap():
         ExperimentSpec.model_validate(raw)
 
 
+def test_cpu_group_idle_requires_enabled_qos_and_survives_export():
+    raw = base()
+    raw['mechanisms']['placement']['cpu_qos_group_idle'] = True
+    with pytest.raises(ValueError, match='requires idle or idle_core'):
+        ExperimentSpec.model_validate(raw)
+    raw['mechanisms']['placement']['cpu_qos_policy'] = 'idle_core'
+    spec = ExperimentSpec.model_validate(raw)
+    assert expand_matrix(spec)[0].execution.cpu_qos_group_idle is True
+    reloaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec)))
+    assert expand_matrix(reloaded)[0].execution.cpu_qos_group_idle is True
+
+
+def test_cpu_qos_arm_override_preserves_full_mechanisms():
+    raw = export_design(design('integrated'))
+    raw['comparison'] = dict(recipe='custom', arms=[
+        dict(name='full-off'),
+        dict(name='full-idle', override={'placement.cpu_qos_policy': 'idle'}),
+    ])
+    spec = ExperimentSpec.model_validate(raw)
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    before, after = [effective_spec(spec, policy) for policy in spec.policies]
+    assert before.resources == after.resources
+    a, b = before.execution.model_dump(), after.execution.model_dump()
+    assert a.pop('cpu_qos_policy') == 'off'
+    assert b.pop('cpu_qos_policy') == 'idle'
+    assert a == b
+    first, second = spec.policies
+    differences = {f'{group}.{key}' for group in GROUPS for key in first.mechanisms[group]
+                   if first.mechanisms[group][key] != second.mechanisms[group][key]}
+    assert differences == {'placement.cpu_qos_policy'}
+
+
+def test_idle_qos_rejects_unmanaged_placement():
+    raw = base()
+    raw['mechanisms']['placement'].update(policy='os_default', cpu_qos_policy='idle')
+    with pytest.raises(ValueError, match='CPU QoS requires managed placement'):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_explicit_session_arrivals_roundtrip_and_validate():
+    raw = base()
+    raw['execution']['session_arrival_offsets_seconds'] = [1.25, 3.5]
+    spec = ExperimentSpec.model_validate(raw)
+    assert spec.execution.session_arrival_offsets_seconds == (1.25, 3.5)
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    for offsets in ([0.0], [-1.0, 2.0], [1.0, float('nan')], [1.0, float('inf')], [2.0, 1.0]):
+        raw['execution']['session_arrival_offsets_seconds'] = offsets
+        with pytest.raises(ValueError, match='session_arrival_offsets_seconds'):
+            ExperimentSpec.model_validate(raw)
+    raw['execution'].update(concurrency_levels=[1, 2], session_arrival_offsets_seconds=[1.25, 3.5])
+    with pytest.raises(ValueError, match='exactly one concurrency level'):
+        ExperimentSpec.model_validate(raw)
+
+
 def design(recipe='custom', axis=None):
     raw = base()
     m = raw['mechanisms']

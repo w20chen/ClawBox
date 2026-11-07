@@ -49,6 +49,7 @@ class VMState:
     action_since: float | None = None
     cooldown_until: float = 0
     modified: set[str] = field(default_factory=set)
+    cpu_idle: bool = False
 
     def refresh(self):
         self.phase = (Phase.TOOL_ACTIVE if self.active else Phase.READY if self.pending
@@ -176,23 +177,27 @@ class PressureControl:
             self.emit(event)
         self.event(session, 'complete', execution)
 
-    def register(self, session, role, group, node, coordinator):
+    def register(self, session, role, group, node, coordinator, *, cpu_idle=False):
         with self._session_state(session):
             previous = self.vms.get((session, role))
             if previous is not None:
                 self._restore(previous)
             vm = VMState(session, role, Path(group), node)
+            vm.cpu_idle = cpu_idle
             if role == 'tool':
                 self._psi(vm.group, 'memory')
                 self._psi(vm.group, 'cpu')
             for name in ('cpu.weight', 'memory.low', 'memory.high'):
                 vm.saved[name] = (vm.group / name).read_text().strip()
-            if vm.saved != {'cpu.weight': '100', 'memory.low': '0', 'memory.high': 'max'}:
+            if cpu_idle and (vm.group/'cpu.idle').read_text().strip() != '1':
+                raise RuntimeError(f'Expected idle CPU group at {vm.group}')
+            if vm.saved != {'cpu.weight': '0' if cpu_idle else '100', 'memory.low': '0', 'memory.high': 'max'}:
                 raise RuntimeError(f'adaptive VM leaf has nondefault controls: {vm.group}')
             if previous is not None:
                 previous.group = vm.group
                 previous.node = vm.node
                 previous.saved = vm.saved
+                previous.cpu_idle = vm.cpu_idle
                 previous.previous.clear()
                 vm = previous
             with timed_lock(self.lock, 'pressure.state'):
@@ -373,8 +378,9 @@ class PressureControl:
                 if self.memory_protection and sample['reclaim']:
                     low = min(sample['working_set'], protection_left)
                     protection_left -= low
-                weight = 100
+                weight = int(vm.saved['cpu.weight'])
                 if (blocked and boosts_left and sample['cpu_contended']
+                        and not vm.cpu_idle
                         and vm.node is not None
                         and self.cpu_release_boost
                         and (vm.group / 'cpuset.mems.effective').read_text().strip() == str(vm.node)):
@@ -398,7 +404,7 @@ class PressureControl:
                         actions.append({'event': 'pressure_control_action', 'session_id': vm.session,
                                         'generation': vm.generation, 'control': name, 'value': value,
                                         'phase': vm.phase.value, 'feedback': signal, 'sample': sample})
-                if low or weight != 100:
+                if low or weight != int(vm.saved['cpu.weight']):
                     vm.action_since = vm.action_since or began
                 else:
                     if vm.action_since is not None:

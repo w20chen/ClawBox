@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 import clawbox.experiments.qualification as qualification_module
 from clawbox.experiments.baselines import BASELINES
@@ -584,6 +585,48 @@ def test_default_gate_uses_create_limit_without_repeating_cases():
 def test_zero_qualification_concurrency_is_rejected():
     with pytest.raises(ValueError, match="qualification concurrency must be positive"):
         qualification_spec(load_experiment(EXAMPLE), concurrency=0)
+
+
+def test_design_probes_do_not_reuse_off_result_for_native_core(tmp_path):
+    from clawbox.experiments.spec import ExperimentSpec
+    raw = yaml.safe_load(Path('examples/experiments/six-dimension.yaml').read_text())
+    raw['environment']['resources']['local_memory_cgroup'] = '/sys/fs/cgroup/cube_sandbox/sandbox'
+    raw['workload']['cases'][0]['qos_class'] = 'be'
+    raw['comparison']['arms'] = [
+        {'name': 'full-off'},
+        {'name': 'full-core', 'override': {'placement.cpu_qos_policy': 'idle_core'}},
+    ]
+    spec = ExperimentSpec.model_validate(raw)
+    observed = []
+
+    def probe(child, *, artifact_root):
+        observed.append(child.execution.cpu_qos_policy)
+        return {'passed': True, 'cpu_qos_policy': child.execution.cpu_qos_policy}
+
+    result = qualification_module.design_probes(spec, probe, artifact_root=tmp_path)
+    assert observed == ['off', 'idle_core']
+    assert result['by_policy']['full-off'] != result['by_policy']['full-core']
+
+
+def test_schema4_qualification_clears_frozen_arrivals_but_keeps_qos():
+    from clawbox.experiments.configure import dump_experiment
+    from clawbox.experiments.spec import ExperimentSpec
+    raw = yaml.safe_load(Path('examples/experiments/six-dimension.yaml').read_text())
+    raw['environment']['resources']['local_memory_cgroup'] = '/sys/fs/cgroup/cube_sandbox/sandbox'
+    raw['workload']['cases'][0]['qos_class'] = 'be'
+    raw['mechanisms']['placement']['cpu_qos_policy'] = 'idle_core'
+    raw['execution']['session_arrival_offsets_seconds'] = [3.25]
+    spec = ExperimentSpec.model_validate(raw)
+    raw['execution']['session_arrival_offsets_seconds'] = [10.5]
+    changed = ExperimentSpec.model_validate(raw)
+    assert qualification_contract_digest(spec) == qualification_contract_digest(changed)
+    assert spec_digest(spec) != spec_digest(changed)
+    qualified = qualification_spec(spec, concurrency=1)
+    restored = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(qualified)))
+    assert restored.execution.session_arrival_offsets_seconds is None
+    assert restored.execution.arrival_schedule.value == 'burst'
+    assert restored.workload.cases[0].qos_class == 'be'
+    assert expand_matrix(restored)[0].execution.cpu_qos_policy == 'idle_core'
 
 
 @pytest.mark.parametrize('pair', [False, True])

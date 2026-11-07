@@ -217,6 +217,33 @@ def test_cpu_requires_measured_release_cpu_pressure_and_local_blocking(tmp_path,
     c.close()
 
 
+def test_explicit_idle_group_keeps_memory_control_without_cpu_boost(tmp_path, monkeypatch):
+    c, d = control(tmp_path)
+    leaf = tmp_path/'tool'
+    (leaf/'cpu.idle').write_text('1')
+    (leaf/'cpu.weight').write_text('0')
+    with pytest.raises(RuntimeError, match='nondefault controls'):
+        c.register('s', 'tool', leaf, 0, d)
+    c.register('s', 'tool', leaf, 0, d, cpu_idle=True)
+    c.generation('s', 'tool', 'idle-vm')
+    c.vms['s', 'tool'].cooldown_until = 0
+    monkeypatch.setattr('clawbox.experiments.pressure.time.monotonic', lambda: 100.)
+    train_release(c)
+    c.execution_ready('s', 'new', ('template', 'command'))
+    c.execution_admitted('s', 'new', 0)
+    c.event('s', 'start', 'new')
+    advance(c, tmp_path, monkeypatch, 0)
+    advance(c, tmp_path, monkeypatch, 1)
+    assert int((leaf/'memory.low').read_text()) == 128*MIB
+    assert (leaf/'cpu.weight').read_text() == '0'
+    assert c.stats['cpu_boosts'] == 0
+    c.event('s', 'complete', 'new')
+    c.close()
+    assert (leaf/'memory.low').read_text() == '0'
+    assert (leaf/'cpu.idle').read_text() == '1'
+    assert (leaf/'cpu.weight').read_text() == '0'
+
+
 def test_missing_release_evidence_does_not_boost(tmp_path, monkeypatch):
     c, _ = control(tmp_path, 'release_cpu')
     c.event('s', 'ready', 'e')

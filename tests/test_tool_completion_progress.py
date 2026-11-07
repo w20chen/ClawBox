@@ -253,6 +253,7 @@ def test_completion_releases_memory_before_waiting_for_lifecycle_lock(runtime_en
         math=__import__('math'), wait_lock=wait_lock, reservation_lock=Lock(),
         active_reservations={'exec': (512, 512)}, admitted_routes={'exec': route},
             active_cpu_placements=set(), priority_domain=None,
+            boundary_study=None,
         pending_admissions={'next'} if another_pending else set(),
         progress_control=None,
         dependency_install_gate=None,

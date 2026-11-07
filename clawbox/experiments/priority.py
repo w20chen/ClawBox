@@ -17,6 +17,7 @@ from contextlib import ExitStack, contextmanager
 from threading import RLock
 from .admission_lock import AdmissionLock, ProgressLock
 from .control_timing import timed_lock, operation
+from .cpu_qos import CoreSchedulingGroups, CpuQosUsageSampler, apply_vcpu_qos, apply_group_idle, restore_group_idle
 import uuid
 
 REGISTRY = Path('/run/clawbox/cgroups')
@@ -168,11 +169,39 @@ class PriorityDomain:
                  topology_group_max_active: int = 2,
                  topology_min_duration_seconds: float = 1.0,
                  topology_include_smt: bool = False,
+                 qos_classes: dict[int, str] | None = None,
+                 cpu_qos_policy: str = 'off',
+                 cpu_qos_group_idle: bool = False,
+                 cpu_qos_capacity_cpus: str | None = None,
                  emit=None, proc_stat: Path = Path('/proc/stat'),
                  cgroup_mount: Path = Path('/sys/fs/cgroup')):
         self.parent = parent.resolve()
         self.cgroup_mount = cgroup_mount.resolve()
         self.legacy = legacy
+        if cpu_qos_policy not in {'off', 'idle', 'idle_core'}:
+            raise ValueError(f'unsupported CPU QoS policy: {cpu_qos_policy}')
+        requested_classes = qos_classes or {}
+        if any(index not in range(concurrency) or value not in {'neutral', 'ls', 'be'}
+               for index, value in requested_classes.items()):
+            raise ValueError('CPU QoS classes require valid session indexes and neutral, ls or be')
+        if legacy and (cpu_qos_policy != 'off' or requested_classes):
+            raise ValueError('CPU QoS requires the native CubeSandbox placement path')
+        self.cpu_qos_policy = cpu_qos_policy
+        self.cpu_qos_group_idle = cpu_qos_group_idle
+        self._cpu_group_originals = {}
+        if cpu_qos_group_idle and (legacy or cpu_qos_policy == 'off'):
+            raise ValueError('VM group idle requires native idle or idle_core CPU QoS')
+        self.qos_classes = {index: requested_classes.get(index, 'neutral')
+                            for index in range(concurrency)}
+        if (cpu_qos_policy == 'idle_core' or cpu_qos_group_idle) and any(
+                value == 'neutral' for value in self.qos_classes.values()):
+            raise ValueError('idle_core requires explicit ls or be classes for every session')
+        self.core_groups = None
+        self.cpu_qos_usage_sampler = (
+            CpuQosUsageSampler(cpu_qos_capacity_cpus)
+            if cpu_qos_capacity_cpus is not None
+            and any(value != 'neutral' for value in self.qos_classes.values()) else None
+        )
         self.registry = registry
         self.placements = placements or {}
         self.observations = []
@@ -757,7 +786,8 @@ class PriorityDomain:
             os.chmod(self.journal, 0o600)
             json.dump({'parent':str(self.parent),'prefix':self.prefix,
                        'priorities':self.priorities,'tokens':list(self.tokens.values()),
-                       'native': not self.legacy},stream)
+                       'native': not self.legacy,
+                       'cpu_group_originals': self._cpu_group_originals},stream)
             stream.flush()
             os.fsync(stream.fileno())
 
@@ -799,6 +829,9 @@ class PriorityDomain:
             self._journal()
             if not self.legacy:
                 self.cpu_weights = {'default': 100}
+                if self.cpu_qos_policy == 'idle_core':
+                    self.core_groups = CoreSchedulingGroups()
+                    self.core_groups.start()
                 return
             events = dict(
                 line.split()
@@ -834,7 +867,10 @@ class PriorityDomain:
         with self._topology_lock:
             if self.legacy or index in self.priorities:
                 raise ValueError('replica slots require a new index in the native domain')
+            if self.cpu_qos_policy == 'idle_core':
+                raise ValueError('idle_core does not support unlabelled placement replica slots')
             self.priorities[index] = 'neutral'
+            self.qos_classes[index] = 'neutral'
             for role in ('runtime', 'tool'):
                 self.tokens[index, role] = uuid.uuid4().hex
             self.configure_topology_placement(index, str(cpu), numa_node)
@@ -1028,6 +1064,23 @@ class PriorityDomain:
         self._vcpu_threads[key] = tuple(
             (thread['tid'], thread['name']) for thread in vcpus
         )
+        cpu_qos = apply_vcpu_qos(
+            vcpus, policy=self.cpu_qos_policy, qos_class=self.qos_classes[index],
+            core_groups=self.core_groups,
+        )
+        if self.cpu_qos_group_idle:
+            with self._topology_lock:
+                if str(actual) not in self._cpu_group_originals:
+                    self._cpu_group_originals[str(actual)] = {
+                        'idle': int((actual/'cpu.idle').read_text()),
+                        'weight': int((actual/'cpu.weight').read_text()),
+                    }
+                    self._journal(update=True)
+            cpu_qos['cgroup'] = apply_group_idle(actual, qos_class=self.qos_classes[index])
+        if self.cpu_qos_usage_sampler is not None:
+            self.cpu_qos_usage_sampler.register(
+                key, self.qos_classes[index], [thread['tid'] for thread in vcpus],
+            )
         resident, unattributed = read_numa_lru_bytes(actual)
         anon_resident = read_numa_anon_bytes(actual)
         attributed_anon = sum(anon_resident.values())
@@ -1065,6 +1118,7 @@ class PriorityDomain:
             'effective_cpus': cpus,
             'memory_nodes': sorted(parse_cpu_list(mems)),
             'requested_cpus': required_cpus,
+            'cpu_qos': cpu_qos,
             'actual_residency_bytes': resident,
             'actual_anon_residency_bytes': anon_resident,
             'unattributed_bytes': unattributed,
@@ -1095,10 +1149,15 @@ class PriorityDomain:
         return evidence
 
     def close(self):
+        if self.core_groups is not None:
+            self.core_groups.close()
+            self.core_groups = None
         # Revoke capabilities first; never recursively delete an arbitrary path.
         for token in self.tokens.values():
             (self.registry / token).unlink(missing_ok=True)
         if not self.legacy:
+            restore_group_idle(self.parent, self._cpu_group_originals)
+            self._cpu_group_originals.clear()
             if self.lock_file is not None:
                 self.lock_file.close()
                 self.lock_file = None
@@ -1194,6 +1253,7 @@ def cleanup_priority_domains(directory: Path):
                     raise ValueError('invalid priority cleanup token')
                 (REGISTRY/token).unlink(missing_ok=True)
             if record.get('native'):
+                restore_group_idle(parent, record.get('cpu_group_originals', {}))
                 journal.unlink()
                 continue
             paths=[]

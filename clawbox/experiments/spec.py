@@ -96,6 +96,7 @@ class IdleReclaimCostSpec(StrictFrozenModel):
 
 class WorkloadCase(StrictFrozenModel):
     case_id: str = Field(min_length=1)
+    qos_class: Literal["neutral", "ls", "be"] = "neutral"
     prompt: str = ""
     source: WorkloadSource
     source_reference: str = Field(min_length=1)
@@ -305,6 +306,8 @@ class ExecutionSpec(StrictFrozenModel):
     # C0 is the pre-extension behavior: full selected-NUMA CPU masks and Linux
     # scheduling. C2 changes Tool vCPU affinity only for active agent-tool execs.
     tool_call_cpu_policy: Literal["c0", "c2"] = "c0"
+    cpu_qos_policy: Literal["off", "idle", "idle_core"] = "off"
+    cpu_qos_group_idle: bool = False
     tool_call_cpu_pressure_ratio: float = Field(default=0.10, gt=0, le=1, allow_inf_nan=False)
     tool_call_cpu_pressure_samples: int = Field(default=2, ge=1)
     tool_call_cpu_group_max_active: int = Field(default=2, ge=1)
@@ -359,6 +362,9 @@ class ExecutionSpec(StrictFrozenModel):
     memory_sample_interval_seconds: float = Field(default=0.2, gt=0)
     stabilization_seconds: float = Field(default=1.0, ge=0)
     arrival_schedule: ArrivalSchedule = ArrivalSchedule.POISSON
+    # Explicit arm-relative offered arrivals retain a fixed LS cohort's timing
+    # when comparing mixed sessions with its no-BE baseline.
+    session_arrival_offsets_seconds: tuple[float, ...] | None = None
     stagger_interval_seconds: float = Field(default=0.0, ge=0)
     # Expected last-arrival time is this multiple of the median selected
     # trace's recorded wall span. 2.0 keeps VM demand below the measured
@@ -427,6 +433,17 @@ class ExecutionSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def valid_arrival_schedule(self) -> "ExecutionSpec":
+        offsets = self.session_arrival_offsets_seconds
+        if offsets is not None:
+            if len(self.concurrency_levels) != 1 or len(offsets) != self.concurrency_levels[0]:
+                raise ValueError(
+                    'session_arrival_offsets_seconds requires exactly one concurrency level '
+                    'and one offset per offered session'
+                )
+            if any(not math.isfinite(value) or value < 0 for value in offsets):
+                raise ValueError('session_arrival_offsets_seconds must be finite and nonnegative')
+            if any(right < left for left, right in zip(offsets, offsets[1:])):
+                raise ValueError('session_arrival_offsets_seconds must be nondecreasing')
         if (
             self.arrival_schedule is ArrivalSchedule.FIXED_STAGGER
             and self.stagger_interval_seconds <= 0
@@ -1129,6 +1146,7 @@ def load_workload_cases(workload: WorkloadSpec) -> tuple[WorkloadCase, ...]:
             replay_reference = str((path.parent / str(replay_reference)).resolve())
         cases.append(WorkloadCase(
             case_id=case_id,
+            qos_class=record.get("qos_class", "neutral"),
             prompt=str(record.get("problem_statement") or record.get("problem") or record.get("prompt") or ""),
             source=workload.source,
             source_reference=str(record.get("source_reference") or path),
@@ -1144,7 +1162,7 @@ def load_workload_cases(workload: WorkloadSpec) -> tuple[WorkloadCase, ...]:
                 "instance_id", "task_id", "case_id", "id", "problem_statement", "problem",
                 "prompt", "repo", "repository", "base_commit", "validation_command", "validation",
                 "source_reference", "replay_trace_reference", "sandbox",
-                "snapshot_reuse_probability", "metadata"}
+                "snapshot_reuse_probability", "metadata", "qos_class"}
             } | (record.get("metadata") or {}),
         ))
     if not cases:

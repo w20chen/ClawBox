@@ -327,6 +327,91 @@ Fields are under `mechanisms.placement`:
 Calls begin on the full mask and return to it on pressure, completion, or failure.
 Filesystem, maintenance, and short calls retain full-pool placement.
 
+### LS/BE CPU QoS
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `mechanisms.placement.cpu_qos_policy` | `"off"` | `off` keeps ordinary scheduling; `idle` applies `SCHED_IDLE` to BE host vCPU threads; `idle_core` also applies distinct Linux core-scheduling cookies to LS and BE. Arm override: `placement.cpu_qos_policy`. Quote `"off"` in YAML. |
+| `mechanisms.placement.cpu_qos_group_idle` | `false` | With `idle` or `idle_core`, also set each BE VM's cgroup `cpu.idle=1` and verify LS groups use `cpu.idle=0`. This lowers the whole VM group, including its helper threads, relative to sibling LS groups. Requires explicit LS/BE labels, writable cgroup v2 `cpu.idle`, and host privileges. Arm override: `placement.cpu_qos_group_idle`. Use a new run ID and qualification; no image rebuild or retraining. Original group settings are restored during cleanup. Runtime memory protection remains enabled; CPU release boosts do not override idle BE groups. |
+| `workload.cases[].qos_class` | `neutral` | `ls`, `be`, or `neutral`; also accepted on each manifest task/case. `idle_core` requires every offered session to be explicitly `ls` or `be`. |
+
+Policies cover host vCPU threads of both Runtime and Tool VMs; auxiliary VMM
+threads retain their normal policy. LS/neutral vCPUs use `SCHED_OTHER`.
+`idle_core` uses one shared cookie per class and verifies cookie/policy readback
+after creation and restore. It requires managed placement, a verified experiment
+cgroup, host scheduler privileges (`--sudo`), and native `PR_SCHED_CORE` support
+from a kernel built with `CONFIG_SCHED_CORE=y`. Include SMT siblings in the CPU
+pool when measuring SMT interference. Missing capability or failed application
+is an error; there is no static-partition fallback.
+
+Changing QoS or case classification requires a new run ID and qualification,
+with no image rebuild or retraining. Apply host configuration only if CPU/NUMA
+pools change. Installing a supporting kernel requires a reboot and host recovery
+before running the experiment.
+
+Labelled sessions also emit `cpu_qos_usage` in memory samples. This measures
+verified Runtime and Tool vCPU `utime + stime`, excluding auxiliary VMM threads.
+Per-class `observed_load_fraction` is observed CPU seconds divided by elapsed
+seconds and the number of logical CPUs in the configured compute-pool union;
+multiply by 100 for percent. The event records that CPU mask and denominator.
+Use intervals with `coverage: complete` for load calibration. A thread that
+disappears before its next reading sets `lost_exit_tail` and makes cumulative
+coverage partial; missing CPU time is not replaced with zero. Partial intervals
+retain an observed lower bound when available. Registrations that cross a sample
+boundary set `unaligned_interval_threads` and leave load fractions unavailable
+until aligned readings resume. Cumulative CPU seconds cover only observed ticks.
+
+### CPU QoS analysis
+
+`python3 scripts/analyze_cpu_qos.py RUN_ROOT` analyzes existing results and
+writes JSON to stdout. It does not execute workloads.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--arm-id ID` | sole result or current running arm | Select an arm when several results exist. |
+| `--cohorts FILE` | session result `qos_class`; frozen cases while running | JSON object mapping every offered session index to `ls` or `be`, e.g. `{"0":"ls","1":"be"}`. Include failed/missing sessions. |
+| `--baseline-json FILE` | none | This script's analysis of the same unique LS case IDs/traces/commands with no BE. Session indices may differ; retained arrival offsets are compared. |
+| `--slo-multiplier FACTOR` | required with baseline | Positive permitted p95 factor; `1.20` allows 20% inflation. |
+| `--slo-metric` | `execution` | `execution` measures Tool execution; `critical_path` spans host admission callback entry through completion callback return; `queued_to_completion` uses host queue/completion events. Missing timings remain unavailable. |
+| `--window-origin` | `arrival` | Throughput origin: earliest offered arrival, earliest `agent` execution, or `arm` start. |
+| `--warmup-seconds` | 0 | Nonnegative offset from the throughput origin. |
+| `--window-seconds` | observed batch | Positive fixed window duration. Default ends at final completion, or arm end for an incomplete batch. |
+| `--observation-start-unix-s` | none | Explicit window start in Unix seconds, overriding origin/warmup; useful for the final session submission timestamp. |
+| `--observation-end-unix-s` | none | Analysis cutoff in Unix seconds. Excludes later Tool/task completions and cleanup; does not stop a run or change LLM timing. |
+| `--timeseries-bin-seconds` | 10 | Positive interval length, seconds, for LS/BE/LS+BE step rates and cumulative task counts; the final bin may be shorter. |
+| `--timeseries-csv FILE` | none | Also export the JSON report's interval rows as CSV. |
+| `--output FILE` | stdout | Analysis JSON destination. |
+
+The selected window affects throughput and the `observed_window_*` latency
+fields; the original `execution`, `critical_path`, and `queued_to_completion`
+fields cover the whole observed arm. `classes.ls`, `classes.be`, and
+`classes.all` share the throughput denominator.
+`tool_steps_per_second` counts completed agent-tool calls with successful or
+exactly matched expected outcomes. `observed_completed_tool_steps` also includes
+unverified outcomes; `validated_session_tool_steps_per_second` additionally
+requires final task validation. Task counts separately identify completed,
+failed, and incomplete sessions. Useful session throughput counts qualifying
+sessions completing in the window, including those started earlier.
+
+For bounded observations, `observed_tool_steps_per_second` counts all completed
+agent-tool calls, including nonzero exits, and `nonzero_exit_tool_steps_in_window`
+reports those exits separately. `completed_tasks_in_window` counts validated
+tasks finishing in that interval. `observed_window_execution` reports available
+Tool execution timings in the interval; compare its count with completed Tool
+steps because unfinished sessions may not yet have persisted their timings.
+Unfinished calls are censored, not assigned zero latency. A window p95 comparison
+is an observed result and does not establish a whole-trace SLO guarantee.
+
+Without an arm result, analysis reads `run-state.json`, the frozen experiment,
+events, and session progress. Its `in_progress` report is provisional and ends
+at the last observed timestamp, including when a longer window was requested.
+Unfinished tasks never count as completed, and missing exit codes do not count
+as successful steps. An incomplete run cannot satisfy the SLO verdict. JSON and
+CSV time series use the same bins for all three cohorts and mark a shorter final
+bin. These are finite-batch metrics, not a maximum sustainable throughput
+estimate. Analysis changes require no new run, host apply, image rebuild, or
+retraining.
+
 ### Snapshot and lifecycle limits
 
 Fields are under `mechanisms.checkpoint`:
@@ -460,6 +545,7 @@ Fields are under `execution`:
 | `stagger_interval_seconds` | 0 | Positive for fixed staggering; zero for burst/Poisson |
 | `poisson_arrival_window_fraction` | 2.0 | Expected window divided by median scaled trace duration |
 | `poisson_arrival_window_seconds` | `null` | Positive explicit expected window; overrides the fraction |
+| `session_arrival_offsets_seconds` | `null` | Explicit nondecreasing finite offsets, in seconds from arm start; one per offered session, with exactly one concurrency level. Overrides generated arrival times. Preserve each LS case's offset when removing BE for a no-BE reference. Changing offsets requires a new run ID; no host apply, image rebuild, or retraining. |
 | `control_timing_details` | `false` | Enable nested control spans, GC tracing, raw lifecycle dumps, duplicate payloads, and Runtime working-KB exports |
 | `model_request_content_retention` | `failures` | `failures` keeps compact successful Model Gateway records and exact request/response content only for incomplete, errored, non-200, or undelivered requests. `all` retains exact content for every request for a full-audit run. The setting changes result retention only; use a new run ID. It requires no host apply, image rebuild, or retraining. |
 

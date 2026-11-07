@@ -43,11 +43,18 @@ def _native_probe_domain(spec: ExperimentSpec, node) -> PriorityDomain | None:
     """Use the formal runner's native Cube placement path for per-node probes."""
     if node is None:
         return None
+    # The native roundtrip also verifies BE priority after a new VM restore.
+    qos_policies = {arm.execution.cpu_qos_policy for arm in expand_matrix(spec)}
+    qos_policy = ('idle_core' if 'idle_core' in qos_policies else
+                  'idle' if 'idle' in qos_policies else 'off')
     domain = PriorityDomain(
         Path(spec.resources.local_memory_cgroup),
         concurrency=1,
         repetition=0,
         legacy=False,
+        qos_classes={0: 'be' if qos_policy != 'off' else 'neutral'},
+        cpu_qos_policy=qos_policy,
+        cpu_qos_group_idle=any(arm.execution.cpu_qos_group_idle for arm in expand_matrix(spec)),
         placements={0: (node.cpus, node.numa_node)},
     )
     domain.start()
@@ -62,6 +69,17 @@ def _native_probe_options(domain: PriorityDomain | None, role: str) -> dict[str,
         "verify_cgroup": lambda sandbox_id: domain.verify(0, role, sandbox_id),
         "prepare_cgroup": lambda: domain.prepare(0, role),
     }
+
+
+def _native_qos_observations(domain: PriorityDomain | None) -> list[dict[str, Any]]:
+    if domain is None:
+        return []
+    return [{
+        "verification_index": index,
+        "sandbox_id": item["sandbox_id"], "role": item["role"],
+        "residency_basis": item.get("residency_basis"),
+        "cpu_qos": item["cpu_qos"],
+    } for index, item in enumerate(domain.observations) if "cpu_qos" in item]
 
 
 def _retryable_template_probe_error(exc: BaseException) -> bool:
@@ -216,6 +234,7 @@ def qualification_contract_digest(spec: ExperimentSpec) -> str:
         "random_seed",
         "stabilization_seconds",
         "arrival_schedule",
+        "session_arrival_offsets_seconds",
         "stagger_interval_seconds",
         "poisson_arrival_window_fraction",
         "poisson_arrival_window_seconds",
@@ -332,6 +351,9 @@ def require_empty_vm_domain(path: str | Path) -> None:
 
 
 def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> None:
+    from .cpu_qos import check_cpu_qos_support
+    for policy in {arm.execution.cpu_qos_policy for arm in expand_matrix(spec)}:
+        check_cpu_qos_support(policy)
     require_empty_vm_domain(spec.resources.local_memory_cgroup)
     from .pressure import PressureControl
     # Check all requested arms before any VM qualification probes or trial runs.
@@ -668,6 +690,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "runtime_pid": runtime_pid,
         "runtime_timings": runtime.timings if runtime is not None else [],
         "placements": lifecycle.numa_borrower.placements if lifecycle.numa_borrower else [],
+        "cpu_qos_observations": _native_qos_observations(native_domain),
         "failure": (
             f"{type(primary_error).__name__}: {primary_error}"
             if primary_error is not None else None
@@ -701,6 +724,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "runtime_pid": runtime_pid,
         "runtime_timings": runtime.timings if runtime is not None else [],
         "placements": lifecycle.numa_borrower.placements if lifecycle.numa_borrower else [],
+        "cpu_qos_observations": _native_qos_observations(native_domain),
         "artifact_root": str(artifact_root),
     }
 
@@ -895,6 +919,7 @@ def live_borrow_roundtrip_test(
         "borrow_limit_bytes": limit_mib * 1024 * 1024,
         "shared_capacity_bytes": spec.resources.warm_memory_capacity_mib * 1024 * 1024,
         "placements": borrower.placements,
+        "cpu_qos_observations": _native_qos_observations(native_domain),
         "borrow": asdict(borrow_record) if borrow_record is not None else None,
         "return": asdict(return_record) if return_record is not None else None,
         "reborrow": asdict(reborrow_record) if reborrow_record is not None else None,
@@ -956,6 +981,7 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         "randomized_order": False,
         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
         "arrival_schedule": ArrivalSchedule.BURST,
+        "session_arrival_offsets_seconds": None,
         "stagger_interval_seconds": 0.0,
     }
     if spec.execution.tool_placement is not None:
@@ -1680,6 +1706,8 @@ def design_probes(spec, probe, *, artifact_root):
                 'runtime_poll_interval_seconds')
         identity = {key: resources[key] for key in keys}
         identity['snapshot_enabled'] = policy.reclamation.value == 'snapshot_pause'
+        identity['cpu_qos_policy'] = child.execution.cpu_qos_policy
+        identity['cpu_qos_group_idle'] = child.execution.cpu_qos_group_idle
         digest = hashlib.sha256(canonical_json(identity).encode()).hexdigest()[:16]
         policies[policy.name] = digest
         if digest not in groups:

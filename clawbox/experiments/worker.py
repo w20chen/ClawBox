@@ -355,6 +355,11 @@ def session_worker_count(arm: ExperimentArm) -> int:
 def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
     """Return deterministic offered-arrival offsets shared by compared policies."""
     count = arm.concurrency
+    if arm.execution.session_arrival_offsets_seconds is not None:
+        offsets = arm.execution.session_arrival_offsets_seconds
+        if len(offsets) != count:
+            raise ValueError('session_arrival_offsets_seconds must match arm concurrency')
+        return tuple(offsets)
     schedule = arm.execution.arrival_schedule
     if schedule is ArrivalSchedule.BURST:
         return (0.0,) * count
@@ -2636,6 +2641,12 @@ class ExperimentWorker:
                         "measurement": "unavailable",
                         "reason": cpu_unavailable_reason,
                     },
+                    "cpu_qos_usage": (
+                        self._priority_domain.cpu_qos_usage_sampler.sample()
+                        if self._priority_domain is not None
+                        and self._priority_domain.cpu_qos_usage_sampler is not None
+                        else None
+                    ),
                     "observation_age_seconds": max(0., time.monotonic()-observation['observation_start_monotonic_s']),
                 })
 
@@ -2686,6 +2697,14 @@ class ExperimentWorker:
             self._priority_domain = PriorityDomain(Path(arm.resources.local_memory_cgroup),
                 concurrency=arm.concurrency, repetition=arm.repetition,
                 legacy=False,
+                qos_classes={i: session_case_for(arm, i).qos_class
+                             for i in range(arm.concurrency)},
+                cpu_qos_policy=arm.execution.cpu_qos_policy,
+                cpu_qos_group_idle=arm.execution.cpu_qos_group_idle,
+                cpu_qos_capacity_cpus=(
+                    ','.join(node.cpus for node in arm.resources.compute_nodes)
+                    if arm.resources.compute_nodes else None
+                ),
                 journal_directory=self.output_root/'priority-domains',
                 topology_mode=arm.execution.tool_call_cpu_policy,
                 topology_pressure_ratio=arm.execution.tool_call_cpu_pressure_ratio,
@@ -2802,6 +2821,7 @@ class ExperimentWorker:
             dispatched = time.monotonic()
             events.write({
                 "event": "session_dispatched", "session_id": session_id,
+                "qos_class": session_case_for(arm, index).qos_class,
                 "scheduled_offset_seconds": offset,
                 "dispatch_lateness_seconds": max(
                     0.0, dispatched - (arm_started_monotonic + offset)
@@ -2995,6 +3015,12 @@ class ExperimentWorker:
                 self.client.kill_owned_sandboxes(self.task_uid)
             except Exception as exc:
                 cleanup_error = exc
+            if (self._priority_domain is not None
+                    and self._priority_domain.cpu_qos_usage_sampler is not None):
+                events.write({
+                    "event": "cpu_qos_usage_final",
+                    "cpu_qos_usage": self._priority_domain.cpu_qos_usage_sampler.sample(),
+                })
             if self._priority_domain is not None:
                 try:
                     self._priority_domain.close()
@@ -3323,6 +3349,7 @@ class ExperimentWorker:
                         "trace_reference": item.get("trace_reference"),
                         "compute_node": item.get("compute_node"),
                         "priority": item.get("priority"),
+                        "qos_class": item.get("qos_class"),
                     }
                     for item in sorted(sessions, key=lambda value: value["session_id"])
                 ],
@@ -3440,7 +3467,8 @@ class ExperimentWorker:
         if arm_started_monotonic is not None:
             time.sleep(max(0.0, arm_started_monotonic + offered_offset - time.monotonic()))
         session_id = f"{arm.arm_id}-{index:04d}"
-        events.write({'event': 'session_preparation_started', 'session_id': session_id})
+        events.write({'event': 'session_preparation_started', 'session_id': session_id,
+                      'qos_class': arm.case.qos_class, 'case_id': arm.case.case_id})
         priority_domain = getattr(self, '_priority_domain', None)
         progress_control = (self._runtime_memory
                             if isinstance(self._runtime_memory, PressureControl) else None)
@@ -3456,6 +3484,7 @@ class ExperimentWorker:
                     progress_control.register(
                         session_id, role, evidence['cgroup'],
                         arm.resources.local_numa_node, coordinator,
+                        cpu_idle=bool(evidence.get('cpu_qos', {}).get('cgroup', {}).get('effective_idle', 0)),
                     )
                     progress_control.generation(session_id, role, sandbox_id)
                 events.write({'event': 'runtime_memory_placement', 'session_id': session_id, **evidence})
@@ -4676,7 +4705,10 @@ class ExperimentWorker:
                         events.write({"event": "first_tool_after_restore", "session_id": session_id, **report})
                     events.write({"event": "tool_completed", "session_id": session_id,
                                   "execution_id": execution_id,
+                                  "execution_scope": str(request.get('execution_scope') or 'agent-tool'),
                                   "exit_code": request.get("exit_code"),
+                                  "execution_started_at": timestamps["execution_started_at"],
+                                  "execution_completed_at": timestamps["execution_completed_at"],
                                   "ssh_reaped_at": timestamps["ssh_reaped_at"],
                                   "endpoint_epoch": expected_route[1]})
                     if boundary_study is not None:
@@ -5129,6 +5161,7 @@ class ExperimentWorker:
                    if arm.execution.control_timing_details else {}),
             })
             return {"session_id": session_id, "case_id": arm.case.case_id,
+                    "qos_class": arm.case.qos_class,
                     "host_knowledge": (self.host_knowledge.scope_summary(session_id)
                                        if arm.resources.prediction_mode == 'host-live' else None),
                     "rollout_id": session_id,

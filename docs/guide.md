@@ -298,6 +298,96 @@ count. Separate CPU clusters can still share the outer L3 cache. Use a new run
 ID and qualification; apply the host configuration first if adding allowed
 CPU/NUMA pools. Images and trained models do not need rebuilding.
 
+For an LS/BE CPU QoS comparison, label each workload case with
+`qos_class: ls` or `qos_class: be`, including cases supplied through a manifest.
+Keep unique case IDs, trace inputs, VM resources, CPU pools, and memory policies
+fixed. Compare `mechanisms.placement.cpu_qos_policy: "off"`, `idle`, and
+`idle_core` in separate arms; the arm override key is
+`placement.cpu_qos_policy`. Keep `tool_call_cpu_policy: c0` while isolating this
+effect. The allowed CPU pool must include SMT siblings for an SMT-interference
+experiment.
+
+`idle` lowers BE Runtime and Tool host vCPU threads to `SCHED_IDLE`.
+`idle_core` additionally gives LS and BE different Linux core-scheduling
+cookies; all host vCPU threads in one class share its cookie. The worker
+verifies these settings after VM creation and restore. Run with `--sudo`,
+managed placement, and the configured experiment cgroup. `idle_core` requires
+a host kernel built with `CONFIG_SCHED_CORE=y` and working `PR_SCHED_CORE`;
+unsupported hosts fail rather than substituting static CPU partitions. If a
+kernel change is needed, reboot and complete [host recovery](installation.md#recover-after-reboot)
+before qualification.
+
+VMs in separate CPU cgroups are also scheduled according to their group weights.
+Lowering only BE vCPU thread priority does not lower the whole VM group's weight.
+To compare group-level background scheduling, set
+`mechanisms.placement.cpu_qos_group_idle: true` together with `idle` or
+`idle_core` (arm override: `placement.cpu_qos_group_idle`). This also marks
+BE Runtime and Tool VM cgroups as idle, including their helper threads, and
+verifies the setting after creation and restore. It requires writable
+`cpu.idle` files under the configured cgroup v2 CPU controller. The default
+is `false`; keep this setting fixed across the arms of a comparison, or label
+its change as a separate ablation. Use a new run ID and qualification; no
+host apply, image rebuild, or retraining is needed if the CPU controller is
+already enabled. Cleanup restores the original group settings.
+The runtime memory controller retains memory protection for these groups,
+but does not apply CPU release boosts to idle BE groups.
+
+Prepare a separate no-BE reference containing the same LS cases. Set
+`execution.session_arrival_offsets_seconds` to the frozen offered-arrival
+offsets, in seconds from arm start. The list must be nondecreasing and contain
+one entry per offered session, with one configured concurrency level. For the
+no-BE reference, retain each LS case's original offset when removing BE cases;
+do not regenerate Poisson arrivals for the smaller session count. Launch each
+configuration through the validation and launch commands below with a new run
+ID and qualification. These changes need no image rebuild or retraining;
+host apply is needed only if the allowed CPU/NUMA pools change.
+
+Calibrate background-load levels from `cpu_qos_usage.classes.be` in the memory
+events, using complete intervals with no new or departing threads. Its load
+fraction uses the configured logical CPU pool as the denominator and covers
+Runtime and Tool vCPUs only. Keep the offered BE workload fixed across compared
+policies and report the resulting measured load separately; an offered level
+does not establish the actual CPU utilization under `SCHED_IDLE` or core scheduling.
+
+After collecting the runs, analyze the no-BE arm first, then each mixed arm
+(`RUN_ROOT` is the collected run directory; select `--arm-id` if it contains
+multiple arms):
+
+```bash
+python3 scripts/analyze_cpu_qos.py BASE_RUN_ROOT --output baseline-analysis.json
+python3 scripts/analyze_cpu_qos.py MIXED_RUN_ROOT \
+  --baseline-json baseline-analysis.json --slo-multiplier 1.20 \
+  --timeseries-bin-seconds 10 --timeseries-csv qos-timeseries.csv \
+  --output qos-analysis.json
+```
+
+This checks LS Tool execution p95 against 1.20 times its no-BE reference and
+reports Tool steps/s plus completed, failed, and incomplete task counts for LS,
+BE, and LS+BE using the same window. Completed steps require a successful or
+exactly matched expected Tool outcome; a completed step does not make its task
+complete. Final validated-session step rates and useful session throughput are
+also retained. Host admission-to-completion latency is reported separately.
+
+The same analysis command works while an arm is running: it reads the frozen
+specification, existing events, and session progress, marks the report incomplete,
+and stops at the last observed timestamp. It does not declare the SLO satisfied
+before completion. CSV rows contain 10-second intervals and cumulative task
+counts; a shorter final interval is marked explicitly. Inspect failures and
+arrival matching alongside p95; a finite batch does not establish steady-state
+capacity. See the [analysis options](reference.md#cpu-qos-analysis) to select
+an explicit measurement window or supply a frozen cohort mapping.
+
+For a time-bounded study, record the last `session_dispatched` event's
+`wall_time_ns / 1e9` as `SUBMITTED_AT`, choose `CUTOFF_AT = SUBMITTED_AT + 1200`,
+and run `clawbox experiment abort RUN_ID` at that deadline. After cleanup,
+analyze the retained evidence with `--observation-start-unix-s SUBMITTED_AT
+--observation-end-unix-s CUTOFF_AT`. These are analysis timestamps; neither
+option changes replay timing. Compare `observed_tool_steps_per_second`,
+`completed_tasks_in_window`, and `observed_window_execution` across classes,
+alongside nonzero exits, incomplete tasks, and timing coverage. Use the same
+window rule for the no-BE reference and every policy, and label partial-run SLO
+comparisons as observations rather than completed-trace guarantees.
+
 For a four-replica placement study, configure `execution.tool_placement` with
 the measured target inventory, recorded prefix sequence, and host-specific CPU
 layouts described in the [option reference](reference.md#tool-placement-study).

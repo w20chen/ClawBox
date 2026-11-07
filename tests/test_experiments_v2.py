@@ -580,6 +580,18 @@ def test_poisson_arrivals_are_deterministic_fair_and_trace_scaled() -> None:
                 for left, right in zip(first, first[1:])}) > 1
 
 
+def test_explicit_arrivals_preserve_ls_times_when_be_is_removed() -> None:
+    raw = raw_spec()
+    raw['execution'].update(concurrency_levels=[4],
+                            session_arrival_offsets_seconds=[0.0, 2.0, 8.0, 13.0])
+    mixed = expand_matrix(ExperimentSpec.model_validate(raw))[0]
+    assert session_offer_offsets(mixed) == (0.0, 2.0, 8.0, 13.0)
+    raw['execution'].update(concurrency_levels=[2],
+                            session_arrival_offsets_seconds=[2.0, 13.0])
+    reference = expand_matrix(ExperimentSpec.model_validate(raw))[0]
+    assert session_offer_offsets(reference) == (2.0, 13.0)
+
+
 def test_poisson_arrivals_accept_a_fixed_expected_window() -> None:
     raw = raw_spec()
     raw["workload"].update(
