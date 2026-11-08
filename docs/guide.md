@@ -42,6 +42,22 @@ their settings; `null` leaves Cube's target unchanged. Apply a changed target
 on an idle host before launching a new run ID. No image rebuild or retraining
 is required.
 
+For subsequent kunpeng runs, retain the verified creation environment: official
+host kernel `6.6.0-145.1.28.165.oe2403sp1.aarch64`, the patched CubeSandbox IRQ
+route batching and requested legacy IRQFD activation, compatible registered
+templates, and [CubeAPI's open-file limit](#set-cubeapis-open-file-limit) of at
+least 65536. Keep its display-off boot settings host-specific. CPU/memory
+budgets, workload, and policies remain experiment choices.
+
+Before timing arrivals, require the intended TAP count to be **Ready and
+unowned**, as reported by Cubelet's local `/v1/network/taps` endpoint on port
+9998. Setting `cubelet_tap_init_num` or completing `host apply` alone does not
+prove this prewarming has finished. Keep preparation outside the timed run.
+After a host-kernel change, verify snapshot compatibility; register replacement
+templates from the same immutable images if required, retain old templates,
+and refresh the workload's template mapping and sharing evidence. Do not replace
+task-specific templates with the host profile's default Tool template.
+
 When upgrading from ClawTune with EdgeKappaKB, first follow
 [Runtime predictor and KB refresh](installation.md#refresh-the-runtime-predictor-and-kb).
 Use the updated seed, refreshed Runtime template, and a new run ID; old KB

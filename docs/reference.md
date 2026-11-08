@@ -683,6 +683,10 @@ run ID. Syntax/help validation alone does not establish successful Linux capture
 
 ### CubeAPI open-file limit
 
+The standard large-concurrency preparation uses a minimum of 65536 for the
+CubeAPI service itself; changing the experiment shell's `ulimit` does not
+configure this service. See the [creation preparation requirements](guide.md#1-check-the-host).
+
 `bash scripts/configure-cube-api-nofile.sh` previews the limit for the installed
 `cube-sandbox-cube-api.service`. See the
 [host setup steps](guide.md#set-cubeapis-open-file-limit).
