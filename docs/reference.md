@@ -184,7 +184,8 @@ LLM tool calls; one model-level call can perform several bridge operations.
 Peer VM CPU accounting establishes an observed `cpu.stat` baseline for each
 newly tracked cgroup, excluding cumulative usage from previous pool leases.
 CPU before that observation is not measured. Missing, malformed or reset
-counters increment `unobserved_counter_intervals`; affected intervals are
+counters increment `unobserved_counter_intervals` in `peer_cpu_sample` events
+and `memory_sample.peer_cpu`; affected intervals are
 unknown and must not be interpreted as zero. Audit older per-node CPU totals
 that lack this baseline. Updating the recorder requires a new run ID and
 qualification, but no host apply, image rebuild or retraining.

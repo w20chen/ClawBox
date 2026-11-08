@@ -827,7 +827,8 @@ and filesystem operations; backend-maintenance is excluded. Do not interpret
 that rate as LLM tool calls or completed traces per second.
 VM CPU samples count increments after the first verified cgroup observation;
 pooled counters can contain earlier usage. Missing or reset counter intervals
-are unknown, recorded as `unobserved_counter_intervals`, rather than zero CPU.
+are unknown, recorded as `unobserved_counter_intervals` in `peer_cpu_sample`
+events and `memory_sample.peer_cpu`, rather than zero CPU.
 Audit older per-node CPU results before comparison if their recorder did not
 establish this baseline.
 
