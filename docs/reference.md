@@ -154,10 +154,17 @@ Ordinary replay uses `environment.resources.snapshot_scheduling_storage` without
 `mechanisms.placement.resume_policy` defaults to `home`; `load-aware` ranks
 resource readiness, and `cost-aware` includes missing objects and active transfer
 competition. `migration_threshold_seconds` defaults to 0.25 s and is nonnegative.
+Resource readiness includes admission queue precedence and cumulative progress
+batch charges, using the existing admission rules. A blocked creation request
+can still be bypassed; a nonempty queue alone does not imply that restore waits.
+Decision events include `restore_admission_queue` evidence. Predictions remain
+estimates; compare them with observed admission waits in the phase report.
 Initial `placement.policy` remains a separate decision. Non-home resume requires
 managed compute nodes, pair snapshot reclamation and no fixed session CPU slots.
 Cold snapshots use each node's local domain. Existing compression, lazy restore,
 base cache, admission, CPU policies and memory borrowing retain their own controls.
+Tiered peer qualification requires both WARM-to-COLD relocation and a direct
+native COLD checkpoint. Requalify after changing the installed native build.
 
 `execution.measurement_window_seconds` defaults to unset. Set positive seconds
 for a fixed window starting at the first planned arrival; completion throughput

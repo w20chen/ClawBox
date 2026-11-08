@@ -797,7 +797,9 @@ registers both local identities against one charged WARM file.
 Continue with `validate --inputs`, `doctor --probe-vm`, `qualify`, `launch
 --qualification ... --run-id NEW_ID`, `status`, `collect`, and `report` as in the
 ordinary workflow above. Qualification verifies bidirectional restore and target
-backing files. Separately run an ordinary trace calibration to establish actual
+backing files, WARM-to-COLD relocation, and a subsequent native checkpoint
+directly into COLD followed by Runtime-first recovery. These exercise distinct
+paths. Separately run an ordinary trace calibration to establish actual
 pressure and migration opportunities; the short qualification replay does not
 establish those conditions. Freeze replica inventory and costs before running
 the policy comparison.
