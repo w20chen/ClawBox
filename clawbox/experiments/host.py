@@ -402,7 +402,7 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
     values = HostConfig().model_dump()
     if not profile_path:
         values.update(compute_nodes=[HostComputeNode(node_id=f"node{i}", numa_node=i).model_dump() for i in (0, 1)],
-                      warm_node=2, warm_root="/mnt/clawbox-pool")
+                      warm_node=2, warm_root="/mnt/clawbox-pool", cubelet_tap_init_num=2560)
     if detect:
         nodes = [n for n in inventory()['numa_nodes'] if n['cpus'] and n['total_mib'] >= 16 * 1024]
         if not nodes:

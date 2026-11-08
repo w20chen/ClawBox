@@ -194,7 +194,7 @@ VM pool and writes a profile only after checks succeed.
 | `tcp_tw_reuse` | `null` | Preserve current value; explicit 0, 1, or 2 applies that kernel mode |
 | `ip_local_port_range` | `null` | Preserve the current host ephemeral TCP range; explicit `[LOW, HIGH]` applies inclusive port bounds until reboot. Large-concurrency Cube command streams should use a reviewed wide range such as `[10000, 65535]`. |
 | `cube_proxy_connect_timeout_seconds` | `null` | Preserve Cube default; explicit 3–300 seconds bounds guest connection setup |
-| `cubelet_tap_init_num` | `null` | Preserve Cube's warm TAP target; positive explicit value is a preallocation target, not a VM limit |
+| `cubelet_tap_init_num` | `2560` in new `host init` plans; `null` when omitted | Number of TAP devices to preallocate; 2560 covers 1280 Runtime/Tool pairs. Size for the planned live VM count. `null` preserves Cube's target; profile imports preserve saved settings. Changing the target requires host apply on an idle VM pool and may restart Cubelet/egress. Preparation increases service startup time. Use a new run ID; no image rebuild or retraining. This is a preallocation target, not a VM limit. |
 | `cube_scheduler_overcommit` | `null` | Map actual Cube `InstanceType` to positive `cpu_ratio` and `mem_ratio` |
 | `cube_scheduler_vm_count_ratio` | `null` | Positive VM-count quota multiplier by actual `InstanceType` |
 | `cube_master_log_level` | `null` | Preserve Cube logging; `debug`, `info`, `warn`, or `error`. `warn` avoids verbose inventory logs in large runs. |
@@ -660,3 +660,41 @@ Optional `--workload FILE` writes replacements for subsequent template registrat
 `--proxy URL` defaults to empty and affects build downloads only. See
 [workload preparation](workloads.md#refresh-tool-collectors) for manifest fields,
 ARM64 Docker prerequisites, validation, and registration before a new run.
+
+### Creation kernel capture
+
+`sudo python3 scripts/capture-creation-kernel.py` records host kernel stages and
+new Cube log bytes alongside the supported experiment runner. See the
+[creation diagnostic walkthrough](guide.md#diagnose-vm-creation-under-load).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--output` | required | New evidence directory; refuses existing directories |
+| `--seconds` | 3600 | Positive maximum capture duration in seconds |
+| `--trace-root` | `/sys/kernel/tracing` | Mounted tracefs with kprobe events; requires root |
+| `--log-root` | `/data/log` | Parent of CubeAPI, CubeMaster, Cubelet, CubeShim and CubeVmm log directories |
+
+`ready.json` records the trace clock anchor and initial log offsets;
+`kernel-trace.txt` contains entry/return events; `thread-identities.jsonl`
+records observed thread metadata. `coverage.json` and `finished.json` report
+loss counters and cleanup. This diagnostic does not alter workload configuration
+or images and requires no host apply. Each accompanying experiment uses a new
+run ID. Syntax/help validation alone does not establish successful Linux capture.
+
+### CubeAPI open-file limit
+
+`bash scripts/configure-cube-api-nofile.sh` previews the limit for the installed
+`cube-sandbox-cube-api.service`. See the
+[host setup steps](guide.md#set-cubeapis-open-file-limit).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--minimum N` | 65536 | Minimum open descriptors per process; positive integer no greater than `fs.nr_open` |
+| `--apply` | off | Requires root; persist the limit, reload systemd, and raise the current process limit |
+| `--help` | — | Show usage without changing the host |
+
+Apply writes `/etc/systemd/system/cube-sandbox-cube-api.service.d/90-clawbox-nofile.conf`
+and preserves higher configured or live limits. It uses `prlimit` from
+`util-linux`, touches only CubeAPI, and does not start or restart services.
+The setting survives reboot; images, trained models, and experiment YAML need
+no changes. A failed experiment must retain its run ID; reruns use a new one.

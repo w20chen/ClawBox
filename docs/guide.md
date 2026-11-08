@@ -33,6 +33,15 @@ After changing the host plan, apply it on an idle VM pool and regenerate the
 experiment from the resulting profile. The editable plan is `host.yaml`;
 `host.json` is the applied profile used by `configure`.
 
+New `host init` plans propose `cubelet_tap_init_num: 2560`, enough for the
+Runtime and Tool VMs of 1280 simultaneously live sessions. Set this target to
+at least twice your planned live session count for larger runs. Creating TAP
+devices ahead of arrivals moves network preparation out of VM creation; it
+increases service startup time. Existing YAML files and imported profiles keep
+their settings; `null` leaves Cube's target unchanged. Apply a changed target
+on an idle host before launching a new run ID. No image rebuild or retraining
+is required.
+
 When upgrading from ClawTune with EdgeKappaKB, first follow
 [Runtime predictor and KB refresh](installation.md#refresh-the-runtime-predictor-and-kb).
 Use the updated seed, refreshed Runtime template, and a new run ID; old KB
@@ -682,3 +691,49 @@ The first command checks inputs without starting VMs. The second qualifies and
 runs both orders of the full-pool (`c0`) versus one-LLC-cluster (`c2`) comparison.
 The helper reports missing image digests or topology prerequisites explicitly.
 Its frozen examples retain their original VM shapes.
+
+## Diagnose VM creation under load
+
+On the experiment host, start the bounded kernel and Cube log capture in one
+terminal. Use a new output directory for each capture:
+
+```bash
+sudo python3 scripts/capture-creation-kernel.py \
+  --output /data/clawbox-create-diagnostic-001 --seconds 3600
+```
+
+Wait for `Creation trace ready`, then run the normal `clawbox experiment launch`
+command in another terminal with the frozen experiment YAML and a new run ID.
+The capture records IRQFD assignment, IRQ-bypass registration/unregistration,
+routing-table submission and cgroup attachment. It also copies new Cube log
+bytes. It does not launch or stop experiments. Ctrl-C ends capture and removes
+only its own trace instance and probes; stop the experiment separately with
+`clawbox experiment abort RUN_ID` when its diagnostic window is complete.
+
+The host needs root access and tracefs with `CONFIG_KPROBE_EVENTS`. Missing
+kernel functions fail capture before the ready marker. No image rebuild or
+host apply is needed. Correlate host-monotonic trace times, thread identities,
+Cube sandbox IDs and `sandbox_created` spans. Kernel observations cover the
+whole host and include nested calls: do not sum `kvm_irqfd_assign` and its
+IRQ-bypass child. Inspect `coverage.json` for ring-buffer overruns and missed
+return probes before calculating durations. In-flight calls at capture end
+are incomplete observations, not zero-duration operations.
+
+## Set CubeAPI's open-file limit
+
+Before large concurrent runs, check CubeAPI's per-process file-descriptor limit.
+A low limit can produce `Too many open files` and fail creation or updates.
+After installing/configuring CubeSandbox, run on the host:
+
+```bash
+bash scripts/configure-cube-api-nofile.sh --minimum 65536
+sudo bash scripts/configure-cube-api-nofile.sh --minimum 65536 --apply
+```
+
+The first command previews the change. The second preserves higher existing
+limits, installs a persistent systemd drop-in, and raises the running CubeAPI
+process's limit without restarting it. It does not start an inactive service.
+`--minimum` is a descriptor count per process (default 65536); it must not exceed
+the host's `fs.nr_open`. No image rebuild, retraining, or `host apply` is needed.
+If an experiment already failed, keep its evidence and use a new run ID when
+rerunning it. See the [option reference](reference.md#cubeapi-open-file-limit).
