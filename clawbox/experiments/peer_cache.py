@@ -70,7 +70,9 @@ def _resident_pages(fd: int, size: int) -> int:
             vector = (ctypes.c_ubyte * pages)()
             if libc.mincore(address, length, vector) != 0:
                 raise OSError(ctypes.get_errno(), 'mincore failed; no eviction claim can be made')
-            total += sum(value & 1 for value in vector)
+            # Terabyte SSD pools contain billions of 4KiB pages. Count the
+            # exact same low bits in C instead of iterating ctypes in Python.
+            total += bytes(vector).translate(bytes(i & 1 for i in range(256))).count(b'\x01')
         finally:
             if libc.munmap(address, length) != 0:
                 raise OSError(ctypes.get_errno(), 'mincore mapping release failed')
