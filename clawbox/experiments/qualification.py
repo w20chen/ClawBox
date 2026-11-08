@@ -32,12 +32,12 @@ from .spec import (
     ExperimentSpec, InferenceBackend, ReclamationPolicy, canonical_json,
     expand_matrix, load_workload_cases, resolve_case_sandbox, spec_digest,
 )
-from .spec_types import AdmissionPolicy, ArrivalSchedule
+from .spec_types import AdmissionPolicy, ArrivalSchedule, SnapshotTier
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
 from .worker import atomic_json, session_case_for, session_worker_count
 
 
-QUALIFICATION_SCHEMA_VERSION = 21
+QUALIFICATION_SCHEMA_VERSION = 22
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
 
 
@@ -547,6 +547,9 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 "peer_bidirectional_restore_verified": all(
                     item.get('peer_bidirectional_restore_verified') is True
                     for item in templates.values()),
+                "direct_cold_checkpoint_verified": all(
+                    item.get('direct_cold_checkpoint_verified') is True
+                    for item in templates.values()),
                 "incremental_delta_verified": all(
                     item.get("incremental_delta_verified", False)
                     for item in templates.values()
@@ -571,6 +574,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                   "passed": all(r["passed"] for r in nodes.values()), "nodes": nodes,
                   "mechanism": spec.resources.snapshot_mechanism, "storage": spec.resources.snapshot_storage,
                   "peer_bidirectional_restore_verified": all(r.get('peer_bidirectional_restore_verified') is True for r in nodes.values()),
+                  "direct_cold_checkpoint_verified": all(r.get('direct_cold_checkpoint_verified') is True for r in nodes.values()),
                   "incremental_delta_verified": all(r.get("incremental_delta_verified", False) for r in nodes.values()),
                   "cold_relocation_verified": all(
                       r.get("cold_relocation_verified") is True for r in nodes.values()
@@ -644,6 +648,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
     primary_error: BaseException | None = None
     incremental_delta_verified = False
     cold_relocation_verified: bool | None = None
+    direct_cold_checkpoint_verified: bool | None = None
     peer_transitions = []
     try:
         lifecycle.start()
@@ -818,6 +823,43 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 raise RuntimeError(
                     "second checkpoint was not a smaller incremental RAM delta"
                 )
+        if _peer_nodes and spec.resources.snapshot_storage == 'tiered':
+            # A WARM snapshot subsequently spilled to COLD never exercises the
+            # VMM's direct-COLD syscall path. The 1280-session calibration
+            # exposed a missing fadvise64 seccomp permission on generation3.
+            marker = 'qualification-direct-cold-state'
+            lifecycle.sandbox.files.write('/tmp/clawbox-qualification-state', marker)
+            direct = {}
+            for vm in (lifecycle, runtime):
+                vm.checkpoint_and_evict(tier=SnapshotTier.COLD)
+                checkpoint = next(item for item in reversed(vm.timings)
+                                  if item.get('operation') == 'checkpoint')
+                if (checkpoint.get('status') != 'ok'
+                        or checkpoint.get('tier_to') != SnapshotTier.COLD.value
+                        or checkpoint.get('snapshot_generation') != generations + 1):
+                    raise RuntimeError('direct COLD checkpoint did not publish the requested generation')
+                direct[vm.role] = checkpoint
+            if lifecycle.resident or runtime.resident:
+                raise RuntimeError('direct COLD pair checkpoint left a VM resident')
+            runtime.restore()
+            witness_check = runtime.sandbox.commands.run(
+                f'rm /tmp/clawbox-ram-witness; kill -USR1 {runtime_pid}; '
+                'for i in $(seq 1 100); do test -s /tmp/clawbox-ram-witness && cat /tmp/clawbox-ram-witness && exit 0; sleep 0.05; done; exit 1',
+                timeout=30)
+            if witness_check.exit_code or witness_check.stdout.strip() != runtime_ram_digest:
+                raise RuntimeError('Runtime RAM/PID witness failed after direct COLD checkpoint')
+            if lifecycle.resident:
+                raise RuntimeError('direct COLD Runtime restore unexpectedly restored Tool')
+            lifecycle.restore()
+            if lifecycle.sandbox.files.read('/tmp/clawbox-qualification-state') != marker:
+                raise RuntimeError('Tool private rootfs state failed after direct COLD checkpoint')
+            direct_cold_checkpoint_verified = True
+            atomic_json(artifact_root/'direct-cold-generation.json', {
+                'passed': True, 'generation': generations + 1, 'checkpoints': direct,
+                'runtime_pid': runtime_pid, 'runtime_ram_sha256': runtime_ram_digest,
+                'storage_domain': lifecycle.storage_domain,
+                'scope': 'Actual native checkpoint directly into COLD, then Runtime-first/Tool restore; not WARM spill.',
+            })
     except BaseException as exc:
         primary_error = exc
     cleanup_errors: list[str] = []
@@ -846,6 +888,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "storage": spec.resources.snapshot_storage,
         "incremental_delta_verified": incremental_delta_verified,
         "cold_relocation_verified": cold_relocation_verified,
+        "direct_cold_checkpoint_verified": direct_cold_checkpoint_verified,
         "peer_bidirectional_restore_verified": bool(peer_transitions and len(peer_transitions) == 2 and primary_error is None),
         "timings": lifecycle.timings,
         "pair_checkpoint_verified": bool(runtime is not None and primary_error is None),
@@ -881,6 +924,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "storage": spec.resources.snapshot_storage,
         "incremental_delta_verified": incremental_delta_verified,
         "cold_relocation_verified": cold_relocation_verified,
+        "direct_cold_checkpoint_verified": direct_cold_checkpoint_verified,
         "peer_bidirectional_restore_verified": bool(peer_transitions and len(peer_transitions) == 2),
         "timings": lifecycle.timings,
         "pair_checkpoint_verified": bool(runtime is not None and primary_error is None),
@@ -1831,6 +1875,10 @@ def _probe_mismatches(spec, receipt):
     if (storage is not None and storage.topology == 'peer-local-ssd'
             and receipt.get('snapshot_roundtrip_test', {}).get('peer_bidirectional_restore_verified') is not True):
         mismatches.append('peer_bidirectional_restore_verified')
+    if (storage is not None and storage.topology == 'peer-local-ssd'
+            and spec.resources.snapshot_storage == 'tiered'
+            and receipt.get('snapshot_roundtrip_test', {}).get('direct_cold_checkpoint_verified') is not True):
+        mismatches.append('direct_cold_checkpoint_verified')
     if spec.resources.local_memory_cgroup and not (
         isinstance(receipt.get('runtime_control_test'), dict)
         and receipt['runtime_control_test'].get('passed') is True

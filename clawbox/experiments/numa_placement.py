@@ -380,15 +380,17 @@ class SessionPlacement:
                 sampled_at, used, pending, reasons = self._placement_memory(key, memory_mib)
                 # Restore does not allocate the one-time creation headroom.
                 reasons = c._pressure_reasons(memory_mib*MIB)
+                queue = c.restore_queue_observation(session_id, memory_mib)
                 waits = c._lifecycle_wait_samples['restore']
                 # Historical admitted restore waits provide a causal estimate.
                 # With no measured waits, blocked capacity is unknown, not zero.
-                blocked = offered + item[1] > self.capacity[key] or bool(reasons)
+                blocked = offered + item[1] > self.capacity[key] or bool(reasons) or queue['blocked']
                 estimate = (sum(waits[-32:]) / len(waits[-32:]) if waits else None)
                 result[key] = {
                     'eligible': item[1] <= self.capacity[key]
                                 and memory_mib*MIB+c.operation_headroom_bytes <= c.budget_bytes,
                     'blocked': blocked, 'offered_vcpus': offered,
+                    'restore_admission_queue': queue,
                     'cpu_capacity': self.capacity[key], 'safety_reasons': list(reasons),
                     'resource_wait_seconds': estimate if blocked else 0.0,
                     'resource_wait_source': 'observed_restore_wait_mean_last32' if blocked and waits

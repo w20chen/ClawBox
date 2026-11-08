@@ -32,6 +32,81 @@ def scheduler(*, used=(0,0), cpu=(0.,0.), overcommit=1, capacity=20):
     return SessionPlacement(domains,cpu_overcommit=overcommit,monitor=monitor,emit=events.append),ledger,events
 
 
+@pytest.mark.parametrize('wait_class,queued_mib,expected_blocked,queue_reason', [
+    ('restore', 1, True, 'fifo_predecessor'),
+    ('create', 1, True, 'fifo_predecessor'),
+    ('create', 11, False, None),  # Existing progress bypasses blocked creation.
+    ('tool_admission', 1, False, None),  # Feasible bounded progress prefix.
+    ('tool_admission', 9, True, 'configured_memory_budget'),
+])
+def test_resume_candidate_observes_admission_predecessors_when_own_restore_fits(
+    wait_class, queued_mib, expected_blocked, queue_reason,
+):
+    from clawbox.experiments.policy import AdmissionRequest
+    from clawbox.experiments.session_binding import choose_resume
+    placement, ledger, _ = scheduler()
+    source = placement.domains['n0'].coordinator
+    placement.suspended['session'] = ('n0', 2, 'template')
+    ticket = object()
+    with ledger.condition:
+        source._waiters.append(ticket)
+        source._waiter_requests[ticket] = AdmissionRequest('older',queued_mib*MIB,wait_class,False)
+        if wait_class != 'create':
+            source._progress_waiters.add(ticket)
+        source._lifecycle_wait_samples['restore'].extend([8.,12.])
+    before = (tuple(source._waiters), dict(source._waiter_requests), set(source._progress_waiters))
+    candidates = placement.resume_candidates('session',memory_mib=2)
+    home = candidates['n0']
+    assert home['safety_reasons'] == []  # The individual restore fits available capacity.
+    assert home['eligible'] is True
+    assert home['blocked'] is expected_blocked
+    assert home['restore_admission_queue']['blocked'] is expected_blocked
+    assert home['restore_admission_queue']['reasons'] == ([queue_reason] if queue_reason else [])
+    assert home['resource_wait_seconds'] == (10. if expected_blocked else 0.)
+    assert candidates['n1']['resource_wait_seconds'] == 0.
+    selected,_ = choose_resume('n0',candidates,policy='load-aware',threshold_seconds=0.)
+    assert selected == ('n1' if expected_blocked else 'n0')
+    assert (tuple(source._waiters),dict(source._waiter_requests),set(source._progress_waiters)) == before
+    assert not ledger.claims
+    assert not placement.sessions  # Selection observes; it does not acquire CPU or memory.
+
+
+def test_resume_queue_observation_skips_duplicate_inflight_lifecycle_waiter():
+    from clawbox.experiments.policy import AdmissionRequest
+    placement,ledger,_ = scheduler()
+    source = placement.domains['n0'].coordinator
+    placement.suspended['session'] = ('n0',2,'template')
+    ticket = object()
+    with ledger.condition:
+        source._waiters.append(ticket)
+        source._waiter_requests[ticket] = AdmissionRequest('other',MIB,'restore',False)
+        source._progress_waiters.add(ticket)
+        ledger.add(('other','restore'),scope='n0',amount=MIB,local_amount=MIB)
+    candidates = placement.resume_candidates('session',memory_mib=1)
+    assert candidates['n0']['blocked'] is False
+    assert candidates['n0']['restore_admission_queue']['queued_requests'] == 1
+    assert len(ledger.claims) == 1
+
+
+def test_resume_queue_batch_limit_has_unknown_wait_without_measured_history():
+    from clawbox.experiments.policy import AdmissionRequest
+    placement,ledger,_ = scheduler()
+    source = placement.domains['n0'].coordinator
+    source._PROGRESS_WAKE_BATCH = 1
+    placement.suspended['session'] = ('n0',2,'template')
+    ticket = object()
+    with ledger.condition:
+        source._waiters.append(ticket)
+        source._waiter_requests[ticket] = AdmissionRequest('other',MIB,'tool_admission',False)
+        source._progress_waiters.add(ticket)
+    row = placement.resume_candidates('session',memory_mib=1)['n0']
+    assert row['safety_reasons'] == []
+    assert row['restore_admission_queue']['reasons'] == ['fifo_predecessor']
+    assert row['blocked'] is True
+    assert row['resource_wait_seconds'] is None
+    assert row['resource_wait_source'] == 'unknown'
+
+
 def test_reporting_does_not_probe_live_claims():
     s,ledger,_=scheduler()
     def slow_charge():

@@ -924,6 +924,7 @@ class PolicyCoordinator:
         self, physical_observation: tuple[int, int] | None = None,
         global_observation: tuple[int, int] | None = None,
         pending_observation: dict | None = None,
+        *, prospective: tuple[object, AdmissionRequest] | None = None,
     ):
         """Use FIFO when creation fits; let progress bypass blocked creation."""
         while True:
@@ -934,8 +935,9 @@ class PolicyCoordinator:
             snapshot = tuple(self._waiters)
             first = None
             retry = False
-            for ticket in snapshot:
-                request = self._waiter_requests.get(ticket)
+            for ticket in (snapshot + (prospective[0],) if prospective else snapshot):
+                request = (prospective[1] if prospective and ticket is prospective[0]
+                           else self._waiter_requests.get(ticket))
                 if request is None:
                     retry = True
                     break
@@ -944,8 +946,9 @@ class PolicyCoordinator:
                     continue  # Same-VM polling must not stall unrelated VMs.
                 if first is None:
                     first = ticket
-                if ticket in self._progress_waiters:
-                    oldest = self._waiter_requests.get(first)
+                if ticket in self._progress_waiters or (prospective and ticket is prospective[0]):
+                    oldest = (prospective[1] if prospective and first is prospective[0]
+                              else self._waiter_requests.get(first))
                     if oldest is None:
                         retry = True
                         break
@@ -975,6 +978,7 @@ class PolicyCoordinator:
     @operation('admission.queue_prefix')
     def _feasible_progress_prefix_locked(
         self, ticket: object, head: object | None,
+        *, prospective: tuple[object, AdmissionRequest] | None = None,
     ) -> tuple[int, int] | None:
         """Return the LOCAL/global charge for a batchable Tool prefix.
 
@@ -986,7 +990,8 @@ class PolicyCoordinator:
         convoy.  Creation and same-session successors keep their existing FIFO
         behavior.
         """
-        if head is None or ticket not in self._progress_waiters:
+        if head is None or (ticket not in self._progress_waiters
+                            and not (prospective and ticket is prospective[0])):
             return None
         head_request = self._waiter_requests[head]
         if head_request.wait_class != "tool_admission":
@@ -994,12 +999,13 @@ class PolicyCoordinator:
         local_bytes = 0
         total_bytes = 0
         progress_count = 0
-        for queued in self._waiters:
-            request = self._waiter_requests[queued]
+        for queued in ((*self._waiters, prospective[0]) if prospective else self._waiters):
+            request = (prospective[1] if prospective and queued is prospective[0]
+                       else self._waiter_requests[queued])
             if (request.session_id, request.wait_class) in self.demand.claims \
                     and request.wait_class != "tool_admission":
                 continue
-            if queued not in self._progress_waiters:
+            if queued not in self._progress_waiters and not (prospective and queued is prospective[0]):
                 continue
             progress_count += 1
             if progress_count > self._PROGRESS_WAKE_BATCH:
@@ -1012,6 +1018,40 @@ class PolicyCoordinator:
             if queued is ticket:
                 return local_bytes, total_bytes
         return None
+
+    def restore_queue_observation(self, session_id: str, amount_mib: int) -> dict:
+        """Observe the existing admission rules for a restore appended now.
+
+        The prospective ticket is private to these reads: it is never inserted
+        into the live queue, signalled, or granted a memory claim.
+        """
+        ticket = object()
+        prospective = (ticket, AdmissionRequest(session_id, amount_mib * 1024 * 1024,
+                                                 'restore', False))
+        with self._condition:
+            while True:
+                queued = tuple(self._waiters)
+                head = self._admission_head_locked(prospective=prospective)
+                inflight = (session_id, 'restore') in self.demand.claims
+                prefix = (None if head is ticket or inflight else
+                          self._feasible_progress_prefix_locked(ticket, head, prospective=prospective))
+                if inflight:
+                    reasons = ('execution_already_inflight',)
+                elif head is not ticket and prefix is None:
+                    reasons = ('fifo_predecessor',)
+                elif prefix is not None:
+                    reasons = self._pressure_reasons(prefix[0], total_bytes=prefix[1],
+                                                     first_budget_blocker_only=True)
+                else:
+                    reasons = ()
+                # Pressure observations can release the shared condition. Do
+                # not report a prefix selected before a queue membership change.
+                if queued != tuple(self._waiters):
+                    continue
+                return {'blocked': bool(reasons), 'reasons': list(reasons),
+                        'queued_requests': len(queued),
+                        'progress_prefix_local_bytes': prefix[0] if prefix is not None else None,
+                        'progress_prefix_total_bytes': prefix[1] if prefix is not None else None}
 
     def _signal_admission_waiters_locked(self) -> None:
         """Wake one FIFO head and a bounded feasible-progress batch."""

@@ -1171,3 +1171,60 @@ index e320580..71449b4 100644
          }
          resp = self._session.post(
              f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshot/relocate",
+diff --git a/hypervisor/vmm/src/seccomp_filters.rs b/hypervisor/vmm/src/seccomp_filters.rs
+index 9509f3a..bb34cba 100644
+--- a/hypervisor/vmm/src/seccomp_filters.rs
++++ b/hypervisor/vmm/src/seccomp_filters.rs
+@@ -519,6 +519,12 @@ fn vmm_thread_rules(
+         (libc::SYS_exit, vec![]),
+         (libc::SYS_exit_group, vec![]),
+         (libc::SYS_fallocate, vec![]),
++        // COLD RAM checkpoints discard their own clean SSD page-cache pages.
++        // libc 0.2.158 omits aarch64 asm-generic __NR_fadvise64 (223).
++        #[cfg(target_arch = "aarch64")]
++        (223, vec![]),
++        #[cfg(not(target_arch = "aarch64"))]
++        (libc::SYS_fadvise64, vec![]),
+         (libc::SYS_fcntl, vec![]),
+         (libc::SYS_fdatasync, vec![]),
+         (libc::SYS_fstat, vec![]),
+diff --git a/hypervisor/vmm/tests/cold_snapshot_seccomp.rs b/hypervisor/vmm/tests/cold_snapshot_seccomp.rs
+new file mode 100644
+index 0000000..519007a
+--- /dev/null
++++ b/hypervisor/vmm/tests/cold_snapshot_seccomp.rs
+@@ -0,0 +1,34 @@
++use std::fs::File;
++use std::os::unix::io::AsRawFd;
++
++use hypervisor::HypervisorType;
++use seccompiler::SeccompAction;
++use vmm::seccomp_filters::{get_seccomp_filter, Thread};
++
++#[test]
++fn cold_snapshot_cache_discard_is_allowed_by_production_filters() {
++    let path = std::env::temp_dir().join(format!("cube-cold-seccomp-{}", std::process::id()));
++    let file = File::create(&path).unwrap();
++    file.set_len(4096).unwrap();
++    file.sync_all().unwrap();
++    let fd = file.as_raw_fd();
++    for (action, thread) in [(SeccompAction::Trap, Thread::Vmm),
++                             (SeccompAction::KillProcess, Thread::All)] {
++        let filter = get_seccomp_filter(&action, thread, HypervisorType::Kvm).unwrap();
++        // Only the child installs a filter. A forbidden syscall must terminate
++        // that child, rather than changing or terminating the test harness.
++        let pid = unsafe { libc::fork() };
++        assert!(pid >= 0);
++        if pid == 0 {
++            let installed = seccompiler::apply_filter(&filter).is_ok();
++            let result = if installed {
++                unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED) }
++            } else { 1 };
++            unsafe { libc::_exit(if result == 0 { 0 } else { 1 }) };
++        }
++        let mut status = 0;
++        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
++        assert_eq!(status, 0, "COLD cache discard failed under production filter; wait status={status}");
++    }
++    std::fs::remove_file(path).unwrap();
++}
