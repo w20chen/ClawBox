@@ -754,6 +754,17 @@ objects by default, verifies concurrent duplicate requests transfer an object
 only once, records interface bytes, and removes its fixtures. `--output` must
 name a new file; `--size-mib` changes each object's size within 16–1024 MiB.
 
+Before preparing templates, complete the existing-host build/install sequence in
+[Add two local SSD storage domains](installation.md#add-two-local-ssd-storage-domains).
+It includes both the matching peer components and the patched versioned Shim:
+`--peer-components` alone leaves the installed Shim unchanged. Direct COLD
+checkpoints require the patched Shim's `fadvise64` seccomp permission. Install
+the peer components first to preserve the complete original backup, then clean
+the active base cache and use `install-incremental-cubesandbox.sh --shim-only`
+with the built and installed versioned paths shown there. Keep the host idle
+through installation and cache preparation; reprepare the cache after changing
+the Shim because the registry records its binary identity.
+
 Prepare the exact Runtime and case-specific Tool templates. Supply the native
 control socket configured at installation and a new receipt filename:
 

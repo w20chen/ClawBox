@@ -439,39 +439,71 @@ Cubelet and Python SDK. Keep the current Cube version and verified guest assets.
 This host interface change does not require rebuilding existing guest templates
 or retraining ClawTune.
 
-An existing host with the pinned builder image can build only the changed host
-components. This uses the same source recipe and preserves guest assets and
-the installed Shim:
+An existing host with the pinned builder image can build the changed host
+components and Shim without rebuilding guest assets. Both commands use the
+prepared source recipe. The Shim must include the direct-COLD checkpoint
+seccomp permission for `fadvise64`; an older base-cache-capable Shim is not
+sufficient. `--peer-components` does not build the Shim, so run both commands:
 
 ```bash
 bash scripts/build-cubesandbox-release.sh --peer-components --source "$CUBE_SOURCE_DIR"
+(
+  cd "$CUBE_SOURCE_DIR"
+  make builder-run BUILDER_CMD='cd /workspace/CubeShim && cargo build --release --locked --bin containerd-shim-cube-rs'
+)
 ```
 
-After building, with all VMs cleaned up, install the matching components:
+The full release build used for a fresh installation already builds this patched
+Shim. The separate Shim build above is for the existing-host component update.
+
+After building, clean up all VMs. Install the peer components **before replacing
+the Shim** so the complete backup retains the original matching components:
 
 ```bash
+export PEER_CONTROL_SOCKET=/run/clawbox-peer/native.sock
 sudo bash scripts/install-peer-cubesandbox.sh \
   "$CUBE_SOURCE_DIR" "$PWD" peer-host.yaml \
-  /run/clawbox-peer/native.sock "$PWD/.venv/bin/python"
+  "$PEER_CONTROL_SOCKET" "$PWD/.venv/bin/python"
 ```
 
 The installer requires mounted domain pools and an empty VM cgroup. It saves
 the previous binaries, SDK source, and service configuration under
 `/data/clawbox-backend-backups/peer-*`, installs API/Master/Cubelet plus SDK, and
-waits for a successful domain health response matching the configured storage roots. It retains the installed Shim and its
-existing snapshot/base-cache optimizations. Keep the printed installation receipt.
-Domain health verification is followed by template preparation, base-cache preparation,
-and real VM qualification in the walkthrough before launching a new run ID.
+waits for a successful domain health response matching the configured storage
+roots. It retains the installed Shim; complete the existing-host update below.
+Keep the printed installation receipt and backup directory.
 
-To undo this installation after cleaning the experiment VMs:
+Clean any active base cache, then install the built Shim into the versioned path
+used by the standard release and its templates. The global `/usr/local/bin` Shim
+is not a substitute for this file:
+
+```bash
+bash scripts/clawbox --sudo experiment base-cache cleanup
+bash scripts/clawbox --sudo experiment base-cache cleanup --apply
+sudo bash scripts/install-incremental-cubesandbox.sh --shim-only \
+  "$CUBE_SOURCE_DIR/CubeShim/target/release/containerd-shim-cube-rs" \
+  /data/cubelet/root/component_versions/cube-shim/v0.7.0-clawbox-standalone/bin/containerd-shim-cube-rs
+```
+
+The Shim-only installer refuses live VMs or an active cache, saves its own
+backup, and replaces the binary without restarting services. Cache preparation
+records the Shim identity, so reprepare the cache after this replacement even
+if the template files are unchanged. Continue with template preparation,
+base-cache preparation, and real VM qualification in the walkthrough before
+launching a new run ID. Qualification includes a direct COLD checkpoint after
+WARM checkpoint/restore cycles.
+
+To undo the complete update, clean the experiment VMs and active base cache,
+then use the peer backup captured before the Shim replacement:
 
 ```bash
 sudo bash scripts/install-peer-cubesandbox.sh --rollback "$PEER_BACKUP_DIR"
 ```
 
 Set `PEER_BACKUP_DIR` to the exact directory printed by the installation being
-reverted. Rollback restores that installation's saved components and SDK; run
-host checks and qualify the restored configuration before experiments. Stop the
+reverted. Rollback restores that installation's saved components, including its
+original Shim, and SDK; run host checks and qualify the restored configuration
+before experiments. Stop the
 owned transport helpers and unmount the domain pools with `snapshot-storage
 cleanup ... --apply` only after VM cleanup; results and pool images are retained.
 After a reboot, recover the standard host, reapply the peer host plan, prepare

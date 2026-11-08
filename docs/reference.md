@@ -541,6 +541,31 @@ For a tested Shim-only change, `sudo bash scripts/install-incremental-cubesandbo
 --shim-only BUILT_SHIM INSTALLED_SHIM` atomically replaces the versioned binary
 identified by the plan, preserves a backup and prints the rollback command.
 It refuses live VMs or an active cache and does not restart unrelated services.
+Remove the active cache with `experiment base-cache cleanup` followed by
+`experiment base-cache cleanup --apply` before installation, then repeat
+`experiment base-cache prepare PLAN.yaml --apply` before qualification.
+
+For peer local-SSD restore, `build-cubesandbox-release.sh --peer-components`
+builds API/Master/Cubelet, but does not build or install the required Shim.
+The matching Shim must permit `fadvise64` in its VMM seccomp filter for direct
+COLD checkpoints. Build it from the same prepared source with:
+
+```bash
+(
+  cd "$CUBE_SOURCE_DIR"
+  make builder-run BUILDER_CMD='cd /workspace/CubeShim && cargo build --release --locked --bin containerd-shim-cube-rs'
+)
+```
+
+Then install peer components before the Shim-only replacement so the peer
+backup contains the original complete component set. The built Shim is
+`$CUBE_SOURCE_DIR/CubeShim/target/release/containerd-shim-cube-rs`; the standard
+release's installed path is
+`/data/cubelet/root/component_versions/cube-shim/v0.7.0-clawbox-standalone/bin/containerd-shim-cube-rs`.
+The [installation sequence](installation.md#add-two-local-ssd-storage-domains)
+provides the ordered commands and full rollback. A full fresh release build
+already includes this Shim. These host changes require renewed qualification
+and a new run ID, not guest-template rebuilding or predictor retraining.
 
 ### Snapshot and lifecycle limits
 
