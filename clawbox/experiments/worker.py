@@ -14,6 +14,7 @@ import statistics
 import subprocess
 import base64
 import shlex
+import shutil
 import sys
 import time
 import traceback
@@ -68,6 +69,7 @@ from .spec_types import RuntimeControl
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
 from .topology import place_session
 from .numa_placement import CpuMonitor, SessionPlacement
+from .session_binding import SessionBinding, PeerCpuAccounting, choose_resume
 from .spec_types import ArrivalSchedule, InferenceBackend, SessionAssignment, SnapshotTier
 from .policy_control import PolicyControlServer
 from .prediction import P50PredictionProvider, PredictionUnavailable, prediction_provider_type
@@ -332,6 +334,8 @@ def wait_for_admission_without_lifecycle_lock(
 
 def session_case_for(arm: ExperimentArm, session_index: int) -> Any:
     cases = arm.session_cases or (arm.case,)
+    if arm.session_assignment is SessionAssignment.GROUPED:
+        return cases[session_index // arm.rollouts_per_case]
     if arm.session_assignment is SessionAssignment.UNIQUE:
         if session_index >= len(cases):
             raise IndexError("unique session assignment exhausted workload cases")
@@ -361,11 +365,22 @@ def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
             raise ValueError('session_arrival_offsets_seconds must match arm concurrency')
         return tuple(offsets)
     schedule = arm.execution.arrival_schedule
+    group_size = arm.rollouts_per_case if arm.session_assignment is SessionAssignment.GROUPED else 1
+    group_count = count // group_size
     if schedule is ArrivalSchedule.BURST:
         return (0.0,) * count
     if schedule is ArrivalSchedule.FIXED_STAGGER:
-        return tuple(index * arm.execution.stagger_interval_seconds
+        return tuple((index // group_size) * arm.execution.stagger_interval_seconds
                      for index in range(count))
+    if schedule is ArrivalSchedule.NORMAL:
+        seed_material = json.dumps({'random_seed': arm.execution.random_seed,
+            'repetition': arm.repetition, 'group_case_ids': [session_case_for(arm, i*group_size).case_id
+                                                          for i in range(group_count)]},
+            sort_keys=True, separators=(',', ':'))
+        generator = random.Random(int(hashlib.sha256(seed_material.encode()).hexdigest()[:16], 16))
+        draws = sorted(generator.gauss(0., arm.execution.normal_arrival_std_seconds)
+                       for _ in range(group_count))
+        return tuple(value-draws[0] for value in draws for _ in range(group_size))
     selected = [session_case_for(arm, index) for index in range(count)]
     time_scale = float(arm.inference.configuration.get("time_scale", 1.0))
     durations = []
@@ -386,9 +401,9 @@ def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
         if arm.execution.poisson_arrival_window_seconds is not None
         else reference * arm.execution.poisson_arrival_window_fraction
     )
-    if count == 1:
-        return (0.0,)
-    mean_interval = expected_window / (count - 1)
+    if group_count == 1:
+        return (0.0,) * count
+    mean_interval = expected_window / (group_count - 1)
     seed_material = json.dumps({
         "random_seed": arm.execution.random_seed,
         "repetition": arm.repetition,
@@ -398,9 +413,9 @@ def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
     seed = int(hashlib.sha256(seed_material.encode()).hexdigest()[:16], 16)
     generator = random.Random(seed)
     offsets = [0.0]
-    for _ in range(1, count):
+    for _ in range(1, group_count):
         offsets.append(offsets[-1] + generator.expovariate(1.0 / mean_interval))
-    return tuple(offsets)
+    return tuple(value for value in offsets for _ in range(group_size))
 
 
 def ensure_worker_fd_limit(concurrency: int) -> tuple[int | None, int | None]:
@@ -587,6 +602,10 @@ class WatermarkController:
             return False
         try:
             self._last_borrow_rejection = None
+            binding = getattr(lifecycle, '_session_binding', None)
+            if binding is not None and binding.restore_domain.borrower is not self.borrower:
+                self._last_borrow_rejection = 'session_changed_domain'
+                return False
             if self.borrower is None or self.memory_scheduling in {'local_only', 'snapshot_only'}:
                 self._last_borrow_rejection = 'borrowing_disabled'
                 return False
@@ -916,6 +935,9 @@ class WatermarkController:
         before = None
         lifecycle = None
         for _shared, _sandbox_id, session_id, candidate, observation in sorted(candidates):
+            binding = getattr(candidate, '_session_binding', None)
+            if binding is not None and binding.restore_domain.borrower is not self.borrower:
+                continue
             coordinate_tool = candidate.role == "tool"
             if coordinate_tool and not self.coordinator.claim_memory_return(session_id):
                 continue
@@ -2400,6 +2422,16 @@ class ExperimentWorker:
             if arm.resources.local_numa_node is not None and os.name != "nt"
             else NodeMemorySampler(interval_s=arm.execution.memory_sample_interval_seconds)
         )
+        session_bindings: dict[str, SessionBinding] = {}
+        peer_storage = arm.resources.snapshot_scheduling_storage
+        peer_enabled = peer_storage is not None and peer_storage.topology == 'peer-local-ssd'
+        peer_store = None
+        peer_cpu = PeerCpuAccounting(peer_storage.local_roots) if peer_enabled else None
+        if peer_enabled:
+            from .peer_transport import PeerReplicaStore
+            peer_store = PeerReplicaStore(peer_storage, emit=events.write, run_id=self.run_id,
+                                          timeout_seconds=peer_storage.transfer_timeout_seconds)
+
         def record_pressure_pause(
             state: Any, tool_elapsed: float | None,
             runtime_elapsed: float | None, reason: str,
@@ -2421,6 +2453,10 @@ class ExperimentWorker:
                     "snapshot_tier": lifecycle.tier.value,
                     "lifecycle_timing": timings[-1] if timings else None,
                 })
+            if peer_enabled and placement is not None:
+                events.write({'event': 'peer_cpu_sample', **peer_cpu.sample()})
+                placement.suspend_pair(state.session_id, tool=state.lifecycle,
+                                       runtime=state.runtime_lifecycle)
         def reclaim_local_cache() -> None:
             events.write({"event": "local_cache_reclaim_started"})
             try:
@@ -2534,6 +2570,11 @@ class ExperimentWorker:
                     local_numa_node=node.numa_node, shared_numa_node=arm.resources.warm_numa_node,
                     interval_s=arm.execution.memory_sample_interval_seconds,
                 )
+                if peer_enabled:
+                    cold_root = str(Path(peer_storage.local_roots[node.node_id]) / 'cold')
+                    Path(cold_root).mkdir(parents=True, exist_ok=True)
+                    domain_arm = domain_arm.model_copy(update={'resources': domain_arm.resources.model_copy(
+                        update={'cold_snapshot_root': cold_root})})
             coordinator = PolicyCoordinator(
                 arm.policy, demand_ledger=demand_ledger, demand_scope=node.node_id if node else "local",
                 budget_mib=domain_arm.resources.pool_memory_budget_mib,
@@ -2640,6 +2681,8 @@ class ExperimentWorker:
                         memory_by_domain=memory_by_domain, queue_by_domain=queues['per_domain'],
                         blocking=False,
                     ) if placement is not None else None,
+                    **({'peer_storage_sample': peer_store.storage_sample(),
+                        'peer_cpu': peer_cpu.sample()} if peer_enabled else {}),
                     "host_knowledge_process": self.host_knowledge.process_sample() if self.host_knowledge else None,
                     "cgroup_cpu": cpu_sampler.sample() if cpu_sampler is not None else {
                         "measurement": "unavailable",
@@ -2775,6 +2818,43 @@ class ExperimentWorker:
         )
         arm_cancel = Event()
         offer_offsets = session_offer_offsets(arm)
+        measurement_seconds = arm.execution.measurement_window_seconds
+        measurement_origin = arm_started_monotonic + min(offer_offsets, default=0.)
+        measurement_cutoff = measurement_origin + measurement_seconds if measurement_seconds is not None else None
+        measurement_closed = False
+        if measurement_cutoff is not None:
+            events.write({
+                'event': 'measurement_window_open',
+                'origin_monotonic_s': measurement_origin,
+                'origin_unix_s': arm_started_wall + min(offer_offsets, default=0.),
+                'cutoff_monotonic_s': measurement_cutoff,
+                'measurement_window_seconds': measurement_seconds,
+                'offered_schedule': [
+                    {'session_id': f'{arm.arm_id}-{index:04d}',
+                     'case_id': session_case_for(arm, index).case_id,
+                     'group_index': index // arm.rollouts_per_case if arm.session_assignment is SessionAssignment.GROUPED else None,
+                     'rollout_index': index % arm.rollouts_per_case if arm.session_assignment is SessionAssignment.GROUPED else None,
+                     'scheduled_monotonic_s': arm_started_monotonic + offset,
+                     'scheduled_offset_seconds': offset}
+                    for index, offset in enumerate(offer_offsets)
+                ],
+            })
+        def close_measurement(reason):
+            nonlocal measurement_closed
+            if measurement_cutoff is None or measurement_closed:
+                return
+            measurement_closed = True
+            now = time.monotonic()
+            events.write({
+                'event': 'measurement_window_closed', 'reason': reason,
+                'origin_monotonic_s': measurement_origin,
+                'cutoff_monotonic_s': measurement_cutoff,
+                'measurement_window_seconds': measurement_seconds,
+                'observed_end_monotonic_s': min(now, measurement_cutoff),
+                'actual_observed_seconds': max(0., min(now, measurement_cutoff) - measurement_origin),
+                'cutoff_reached': now >= measurement_cutoff,
+                'all_futures_terminal': bool(futures) and all(f.done() for f in futures),
+            })
         futures: dict[Any, int] = {}
         from .recovery import SessionRecovery
         recovery = SessionRecovery(self.state_root / 'session-progress')
@@ -2870,6 +2950,10 @@ class ExperimentWorker:
                     )
                 domain = domains[key]
             waited = time.monotonic()-started
+            binding = None
+            if peer_enabled:
+                binding = SessionBinding(session_id, index, key, domains)
+                session_bindings[session_id] = binding
             try:
                 if placement is not None and not os_default:
                     selected_cpus = (cpu_slots.for_session(index).cpus
@@ -2881,7 +2965,8 @@ class ExperimentWorker:
                         )
                 result = self._run_session(domain.arm, index, domain.coordinator, events,
                     policy_events, prediction_providers.get(session_case.case_id), sandbox_create_gate,
-                    lambda: domain.sampler.observe(details=arm.execution.control_timing_details),
+                    lambda: (binding.restore_domain if binding else domain).sampler.observe(
+                        details=arm.execution.control_timing_details),
                     arm_started_wall, arm_started_monotonic,
                     snapshot_pool, domain.borrower, domain.controller,
                     creation_reserved=placement is not None,
@@ -2889,7 +2974,9 @@ class ExperimentWorker:
                     offered_offset_seconds=offer_offsets[index],
                     telemetry_warmup_pool=telemetry_warmup_pool,
                     dependency_install_gate=dependency_install_gate,
-                    arm_cancel=arm_cancel)
+                    arm_cancel=arm_cancel, session_binding=binding,
+                    session_placement=placement, peer_store=peer_store, peer_cpu=peer_cpu,
+                    base_cache_receipt=base_cache_receipt)
                 result['placement_wait_seconds'] = waited if placement is not None else 0.
                 offered = arm_started_wall + offer_offsets[index]
                 result['offered_to_completion_seconds'] = max(0.,
@@ -2897,12 +2984,17 @@ class ExperimentWorker:
                 if 'final_response_observed' in result['timeline']:
                     result['offered_to_final_response_seconds'] = max(0.,
                         result['timeline']['final_response_observed']-offered)
-                result['compute_node'] = (None if os_default else
+                result['compute_node'] = (binding.current if binding else None if os_default else
                     key if placement is not None else result.get('compute_node'))
+                if binding is not None:
+                    result.update(initial_compute_node=key, migration_count=binding.epoch,
+                                  binding_transition=binding.transition)
                 return result
             finally:
                 if placement is not None:
                     try:
+                        if binding is not None:
+                            domain = binding.domain
                         with demand_ledger.condition:
                             if (session_id, 'create') in demand_ledger.claims:
                                 domain.coordinator.release(session_id, pair_mib, wait_class='create')
@@ -2922,10 +3014,12 @@ class ExperimentWorker:
                 for index in range(arm.concurrency)
             }
             failure = collect_session_results(
-                futures, timeout=arm.execution.arm_timeout_seconds,
+                futures, timeout=(max(0., measurement_cutoff-time.monotonic())
+                                  if measurement_cutoff is not None else arm.execution.arm_timeout_seconds),
                 sessions=sessions, failures=session_failures, events=events,
                 arm_id=arm.arm_id, check_health=check_shared_health,
             )
+            close_measurement('all_sessions_terminal')
             pool.shutdown(wait=True)
         except (KeyboardInterrupt, SystemExit):
             # ThreadPoolExecutor's context manager waits for every running
@@ -2933,6 +3027,7 @@ class ExperimentWorker:
             # strand the CLI behind blocked VM calls and prevent lab cleanup.
             # Destroy this run's VMs first so those calls unblock, and cancel
             # sessions that have not started.
+            close_measurement('interrupted')
             arm_cancel.set()
             for future in futures:
                 future.cancel()
@@ -2946,6 +3041,8 @@ class ExperimentWorker:
             interrupted = True
             raise
         except Exception as exc:
+            close_measurement('cutoff' if isinstance(exc, TimeoutError) and measurement_cutoff is not None
+                              and time.monotonic() >= measurement_cutoff else 'failure')
             interrupted = True
             if isinstance(exc, ArmInfrastructureError):
                 infrastructure_error = exc
@@ -2962,6 +3059,7 @@ class ExperimentWorker:
             failure = exc
             events.write({"event": "arm_failed", "error": str(exc), "type": type(exc).__name__})
         finally:
+            close_measurement('worker_finalization')
             telemetry_warmup_pool.shutdown(
                 wait=not interrupted, cancel_futures=interrupted,
             )
@@ -3331,6 +3429,13 @@ class ExperimentWorker:
                 } if self._priority_domain else {},
                 "compute_nodes": node_results,
                 "placement_policy": arm.execution.placement_policy,
+                "resume_policy": arm.execution.resume_policy,
+                "session_migration_count": sum(binding.epoch for binding in session_bindings.values()),
+                "session_binding_outcomes": {
+                    key: {'compute_domain': binding.current, 'epoch': binding.epoch,
+                          'transition': binding.transition}
+                    for key, binding in session_bindings.items()
+                },
                 "template_aware_placement": arm.policy.template_aware_placement,
                 "template_affinity_decisions": (
                     placement.template_affinity_decisions if placement else 0
@@ -3459,6 +3564,11 @@ class ExperimentWorker:
                       telemetry_warmup_pool: ThreadPoolExecutor | None = None,
                       dependency_install_gate: DependencyInstallGate | None = None,
                       arm_cancel: Event | None = None,
+                      session_binding: SessionBinding | None = None,
+                      session_placement: SessionPlacement | None = None,
+                      peer_store=None,
+                      peer_cpu=None,
+                      base_cache_receipt=None,
                       ) -> dict[str, Any]:
         session_case = session_case_for(arm, index)
         tool_sandbox = resolve_case_sandbox(session_case, arm.sandbox)
@@ -3479,15 +3589,41 @@ class ExperimentWorker:
         def progress_event(kind, identifier):
             if progress_control:
                 progress_control.event(session_id, kind, identifier)
+        verified_creation_roles = set()
         def priority_options(role):
             if priority_domain is None:
                 return {}
             def verify(sandbox_id):
                 evidence = priority_domain.verify(index, role, sandbox_id)
+                if session_binding is not None and role not in verified_creation_roles:
+                    from .base_cache import verify_created_mapping, observe_local_ssd_backing
+                    observed_at = time.monotonic()
+                    pids = [int(pid) for pid in (Path(evidence['cgroup'])/'cgroup.procs').read_text().split()]
+                    template = arm.runtime.template if role == 'runtime' else arm.sandbox.template
+                    mapping = verify_created_mapping(arm.resources, sandbox_id, template,
+                        receipt=base_cache_receipt, pids=pids, fail_on_miss=False)
+                    domain = session_binding.pending or session_binding.current
+                    backing = observe_local_ssd_backing(
+                        arm.resources.snapshot_scheduling_storage.local_roots[domain], template, pids)
+                    events.write({'event': 'created_template_backing', 'session_id': session_id,
+                        'case_id': arm.case.case_id, 'role': role, 'template': template,
+                        'sandbox_id': sandbox_id, 'compute_domain': domain,
+                        'group_index': index // arm.rollouts_per_case if arm.session_assignment is SessionAssignment.GROUPED else None,
+                        'rollout_index': index % arm.rollouts_per_case if arm.session_assignment is SessionAssignment.GROUPED else None,
+                        'warm_base': mapping, 'local_ssd_base': backing,
+                        'observation_seconds': time.monotonic()-observed_at})
+                    if arm.resources.base_template_cache == 'required' and not mapping.get('cache_hit'):
+                        raise RuntimeError(f'created {role} did not map its required prepared WARM base: {template}')
+                    verified_creation_roles.add(role)
+                if peer_cpu is not None:
+                    peer_cpu.register(session_id, role, evidence['cgroup'],
+                                      session_binding.pending or session_binding.current)
                 if progress_control:
+                    restore_domain = session_binding.restore_domain if session_binding else None
                     progress_control.register(
                         session_id, role, evidence['cgroup'],
-                        arm.resources.local_numa_node, coordinator,
+                        restore_domain.arm.resources.local_numa_node if restore_domain else arm.resources.local_numa_node,
+                        restore_domain.coordinator if restore_domain else coordinator,
                         cpu_idle=bool(evidence.get('cpu_qos', {}).get('cgroup', {}).get('effective_idle', 0)),
                     )
                     progress_control.generation(session_id, role, sandbox_id)
@@ -3599,6 +3735,10 @@ class ExperimentWorker:
                 if arm.resources.snapshot_residency_costs else None
             ),
             **priority_options('runtime'),
+            **({'storage_domain': session_binding.current,
+                'storage_domain_root': arm.resources.snapshot_scheduling_storage.local_roots[session_binding.current],
+                'peer_control_socket': arm.resources.snapshot_scheduling_storage.native_control_socket}
+               if session_binding else {}),
         )
         ssh_credentials = generate_ssh_credentials()
         tool_env = {
@@ -3653,6 +3793,10 @@ class ExperimentWorker:
                 if arm.resources.snapshot_residency_costs else None
             ),
             **priority_options('tool'),
+            **({'storage_domain': session_binding.current,
+                'storage_domain_root': arm.resources.snapshot_scheduling_storage.local_roots[session_binding.current],
+                'peer_control_socket': arm.resources.snapshot_scheduling_storage.native_control_socket}
+               if session_binding else {}),
         )
         if watermark_controller is not None:
             watermark_controller.register(session_id, lifecycle, runtime_lifecycle)
@@ -3667,6 +3811,211 @@ class ExperimentWorker:
         generated_model_requests: set[str] = set()
         generated_model_requests_lock = Lock()
         finalization_active = False
+        memory_leaves: dict[str, Path] = {}
+
+        def current_memory_samples():
+            if priority_domain is None:
+                return {}
+            def role_charge(role):
+                leaf = priority_domain.leaves.get((index, role))
+                if leaf is not None:
+                    memory_leaves[role] = leaf
+                else:
+                    # Native prepare briefly removes the published leaf. Keep
+                    # sampling the last verified cgroup until verify publishes
+                    # the new one; absence is not a zero-memory observation.
+                    leaf = memory_leaves[role]
+                node = (session_binding.restore_domain.arm.resources.local_numa_node
+                        if session_binding else arm.resources.local_numa_node)
+                return read_priority_memory_charge(leaf, node)
+            pair_charge = lambda: tuple(sum(values) for values in zip(
+                role_charge('tool'), role_charge('runtime')))
+            return {'tool_admission': lambda: role_charge('tool'),
+                    'create': pair_charge, 'restore': pair_charge}
+
+        def resume_peer_pair(role):
+            """Called under wait_lock before the ordinary restore reservation."""
+            nonlocal arm, coordinator, watermark_controller, numa_borrower
+            if session_binding is None:
+                return None
+            binding = session_binding
+            if binding.transition != 'stable':
+                raise RuntimeError(f'cannot resume session in {binding.transition} state')
+            # Tool remains paired with the destination already committed by
+            # Runtime. A partially swapped pair never chooses another node.
+            both_swapped = all(getattr(vm._state, 'value', vm._state) == 'swapped'
+                               for vm in binding.lifecycles.values())
+            if not both_swapped or role != 'runtime':
+                session_placement.resume_cpu(session_id, binding.current,
+                    timeout=arm.execution.arm_timeout_seconds)
+                return None
+            session_placement.suspend_pair(session_id, tool=lifecycle, runtime=runtime_lifecycle)
+            policy = arm.execution.resume_policy
+            candidates = session_placement.resume_candidates(session_id,
+                memory_mib=arm.resources.lifecycle_reservation_mib(arm.runtime.memory_mib))
+            if policy == 'home':
+                selected, decision = choose_resume(binding.current, candidates,
+                    policy=policy, threshold_seconds=arm.execution.migration_threshold_seconds)
+                events.write(binding.event('resume_placement_decision', **decision))
+                session_placement.resume_cpu(session_id, binding.current,
+                    timeout=arm.execution.arm_timeout_seconds)
+                return None
+            # Pending callback queues are separate from the coordinator's
+            # admitted claims. A request that arrives later waits on wait_lock
+            # and resolves the updated binding after this transaction.
+            with reservation_lock:
+                if pending_admissions or active_reservations:
+                    events.write(binding.event('resume_migration_rejected', reason='pending_tool_admission'))
+                    session_placement.resume_cpu(session_id, binding.current,
+                        timeout=arm.execution.arm_timeout_seconds)
+                    return None
+            if numa_borrower is not None and any(
+                    vm.sandbox_id in numa_borrower.borrowed() for vm in binding.lifecycles.values()):
+                events.write(binding.event('resume_migration_rejected', reason='shared_residency_retained'))
+                session_placement.resume_cpu(session_id, binding.current,
+                    timeout=arm.execution.arm_timeout_seconds)
+                return None
+            # Claim before any export/transfer, but keep the source authoritative.
+            epoch, transaction = binding.begin(binding.current)
+            source_domain = binding.domain
+            cpu_reserved = False
+            native_attempted = False
+            bound_target = False
+            try:
+                with ExitStack() as pins:
+                    for vm in binding.lifecycles.values():
+                        if vm.snapshot_pool is not None and vm._snapshot_key is not None:
+                            pins.enter_context(vm.snapshot_pool.consume_guard(vm._snapshot_key))
+                    manifests = {}
+                    for name, vm in binding.lifecycles.items():
+                        exported_at = time.monotonic()
+                        manifest = vm.export_paused_generation()
+                        manifests[name] = manifest
+                        events.write(binding.event('peer_replica_exported', role=name,
+                            snapshot_id=manifest.get('snapshot_id'), generation=vm._generation,
+                            export_seconds=time.monotonic()-exported_at))
+                    costs = arm.resources.snapshot_scheduling_storage.restore_costs
+                    pair_objects = {obj['object_id']: obj for manifest in manifests.values()
+                                    for obj in manifest['objects']}
+                    for node, evidence in candidates.items():
+                        inventories = [peer_store.estimate_missing(manifest, node)
+                                       for manifest in manifests.values()]
+                        unique_inventory = peer_store.estimate_missing(
+                            {'objects': list(pair_objects.values())}, node)
+                        missing_bytes = unique_inventory['payload_bytes']
+                        evidence.update(missing_payload_bytes=missing_bytes,
+                                        dependency_inventory=inventories,
+                                        unique_dependency_inventory=unique_inventory)
+                        if node != binding.current:
+                            disk = shutil.disk_usage(arm.resources.snapshot_scheduling_storage.local_roots[node])
+                            evidence.update(ssd_used_bytes=disk.used, ssd_capacity_bytes=disk.total,
+                                            ssd_missing_payload_bytes=missing_bytes)
+                            if disk.used + missing_bytes >= .85 * disk.total:
+                                evidence['eligible'] = False
+                                evidence['storage_rejection'] = 'projected_ssd_above_85_percent'
+                        if node == binding.current:
+                            evidence['artifact_seconds'] = 0.
+                        elif costs is not None:
+                            active = peer_store.active_transfers(binding.current, node)
+                            evidence.update(active_peer_transfers=active,
+                                artifact_seconds=(missing_bytes * (active + 1)
+                                    / (costs.effective_transfer_mib_per_second * 1024**2)
+                                    + len(manifests) * costs.import_seconds))
+                        else:
+                            evidence['artifact_seconds'] = None
+                        evidence['native_restore_seconds'] = costs.native_restore_seconds if costs else None
+                        if evidence['blocked'] and evidence['resource_wait_seconds'] is None and costs:
+                            evidence['resource_wait_seconds'] = costs.resource_wait_seconds
+                            evidence['resource_wait_source'] = 'frozen_calibration:' + costs.provenance
+                        evidence['cost_provenance'] = costs.provenance if costs else None
+                    selected, decision = choose_resume(binding.current, candidates,
+                        policy=policy, threshold_seconds=arm.execution.migration_threshold_seconds)
+                    events.write(binding.event('resume_placement_decision', **decision))
+                    if selected == binding.current:
+                        binding.fail(epoch, transaction, known_paused=True)
+                        session_placement.resume_cpu(session_id, binding.current,
+                            timeout=arm.execution.arm_timeout_seconds)
+                        return None
+                    binding.pending = selected
+                    events.write(binding.event('session_migration_staging'))
+                    replicas = {}
+                    for name, manifest in manifests.items():
+                        ready = peer_store.stage_replica(manifest, selected)
+                        replicas[name] = ready
+                        events.write(binding.event('peer_replica_ready', role=name,
+                            snapshot_id=manifest.get('snapshot_id'),
+                            local_replica_hit=bool(ready.get('cache_hit')),
+                            shared_warm_hits=ready.get('transfer', {}).get('shared_warm_hits')))
+                    # Each bind imports into the destination native catalog;
+                    # neither VM can execute before both imports have succeeded.
+                    for name, vm in binding.lifecycles.items():
+                        imported_at = time.monotonic()
+                        events.write(binding.event('peer_native_import_started', role=name,
+                            snapshot_id=manifests[name].get('snapshot_id')))
+                        imported = vm.bind_replica(replicas[name])
+                        bound_target = True
+                        events.write(binding.event('peer_native_import_completed', role=name,
+                            snapshot_id=manifests[name].get('snapshot_id'),
+                            import_seconds=time.monotonic()-imported_at,
+                            import_elapsed_seconds=imported.get('import_elapsed_seconds'),
+                            import_phase_seconds=imported.get('import_phase_seconds')))
+                destination = binding.restore_domain
+                session_placement.resume_cpu(session_id, selected,
+                    timeout=arm.execution.arm_timeout_seconds)
+                cpu_reserved = True
+                if priority_domain is not None:
+                    priority_domain.handoff_swapped_placement(index, destination.cpus,
+                        destination.arm.resources.local_numa_node,
+                        tool=lifecycle, runtime=runtime_lifecycle)
+                if watermark_controller is not None:
+                    watermark_controller.unregister(session_id)
+                for vm in binding.lifecycles.values():
+                    vm.cold_snapshot_root = destination.arm.resources.cold_snapshot_root
+                    vm.numa_borrower = destination.borrower
+                binding.mark_restoring(epoch, transaction)
+                if peer_cpu is not None:
+                    peer_cpu.handoff(session_id, selected)
+                events.write(binding.event('session_migration_restore_started'))
+                reservation = arm.resources.lifecycle_reservation_mib(arm.runtime.memory_mib)
+                native_attempted = True
+                elapsed, waited = destination.coordinator.restore(session_id, reservation,
+                    runtime_lifecycle.restore, arm.execution.arm_timeout_seconds)
+                binding.commit(epoch, transaction, memory_samples=current_memory_samples())
+                coordinator = destination.coordinator
+                # Retain the case-specific Runtime/Tool fields; only domain
+                # resource settings change at the authority transition.
+                arm = arm.model_copy(update={'resources': destination.arm.resources})
+                numa_borrower = destination.borrower
+                watermark_controller = destination.controller
+                if watermark_controller is not None:
+                    watermark_controller.register(session_id, lifecycle, runtime_lifecycle)
+                events.write(binding.event('session_migration_committed',
+                    previous_domain=source_domain.coordinator.demand_scope,
+                    source_domain=source_domain.coordinator.demand_scope,
+                    target_domain=selected, transaction_id=transaction,
+                    runtime_sandbox_id=runtime_lifecycle.sandbox_id,
+                    tool_sandbox_id=lifecycle.sandbox_id))
+                return {'elapsed': elapsed, 'reservation_wait': waited, 'reservation_mib': reservation}
+            except BaseException as exc:
+                # Source fallback is legal only before binding changed native
+                # state. An attempted restore is conservatively fenced, even
+                # when the transport returned an exception after remote work.
+                known_paused = not native_attempted and not bound_target
+                events.write(binding.event('session_migration_failed', error=str(exc),
+                    error_type=type(exc).__name__, native_attempted=native_attempted,
+                    source_authoritative=known_paused))
+                if binding.transaction_id == transaction:
+                    binding.fail(epoch, transaction, known_paused=known_paused)
+                if cpu_reserved and known_paused:
+                    session_placement.suspend_pair(session_id, tool=lifecycle, runtime=runtime_lifecycle)
+                raise
+
+        if session_binding is not None:
+            session_binding.lifecycles = {'runtime': runtime_lifecycle, 'tool': lifecycle}
+            runtime_lifecycle._session_resume_handler = resume_peer_pair
+            lifecycle._session_resume_handler = resume_peer_pair
+            runtime_lifecycle._session_binding = session_binding
+            lifecycle._session_binding = session_binding
 
         if arm.agent.driver is AgentDriver.OPENCLAW:
             if self.model_gateway is None:
@@ -3713,6 +4062,7 @@ class ExperimentWorker:
                 if runtime_lifecycle.resident:
                     return
                 started = time.time()
+                resume_started_monotonic = time.monotonic()
                 agent_pid_before = wait_state.get(
                     "runtime_agent_pid_before_pause"
                 )
@@ -3753,6 +4103,11 @@ class ExperimentWorker:
                         f"{agent_pid_before} -> {agent_pid_after}"
                     )
                 finished = time.time()
+                if session_binding is not None:
+                    events.write(session_binding.event('session_runtime_resume_ready',
+                        role='runtime', request_id=event.get('request_id'),
+                        service_seconds=time.monotonic()-resume_started_monotonic,
+                        agent_pid=agent_pid_after))
                 wait_state.update({
                     "runtime_restore_started_at": started,
                     "runtime_restore_completed_at": finished,
@@ -3983,20 +4338,10 @@ class ExperimentWorker:
                 # after both leaves have been published; configured-capacity
                 # admission above does not need these measurements.
                 if self._priority_domain is not None:
-                    tool_leaf = self._priority_domain.leaves[index, 'tool']
-                    runtime_leaf = self._priority_domain.leaves[index, 'runtime']
+                    memory_samples = current_memory_samples()
                     coordinator.register_memory(
                         session_id,
-                        tool=lambda leaf=tool_leaf: read_priority_memory_charge(
-                            leaf, arm.resources.local_numa_node),
-                        lifecycle=lambda tool=tool_leaf, runtime=runtime_leaf: tuple(
-                            sum(values) for values in zip(
-                                read_priority_memory_charge(
-                                    tool, arm.resources.local_numa_node),
-                                read_priority_memory_charge(
-                                    runtime, arm.resources.local_numa_node),
-                            )
-                        ),
+                        tool=memory_samples['tool_admission'], lifecycle=memory_samples['create'],
                     )
                 pair_memory_registered = time.monotonic_ns()
                 tool_create_reservation_wait = 0.0 if lifetime else pair_wait
@@ -5244,6 +5589,9 @@ class ExperimentWorker:
                 )
                 finalization_active = False
             timeline["sandbox_cleanup_start"] = time.time()
+            if peer_cpu is not None:
+                cleanup_step('peer CPU sample', lambda: events.write(
+                    {'event': 'peer_cpu_sample', **peer_cpu.sample()}))
             if gateway_session is not None and self.model_gateway is not None:
                 gateway_drained = cleanup_step(
                     "model gateway session",
@@ -5365,18 +5713,32 @@ class ExperimentWorker:
                                  lifecycle: CubeSandboxLifecycle,
                                  coordinator: PolicyCoordinator, events: EventWriter,
                                  *, role: str = "tool") -> float:
+        resume_started = time.monotonic()
+        binding = getattr(lifecycle, '_session_binding', None)
+        if binding is not None:
+            events.write(binding.event('session_resume_requested', role=role))
+        resume_handler = getattr(lifecycle, '_session_resume_handler', None)
+        peer_result = resume_handler(role) if resume_handler is not None else None
         reservation_mib = arm.resources.lifecycle_reservation_mib(
             arm.runtime.memory_mib if role == "runtime" else arm.sandbox.memory_mib
         )
-        elapsed, reservation_wait = coordinator.restore(
-            session_id, reservation_mib, lifecycle.restore,
-            arm.execution.arm_timeout_seconds,
-        )
+        if peer_result is not None:
+            elapsed = peer_result['elapsed']
+            reservation_wait = peer_result['reservation_wait']
+            reservation_mib = peer_result['reservation_mib']
+        else:
+            elapsed, reservation_wait = coordinator.restore(
+                session_id, reservation_mib, lifecycle.restore,
+                arm.execution.arm_timeout_seconds,
+            )
         events.write({"event": "sandbox_restored", "session_id": session_id,
                       "role": role, "service_seconds": elapsed,
                       "materialization_reservation_mib": reservation_mib,
                       "materialization_reservation_wait_seconds": reservation_wait,
-                      "lifecycle_timing": lifecycle.timings[-1]})
+                      "lifecycle_timing": lifecycle.timings[-1],
+                      **({'epoch': binding.epoch, 'compute_domain': binding.current,
+                          'resume_to_ready_seconds': time.monotonic() - resume_started}
+                         if binding is not None else {})})
         return elapsed
 
     @operation('prepare.total')
@@ -5580,9 +5942,11 @@ class ExperimentWorker:
                 configured_traces[0]["reference"] if len(configured_traces) == 1 else None
             ),
             "session_assignment": arm.session_assignment.value,
+            "rollouts_per_case": arm.rollouts_per_case,
             "random_seed": arm.execution.random_seed,
             "arrival_schedule": {
                 "kind": arm.execution.arrival_schedule.value,
+                "normal_arrival_std_seconds": arm.execution.normal_arrival_std_seconds,
                 "stagger_interval_seconds": arm.execution.stagger_interval_seconds,
                 "poisson_arrival_window_fraction": (
                     arm.execution.poisson_arrival_window_fraction

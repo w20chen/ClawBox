@@ -84,6 +84,19 @@ def capacity_report(node: dict, settings: dict, demand: dict) -> dict:
 
 def storage_capacity_report(profile: dict) -> dict:
     """Project physical CoW growth below Cube's fixed rejection threshold."""
+    storage = profile.get('snapshot_scheduling_storage') or {}
+    if storage.get('topology') == 'peer-local-ssd':
+        # A migration may place every live pair in either domain. Reserve the
+        # full offered growth in each pool, not half by an assumed balance.
+        domains = {
+            node: storage_capacity_report({
+                **profile, 'snapshot_scheduling_storage': None,
+                'cubelet_storage_root': root,
+            }) for node, root in storage['local_roots'].items()
+        }
+        return {'ready': bool(domains) and all(r['ready'] for r in domains.values()),
+                'topology': 'peer-local-ssd', 'domains': domains,
+                'accounting': 'per-domain physical filesystem use plus conservative whole-cohort CoW headroom'}
     path = Path(profile.get('cubelet_storage_root') or '/data/cubelet/storage')
     usage = shutil.disk_usage(path)
     vm_count = int(profile['cube_capacity_demand']['vm_count'])

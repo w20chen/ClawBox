@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import random
 import time
 from contextlib import contextmanager, nullcontext
@@ -70,6 +72,9 @@ class CubeSandboxLifecycle:
 
     def __init__(self, client: CubeSandboxClient, *, template: str,
                  node_name: str, ownership: Ownership,
+                 storage_domain: str | None = None,
+                 storage_domain_root: str | None = None,
+                 peer_control_socket: str | None = None,
                  allow_internet_access: bool = True,
                  env_vars: Mapping[str, str] | None = None,
                  network_allow_out: list[str] | None = None,
@@ -108,6 +113,11 @@ class CubeSandboxLifecycle:
         self.client = client
         self.template = template
         self.node_name = node_name
+        self.storage_domain = storage_domain
+        self.storage_domain_root = storage_domain_root
+        self.peer_control_socket = peer_control_socket
+        self._replica_memory_path: str | None = None
+        self._peer_retired_warm_paths: set[str] = set()
         self.ownership = ownership
         self.allow_internet_access = allow_internet_access
         self.env_vars = dict(env_vars or {})
@@ -333,6 +343,7 @@ class CubeSandboxLifecycle:
                                     network_allow_out=self.network_allow_out or None,
                                     network_deny_out=self.network_deny_out or None,
                                     create_trace=attempt["spans"],
+                                    **({"storage_domain": self.storage_domain} if self.storage_domain else {}),
                                 )
                         break
                     except Exception as exc:
@@ -575,6 +586,7 @@ class CubeSandboxLifecycle:
                         self._verify_warm_files_removed()
                         self.snapshot_pool.remove(predecessor)
                     self._snapshot_key = key
+                    self._replica_memory_path = path
                     self._snapshot_tier = tier
                     self._tier = tier
                 self._state = SandboxState.SWAPPED
@@ -738,6 +750,18 @@ class CubeSandboxLifecycle:
             * state_bytes / 1024**3
         )
 
+    def _release_peer_retired_warm_paths(self) -> None:
+        import shutil
+        for retired in self._peer_retired_warm_paths:
+            if not self.warm_snapshot_root or not Path(retired).resolve().is_relative_to(Path(self.warm_snapshot_root).resolve()):
+                raise LifecycleError("retired WARM snapshot escaped managed root")
+            for suffix in ("", ".lineage.json", ".metrics.json", ".zstd-pages.json"):
+                Path(retired + suffix).unlink(missing_ok=True)
+            for suffix in (".layers", ".zstd-pages"):
+                if Path(retired + suffix).exists():
+                    shutil.rmtree(retired + suffix)
+        self._peer_retired_warm_paths.clear()
+
     def _spill_to_cold(self, manifest: SnapshotManifest) -> None:
         with self._lock:
             if (self._state is not SandboxState.SWAPPED or self.sandbox is None or
@@ -764,6 +788,7 @@ class CubeSandboxLifecycle:
                         self.sandbox, tier=SnapshotTier.COLD.value,
                         memory_snapshot_path=destination,
                         generation=manifest.key.generation,
+                        **({"storage_domain": self.storage_domain} if self.storage_domain else {}),
                     )
                 if self.snapshot_compression == "zstd-page":
                     from .snapshot import read_snapshot_metadata
@@ -779,9 +804,11 @@ class CubeSandboxLifecycle:
                             native_snapshot_metrics=native_metrics,
                         ),
                     }
+                self._release_peer_retired_warm_paths()
                 self._verify_warm_files_removed()
                 self._tier = SnapshotTier.COLD
                 self._snapshot_tier = SnapshotTier.COLD
+                self._replica_memory_path = destination
                 self._record(
                     "spill", before, before, started_wall, started_mono,
                     host_memory_before=host_memory_before,
@@ -819,6 +846,48 @@ class CubeSandboxLifecycle:
                 yield
                 return
 
+    def export_paused_generation(self) -> dict:
+        from .peer_replica import export_snapshot
+        with self._lock:
+            if self._state is not SandboxState.SWAPPED:
+                raise LifecycleError("peer export requires a definitively SWAPPED sandbox")
+            if not self.storage_domain or not self.storage_domain_root or not self.peer_control_socket:
+                raise LifecycleError("peer storage domain/control socket is not configured")
+            root = self.warm_snapshot_root if self._snapshot_tier is SnapshotTier.WARM else self.cold_snapshot_root
+            path = self._replica_memory_path or f"{root.rstrip('/')}/{self.sandbox_id}/{self.role}-g{self._generation}.mem"
+            return export_snapshot(self.peer_control_socket, storage_domain=self.storage_domain,
+                                   domain_root=self.storage_domain_root, memory_path=path,
+                                   shared_dram_root=self.warm_snapshot_root)
+
+    def bind_replica(self, ready: dict) -> dict:
+        from .peer_replica import import_replica
+        with self._lock:
+            if self._state is not SandboxState.SWAPPED:
+                raise LifecycleError("peer binding requires a definitively SWAPPED sandbox")
+            if not self.peer_control_socket:
+                raise LifecycleError("peer control socket is not configured")
+            target = ready["storage_domain"]
+            # The package lives below <domain>/.clawbox-peer/replicas/<id>.
+            package = Path(ready["target_root"])
+            domain_root = package.parents[2]
+            result = import_replica(self.peer_control_socket, ready, str(domain_root),
+                                    compression_binary=self.snapshot_compression_binary)
+            if self._snapshot_tier is SnapshotTier.WARM and self._snapshot_key is not None and self.snapshot_pool:
+                old_path = self.snapshot_pool.manifest(self._snapshot_key).path
+                if old_path != result["memory_path"]:
+                    self.snapshot_pool.rebind_path(self._snapshot_key, expected_path=old_path,
+                                                   path=result["memory_path"])
+                    self._warm_paths.discard(old_path)
+                    self._warm_paths.add(result["memory_path"])
+                    self._peer_retired_warm_paths.add(old_path)
+                    # A Tool can move A->B->A while remaining paused. Reusing
+                    # its original A replica makes that path authoritative again.
+                    self._peer_retired_warm_paths.discard(result["memory_path"])
+            self.storage_domain = target
+            self.storage_domain_root = str(domain_root)
+            self._replica_memory_path = result["memory_path"]
+            return result
+
     def restore(self) -> float:
         with self._snapshot_access():
             if self.sandbox_id is None or self._state is not SandboxState.SWAPPED:
@@ -844,7 +913,7 @@ class CubeSandboxLifecycle:
                     )
                     if not snapshot_root:
                         raise RuntimeError("compressed snapshot root is unavailable")
-                    compressed_path = (
+                    compressed_path = self._replica_memory_path or (
                         f"{snapshot_root.rstrip('/')}/{self.sandbox_id}/"
                         f"{self.role}-g{self._snapshot_key.generation}.mem"
                     )
@@ -863,6 +932,7 @@ class CubeSandboxLifecycle:
                     self.sandbox = self.client.connect_sandbox(
                         self.sandbox_id,
                         snapshot_mechanism=self.snapshot_mechanism,
+                        **({"storage_domain": self.storage_domain} if self.storage_domain else {}),
                     )
                 verified = None
                 if self.verify_cgroup is not None:
@@ -901,7 +971,9 @@ class CubeSandboxLifecycle:
                     self._snapshot_tier = None
                 self._tier = SnapshotTier.LOCAL
                 self._state = SandboxState.RUNNING
-                from pathlib import Path
+                # Native success makes the target hardlinks authoritative. Drop
+                # source names only now; target/successor inode references remain.
+                self._release_peer_retired_warm_paths()
                 from clawbox.experiments.memory import SandboxRSSSampler
                 with self._measure_stage(stage_seconds, "restore_fault_observation_s"):
                     try:
@@ -1079,6 +1151,16 @@ class CubeSandboxLifecycle:
                     self.client.kill_sandbox(self.sandbox_id)
                     if self.numa_borrower is not None:
                         self.numa_borrower.release_destroyed(self.sandbox_id)
+                # A staged Tool may be bound locally while Master still owns its
+                # source paused handle. After kill succeeds, release our private
+                # shared-RAM aliases as well as the retired source names.
+                if self.warm_snapshot_root:
+                    alias_root = Path(self.warm_snapshot_root).resolve() / ".peer-replicas"
+                    self._peer_retired_warm_paths.update(
+                        path for path in self._warm_paths
+                        if Path(path).resolve().is_relative_to(alias_root)
+                    )
+                self._release_peer_retired_warm_paths()
                 # Cube only knows its native snapshot files.  Compressed page
                 # containers are owned by ClawBox and must be removed before
                 # WARM capacity is credited as released.
@@ -1090,8 +1172,10 @@ class CubeSandboxLifecycle:
                             and self._snapshot_tier is SnapshotTier.COLD
                             and self.cold_snapshot_root and self.sandbox_id):
                         remove_compressed_snapshot(
-                            f"{self.cold_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
-                            f"{self.role}-g{self._snapshot_key.generation}.mem"
+                            self._replica_memory_path or (
+                                f"{self.cold_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
+                                f"{self.role}-g{self._snapshot_key.generation}.mem"
+                            )
                         )
                 self._verify_warm_files_removed()
                 if (self._snapshot_key is not None and

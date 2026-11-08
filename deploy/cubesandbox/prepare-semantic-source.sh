@@ -41,6 +41,7 @@ CGROUP_BIRTH_PATCH_FILE=$SCRIPT_DIR/cgroup-birth.patch
 COLD_STREAM_PATCH_FILE=$SCRIPT_DIR/cold-snapshot-streaming.patch
 MEMORY_RECLAIM_PATCH_FILE=$SCRIPT_DIR/memory-snapshot-reclaim.patch
 BASE_CACHE_PATCH_FILE=$SCRIPT_DIR/base-template-warm-cache.patch
+PEER_DOMAIN_PATCH_FILE=$SCRIPT_DIR/peer-local-storage-domain.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -74,6 +75,7 @@ PATCH_FILES=(
   "$COLD_STREAM_PATCH_FILE"
   "$MEMORY_RECLAIM_PATCH_FILE"
   "$BASE_CACHE_PATCH_FILE"
+  "$PEER_DOMAIN_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -162,6 +164,19 @@ apply_memory_reclaim_patch() {
   fi
 }
 
+apply_peer_domain_patch() {
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$PEER_DOMAIN_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$PEER_DOMAIN_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$PEER_DOMAIN_PATCH_FILE"
+  fi
+}
+
+if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$PEER_DOMAIN_PATCH_FILE" >/dev/null 2>&1; then
+  require_current_patchset "$PATCHSET_STAMP" prepared
+  echo "standalone peer-domain patch set already prepared: $SOURCE_DIR"
+  exit 0
+fi
+
 apply_base_cache_patch() {
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$BASE_CACHE_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$BASE_CACHE_PATCH_FILE"
@@ -178,6 +193,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
     require_current_patchset "$PATCHSET_PENDING" interrupted
   fi
   git -C "$SOURCE_DIR" diff --check
+  apply_peer_domain_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -196,6 +212,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   apply_memory_reclaim_patch
   apply_base_cache_patch
   git -C "$SOURCE_DIR" diff --check
+  apply_peer_domain_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -283,6 +300,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   apply_cold_stream_patch
   apply_memory_reclaim_patch
   apply_base_cache_patch
+  apply_peer_domain_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone priority patch set already prepared: $SOURCE_DIR"
@@ -391,6 +409,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
   apply_cold_stream_patch
   apply_memory_reclaim_patch
   apply_base_cache_patch
+  apply_peer_domain_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -462,6 +481,7 @@ apply_cold_stream_patch
 apply_memory_reclaim_patch
 apply_once "$BASE_CACHE_PATCH_FILE" "fixed shared-DRAM base mappings and buffered lineage reads"
 
+apply_peer_domain_patch
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
 rm -f "$PATCHSET_PENDING"

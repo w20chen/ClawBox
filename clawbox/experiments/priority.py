@@ -329,6 +329,35 @@ class PriorityDomain:
             if self.topology_mode == 'c2' and cpus is None:
                 raise RuntimeError('C2 Tool-call placement requires an explicit compute CPU pool')
 
+    def handoff_swapped_placement(self, index: int, cpus: str, node: int, *,
+                                  tool, runtime) -> None:
+        """Change only a completely paused pair; native restore verifies new leaves."""
+        with self._topology_sessions[index], self._topology_lock:
+            if self.legacy:
+                raise RuntimeError('cross-node handoff requires native Cube cgroups')
+            for vm in (tool, runtime):
+                state = getattr(vm, '_state', None)
+                if getattr(state, 'value', state) != 'swapped':
+                    raise RuntimeError('CPU handoff requires both roles SWAPPED')
+            keys = ((index, 'runtime'), (index, 'tool'))
+            if any(self._active_calls.get(key) or key in self._pending_started
+                   or key in self._pending_vcpus for key in keys):
+                raise RuntimeError('CPU handoff has active or pending Tool assignments')
+            previous = self.placements.get(index)
+            self.placements[index] = cpus, node
+            for key in keys:
+                self._vcpu_threads.pop(key, None)
+                self._full_masks.pop(key, None)
+                self._fine_masks.pop(key, None)
+                self._preferred_groups.pop(key, None)
+                self._pressure_previous.pop(key, None)
+                self._pressure_streak.pop(key, None)
+                self._expanded.discard(key)
+            self._record_topology_event({
+                'event': 'session_cpu_handoff', 'session_index': index,
+                'previous': previous, 'cpus': cpus, 'numa_node': node,
+            })
+
     def acquire_tool_call(self, index: int, execution_id: str, *, vcpus: int) -> dict | None:
         """Register one eligible exec and apply C2 after its configured delay.
 

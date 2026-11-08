@@ -191,8 +191,10 @@ def test_public_host_plan_roundtrips_linux_paths_on_any_cli_host(tmp_path: Path)
     path = tmp_path / "snapshot-host.yaml"
     init_host_plan(path)
     plan = load_host_plan(path)
-    assert plan.nodes["node0"].local_mount == "/mnt/clawbox-snapshot-node0"
-    assert plan.nodes["node1"].shared_mount == "/mnt/clawbox-snapshot-shared-node1"
+    assert plan.schema_version == 2
+    assert plan.nodes["node0"].local_mount == "/mnt/clawbox-peer-node0"
+    assert plan.nodes["node1"].filesystem_uuid == "REVIEW-UUID-1"
+    assert plan.network.bandwidth_mbit_per_direction == 400000
 
 
 def test_formal_specs_are_fixed_16_by_8_with_two_repetitions():

@@ -15,12 +15,16 @@ def _offered_capacity_text(spec: Any, concurrency: int) -> str:
     """Describe configured VM capacity for the actual session assignment."""
     cases = load_workload_cases(spec.workload)
     runtime_mib = spec.runtime.memory_mib
-    if spec.workload.session_assignment.value == "round_robin":
+    assignment = spec.workload.session_assignment.value
+    if assignment in {'round_robin', 'unique', 'grouped'}:
+        selected = (tuple(cases[index // spec.workload.rollouts_per_case] for index in range(concurrency))
+                    if assignment == 'grouped' else cases[:concurrency] if assignment == 'unique'
+                    else tuple(cases[index % len(cases)] for index in range(concurrency)))
         offered_mib = sum(
             runtime_mib + resolve_case_sandbox(
-                cases[index % len(cases)], spec.sandbox,
+                case, spec.sandbox,
             ).memory_mib
-            for index in range(concurrency)
+            for case in selected
         )
         return f"{offered_mib / 1024:g} GiB"
     offered = [
@@ -262,6 +266,8 @@ def write_memory_timeseries(run_root: Path) -> Path:
 def write_run_report_artifacts(run_root: Path) -> tuple[Path, Path]:
     """Write the human report and a plot-ready whole-run memory trace."""
     results = _completed_results(run_root)
+    from .peer_reporting import write_peer_artifacts
+    write_peer_artifacts(run_root, results, _event_path)
     if any(
         (result.get("provenance") or {}).get("scenario")
         == "snapshot-aware-scheduling-across-local-and-shared-storage"
@@ -504,6 +510,8 @@ def render_run_report(run_root: Path) -> str:
         f"# Experiment {experiment_id}", "",
         f"Run: `{run_root.name}`", "",
     ]
+    from .peer_reporting import render_peer_lines
+    lines.extend(render_peer_lines(run_root, [row['result'] for row in rows], _event_path))
     spec_path = run_root / "experiment.yaml"
     if spec_path.is_file():
         spec = load_experiment(spec_path)

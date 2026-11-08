@@ -75,6 +75,7 @@ class SessionPlacement:
         self.condition = next(iter(domains.values())).coordinator.demand.condition
         self.capacity = {key: len(parse_cpu_list(d.cpus))*cpu_overcommit for key, d in domains.items()}
         self.sessions = {}
+        self.suspended = {}
         self.waiting = set()
         self.template_affinity_decisions = 0
         self.template_cache_hits = 0
@@ -302,11 +303,97 @@ class SessionPlacement:
                 cpu_psi=None, bandwidth_utilization=None,
                 running_vms=sum(int(s.lifecycle.resident)+int(s.runtime_lifecycle is not None and s.runtime_lifecycle.resident)
                                 for s in sessions[key]),
+                resident_pairs=sum(bool(s.lifecycle.resident and s.runtime_lifecycle is not None and s.runtime_lifecycle.resident)
+                                   for s in sessions[key]),
+                resident_sessions=sum(bool(s.lifecycle.resident or (s.runtime_lifecycle is not None and s.runtime_lifecycle.resident))
+                                      for s in sessions[key]),
                 observation_seconds=time.monotonic()-captured)
         return result
 
     def release(self, session_id):
         with self.condition:
             self.sessions.pop(session_id, None)
+            self.suspended.pop(session_id, None)
             self._memory_feedback.clear()
             self.condition.notify_all()
+
+    def suspend_pair(self, session_id, *, tool, runtime):
+        """Release offered CPU only once both native roles are confirmed paused."""
+        with self.condition:
+            for vm in (tool, runtime):
+                state = getattr(vm, '_state', None)
+                if getattr(state, 'value', state) != 'swapped':
+                    return False
+            item = self.sessions.pop(session_id, None)
+            if item is None:
+                return session_id in self.suspended
+            self.suspended[session_id] = item
+            self._memory_feedback.clear()
+            self.condition.notify_all()
+        self.emit({'event': 'session_cpu_lease_released', 'session_id': session_id,
+                   'compute_domain': item[0], 'vcpus': item[1],
+                   'reason': 'both_swapped'})
+        return True
+
+    def resume_cpu(self, session_id, target, *, timeout):
+        """Reserve the complete pair once; memory stays in DemandLedger.restore."""
+        started = time.monotonic()
+        with self.condition:
+            existing = self.sessions.get(session_id)
+            if existing is not None:
+                if existing[0] != target:
+                    raise RuntimeError('cannot move a resident CPU lease')
+                return 0.0
+            old = self.suspended[session_id]
+            if old[1] > self.capacity[target]:
+                raise ValueError('restored pair exceeds target CPU capacity')
+            while True:
+                existing = self.sessions.get(session_id)
+                if existing is not None:
+                    if existing[0] != target:
+                        raise RuntimeError('concurrent resume selected a different target')
+                    return time.monotonic() - started
+                offered = sum(item[1] for item in self.sessions.values() if item[0] == target)
+                if offered + old[1] <= self.capacity[target]:
+                    break
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise AdmissionTimeout(f'CPU restore lease timed out for {session_id}')
+                self.condition.wait(min(.2, remaining))
+            self.sessions[session_id] = (target, old[1], old[2])
+            self.suspended.pop(session_id)
+            self._memory_feedback.clear()
+        waited = time.monotonic() - started
+        self.emit({'event': 'session_cpu_lease_acquired', 'session_id': session_id,
+                   'compute_domain': target, 'vcpus': old[1], 'wait_seconds': waited})
+        return waited
+
+    def resume_candidates(self, session_id, *, memory_mib):
+        """Current hard capacity and measured queue evidence, without future replay."""
+        with self.condition:
+            item = self.suspended.get(session_id) or self.sessions[session_id]
+            result = {}
+            for key, domain in self.domains.items():
+                c = domain.coordinator
+                offered = sum(row[1] for sid, row in self.sessions.items()
+                              if row[0] == key and sid != session_id)
+                sampled_at, used, pending, reasons = self._placement_memory(key, memory_mib)
+                # Restore does not allocate the one-time creation headroom.
+                reasons = c._pressure_reasons(memory_mib*MIB)
+                waits = c._lifecycle_wait_samples['restore']
+                # Historical admitted restore waits provide a causal estimate.
+                # With no measured waits, blocked capacity is unknown, not zero.
+                blocked = offered + item[1] > self.capacity[key] or bool(reasons)
+                estimate = (sum(waits[-32:]) / len(waits[-32:]) if waits else None)
+                result[key] = {
+                    'eligible': item[1] <= self.capacity[key]
+                                and memory_mib*MIB+c.operation_headroom_bytes <= c.budget_bytes,
+                    'blocked': blocked, 'offered_vcpus': offered,
+                    'cpu_capacity': self.capacity[key], 'safety_reasons': list(reasons),
+                    'resource_wait_seconds': estimate if blocked else 0.0,
+                    'resource_wait_source': 'observed_restore_wait_mean_last32' if blocked and waits
+                                            else 'unknown' if blocked else 'currently_available',
+                    'resident_bytes': used, 'outstanding_nominal_bytes': pending,
+                    'sample_age_seconds': max(0., time.monotonic()-sampled_at),
+                }
+            return result

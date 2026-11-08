@@ -34,6 +34,35 @@ def base():
                 comparison=dict(recipe='custom', arms=[dict(name='custom')]))
 
 
+def test_peer_resume_policies_roundtrip_without_branching_or_global_cold_root():
+    raw = base()
+    resources = raw['environment']['resources']
+    resources['cold_snapshot_root'] = None
+    resources['snapshot_scheduling_storage'] = dict(
+        topology='peer-local-ssd', transport='peer-network',
+        local_roots={'node0': '/peer/n0', 'node1': '/peer/n1'},
+        local_capacity_mib_by_node={'node0': 16384, 'node1': 16384},
+        transfer_endpoints={n: dict(netns='peer-'+n, address=a) for n, a in
+                            [('node0', '10.240.0.1'), ('node1', '10.240.0.2')]},
+        warm_root=resources['warm_snapshot_root'],
+        warm_capacity_mib=resources['warm_memory_capacity_mib'],
+        host_receipt='/peer/receipt.json',
+        native_control_socket='/peer/native.sock',
+        restore_costs=dict(provenance='unit-test-only', effective_transfer_mib_per_second=100,
+                           import_seconds=.1, native_restore_seconds=.2, resource_wait_seconds=1),
+    )
+    raw['mechanisms']['idle_reclaim'].update(policy='wait', scope='agent_and_tool')
+    raw['comparison']['arms'] = [dict(name=p, override={'placement.resume_policy': p})
+                                for p in ('home', 'load-aware', 'cost-aware')]
+    spec = ExperimentSpec.model_validate(raw)
+    assert {a.execution.resume_policy for a in expand_matrix(spec)} == {'home', 'load-aware', 'cost-aware'}
+    assert all(a.execution.snapshot_branching is None for a in expand_matrix(spec))
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    raw['mechanisms']['idle_reclaim']['scope'] = 'tool'
+    with pytest.raises(ValueError, match='agent_and_tool'):
+        ExperimentSpec.model_validate(raw)
+
+
 def test_session_cpu_slots_roundtrip_bound_workers_and_reject_overlap():
     from clawbox.experiments.worker import session_worker_count
     raw = base()

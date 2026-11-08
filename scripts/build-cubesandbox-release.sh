@@ -8,6 +8,7 @@ jobs=1
 mirror=upstream
 go_proxy=${GOPROXY:-}
 rustup_init_url=${RUSTUP_INIT_URL:-}
+peer_components=0
 while (( $# )); do
   case "$1" in
     --help)
@@ -15,7 +16,9 @@ while (( $# )); do
       echo 'Prepares patched v0.7.0 sources, checks asset hashes, and builds a release. Does not install services.'
       echo 'Use CUBE_SOURCE_URL for a reachable source mirror and BUILDX_CONFIG for an alternate writable build cache.'
       echo 'Use --go-proxy URL to select the Go module proxy (cn defaults to https://goproxy.cn,direct).'
+      echo 'Use --peer-components --source DIR to build only matching peer API/Master/Cubelet against an existing builder image; no guest assets or Shim rebuild.'
       exit 0 ;;
+    --peer-components) peer_components=1; shift ;;
     --direct-network)
       unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
       shift ;;
@@ -26,6 +29,13 @@ while (( $# )); do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if (( peer_components )); then
+  export CUBE_SOURCE_DIR="$source_dir"
+  bash "$project/deploy/cubesandbox/prepare-semantic-source.sh"
+  cd "$source_dir"
+  make builder-run BUILDER_CMD='cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && mkdir -p bin && go build -o bin/cubelet-incremental ./cmd/cubelet && go test -c -o bin/peer-storage.test ./storage && cd /workspace/CubeMaster && mkdir -p bin && CGO_ENABLED=0 go build -o bin/cubemaster-incremental ./cmd/cubemaster && cd /workspace/CubeAPI && cargo build --release --locked'
+  exit 0
+fi
 [[ -n "$assets" && -f "$assets/SHA256SUMS" && -s "$assets/kernel/vmlinux-bm" ]] || {
   echo 'Supply --assets with the exported SHA256SUMS, guest-images.tar and kernel directory.' >&2; exit 2;
 }

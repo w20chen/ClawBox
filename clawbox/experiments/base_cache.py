@@ -1,7 +1,8 @@
 """Fixed, prewarmed template RAM cache for the standalone experiment workflow.
 
 The SSD inode remains the snapshot identity. Only native read mappings use the
-cache. Preparation and verification happen before arrivals, never per VM.
+cache. Preparation happens before arrivals; optional creation observations read
+only the known VM process mappings against the already validated registry.
 """
 from __future__ import annotations
 
@@ -30,10 +31,14 @@ class BaseCachePlan(StrictFrozenModel):
     capacity_mib: int = Field(gt=0)
     vmm_binary: str
     templates: dict[str, str] = Field(min_length=1)
+    aliases: dict[str, list[str]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def valid_paths(self):
-        for value in (self.warm_root, self.vmm_binary, *self.templates.values()):
+        if set(self.aliases) - set(self.templates):
+            raise ValueError("base cache aliases must name selected template identities")
+        for value in (self.warm_root, self.vmm_binary, *self.templates.values(),
+                      *(p for paths in self.aliases.values() for p in paths)):
             if not value.startswith("/") or ".." in Path(value).parts:
                 raise ValueError(f"base cache paths must be absolute without '..': {value}")
         if any(not key.strip() for key in self.templates):
@@ -57,17 +62,29 @@ def init_plan(output: Path, *, spec_path: Path, templates: list[str],
         raise ValueError("cache capacity_mib cannot exceed the experiment WARM budget")
     storage = Path(resources.cubelet_storage_root) / 'xfs'
     files = {}
+    aliases = {}
     binaries = set()
+    peer = resources.snapshot_scheduling_storage
+    roots = ([Path(root) for _, root in sorted(peer.local_roots.items())]
+             if peer is not None and peer.topology == 'peer-local-ssd' else [storage])
     for template in templates:
         if Path(template).name != template or template in {'.', '..'}:
             raise ValueError("template must be a native catalog identity")
-        catalog = storage / 'snapshots' / template / 'metadata' / 'catalog.json'
+        catalog = roots[0] / 'snapshots' / template / 'metadata' / 'catalog.json'
         value = json.loads(catalog.read_text())
         volume = value['memory_vol']
-        if (value['snapshot_id'] != template or value['memory_kind'] != 'volume'
-                or Path(volume).name != volume or volume in {'.', '..'}):
-            raise ValueError(f"unsupported/mismatched template RAM catalog: {catalog}")
-        memory = storage / 'objects' / 'volumes' / volume / volume
+        def memory_path(root, metadata):
+            vol = metadata['memory_vol']
+            if metadata['snapshot_id'] != template:
+                raise ValueError(f"mismatched template RAM catalog: {template}")
+            if metadata['memory_kind'] == 'volume' and Path(vol).name == vol and vol not in {'.', '..'}:
+                return root / 'objects' / 'volumes' / vol / vol
+            if metadata['memory_kind'] == 'clawbox-direct-file':
+                direct = Path(vol)
+                if direct.is_absolute() and direct.resolve().is_relative_to(root.resolve()):
+                    return direct
+            raise ValueError(f"unsupported/out-of-domain template RAM catalog: {template}")
+        memory = memory_path(roots[0], value)
         identity(memory)
         if Path(str(memory) + '.lineage.json').exists():
             raise ValueError("select an initial template RAM image, not a layered pause snapshot")
@@ -78,11 +95,14 @@ def init_plan(output: Path, *, spec_path: Path, templates: list[str],
                   storage.parent.parent / 'root/component_versions/cube-shim' / version / 'bin/containerd-shim-cube-rs')
         binaries.add(str(binary.resolve(strict=True)))
         files[template] = str(memory)
+        if len(roots) > 1:
+            aliases[template] = [str(memory_path(root, json.loads(
+                (root / 'snapshots' / template / 'metadata/catalog.json').read_text()))) for root in roots[1:]]
     if len(binaries) != 1:
         raise ValueError("selected templates use different Shim binaries; prepare a set using one compatible native version")
     plan = BaseCachePlan(warm_root=resources.warm_snapshot_root,
         numa_node=resources.warm_numa_node, capacity_mib=capacity_mib,
-        vmm_binary=binaries.pop(), templates=files)
+        vmm_binary=binaries.pop(), templates=files, aliases=aliases)
     with output.open('x') as stream:
         yaml.safe_dump(plan.model_dump(mode='json'), stream, sort_keys=False)
     return {'config': str(output), 'plan': plan.model_dump(mode='json'),
@@ -202,6 +222,13 @@ def preview(plan: BaseCachePlan) -> dict:
         item = files.setdefault(key, {"source": str(path), "source_identity": info,
                                       "templates": [], "source_allocated_bytes": allocated(path)})
         item["templates"].append(template)
+        for raw_alias in plan.aliases.get(template, []):
+            alias = Path(raw_alias)
+            alias_info = identity(alias)
+            if alias_info['size'] != info['size'] or alias_info['dev'] == warm_dev:
+                raise ValueError(f"base alias must be persistent and match its base length: {alias}")
+            if (alias_info['dev'], alias_info['ino']) != key:
+                item.setdefault('aliases', []).append({'source': str(alias), 'source_identity': alias_info})
     required = sum(((row['source_identity']['size'] + 65535) // 65536) * 65536
                    for row in files.values())
     if required > plan.capacity_mib * MIB:
@@ -242,6 +269,8 @@ def _validate_registry(receipt: dict, *, full: bool = False) -> None:
         raise RuntimeError("VMM binary changed since preparation; prepare the cache against the installed binary again")
     _mount(plan)
     seen = set()
+    cache_seen = set()
+    cache_checksums = {}
     total = 0
     for row in receipt["entries"]:
         source, cache = Path(row["source"]), Path(row["cache"])
@@ -255,7 +284,13 @@ def _validate_registry(receipt: dict, *, full: bool = False) -> None:
         if key in seen:
             raise ValueError("duplicate base cache identity")
         seen.add(key)
-        total += allocated(cache)
+        cache_key = (row['cache_identity']['dev'], row['cache_identity']['ino'])
+        if cache_key in cache_checksums and cache_checksums[cache_key] != row['sha256']:
+            raise RuntimeError('shared base cache aliases have inconsistent content identity')
+        cache_checksums[cache_key] = row['sha256']
+        if cache_key not in cache_seen:
+            cache_seen.add(cache_key)
+            total += allocated(cache)
         if full and (digest(source, discard_source_cache=True) != row["sha256"] or digest(cache) != row["sha256"]):
             raise RuntimeError("base cache byte verification failed; rebuild this cache on an idle host")
     if total != receipt["allocated_bytes"] or total > plan.capacity_mib * MIB:
@@ -303,6 +338,20 @@ def prepare(plan: BaseCachePlan, *, apply: bool = False) -> dict:
                 total += allocated(target)
                 entries.append({**row, "cache": str(target), "cache_identity": identity(target),
                                 "sha256": checksum, "allocated_bytes": allocated(target)})
+                seen_sources = {(entry['source_identity']['dev'], entry['source_identity']['ino'])
+                                for entry in entries}
+                for alias in row.get('aliases', []):
+                    alias_path = Path(alias['source'])
+                    alias_key = (alias['source_identity']['dev'], alias['source_identity']['ino'])
+                    if alias_key in seen_sources:
+                        continue
+                    if (digest(alias_path, discard_source_cache=True) != checksum
+                            or identity(alias_path) != alias['source_identity']):
+                        raise RuntimeError(f"base alias content or identity differs: {alias_path}")
+                    entries.append({**alias, 'templates': row['templates'],
+                                    'cache': str(target), 'cache_identity': identity(target),
+                                    'sha256': checksum, 'allocated_bytes': allocated(target)})
+                    seen_sources.add(alias_key)
             receipt = {"schema_version": 1, "plan": report["plan"], "entries": entries,
                        "vmm_identity": identity(Path(plan.vmm_binary)),
                        "allocated_bytes": total, "prepared_unix_s": time.time(),
@@ -340,8 +389,9 @@ def cleanup(*, apply: bool = False, plan: BaseCachePlan | None = None) -> dict:
     receipt = json.loads(REGISTRY.read_text())
     # Cleanup must work after source changes, but may delete only owned cache files.
     root = Path(receipt["plan"]["warm_root"]) / ".clawbox-base-cache"
-    paths = [Path(row["cache"]) for row in receipt["entries"]]
-    for path, row in zip(paths, receipt["entries"]):
+    unique_rows = {row['cache']: row for row in receipt['entries']}
+    paths = [Path(name) for name in unique_rows]
+    for path, row in zip(paths, unique_rows.values()):
         if (not path.is_relative_to(root) or ".." in path.parts
                 or identity(path) != row["cache_identity"]):
             raise RuntimeError(f"refusing cleanup of changed/unowned cache: {path}")
@@ -410,36 +460,79 @@ def qualification_input(resources) -> dict:
                                     'vmm_identity': receipt['vmm_identity']}}
 
 
-def verify_created_mapping(resources, sandbox_id: str, template: str) -> dict:
-    """Qualification-only physical enforcement check; never on timed creates."""
+def verify_created_mapping(resources, sandbox_id: str, template: str, *,
+                           receipt: dict | None = None, pids=None,
+                           fail_on_miss: bool = True) -> dict:
+    """Verify private mappings; timed callers supply one validated receipt/PIDs.
+
+    Supplying these skips registry revalidation and the global process scan.
+    Only the selected VM's small maps files are inspected; no file hashing.
+    """
     if resources.base_template_cache != 'required':
         return {'required': False}
-    receipt = check_experiment(resources)
+    receipt = check_experiment(resources) if receipt is None else receipt
     expected = [row for row in receipt['entries'] if template in row['templates']]
     if not expected:
-        return {'required': False, 'template_selected': False}
-    if len(expected) != 1:
+        return {'required': False, 'template_selected': False, 'cache_hit': None}
+    if len({row['cache'] for row in expected}) != 1:
         raise RuntimeError('template cache identity is ambiguous')
     row = expected[0]
-    from .qualification import _sandbox_pids
+    if pids is None:
+        from .qualification import _sandbox_pids
+        pids = _sandbox_pids(sandbox_id)
     matched = []
-    for pid in _sandbox_pids(sandbox_id):
+    for pid in pids:
         try:
             lines = Path(f'/proc/{pid}/maps').read_text().splitlines()
         except (FileNotFoundError, ProcessLookupError):
             continue
         for line in lines:
             fields = line.split(maxsplit=5)
-            if len(fields) == 6 and fields[5] == row['cache']:
+            if len(fields) >= 5:
                 major, minor = (int(value, 16) for value in fields[3].split(':'))
-                if (os.makedev(major, minor) != row['cache_identity']['dev']
-                        or int(fields[4]) != row['cache_identity']['ino'] or fields[1][-1] != 'p'):
+                matched_identity = (os.makedev(major, minor) == row['cache_identity']['dev']
+                                    and int(fields[4]) == row['cache_identity']['ino'])
+                if len(fields) == 6 and fields[5] == row['cache'] and not matched_identity:
+                    raise RuntimeError('VM cache mapping differs from prepared inode identity')
+                if not matched_identity:
+                    continue
+                if fields[1][-1] != 'p':
                     raise RuntimeError('VM cache mapping is not the prepared private file mapping')
                 matched.append(pid)
-    if not matched:
+    if not matched and fail_on_miss:
         raise RuntimeError('selected VM did not map its WARM base; check the template versioned Shim and private lazy restore configuration')
-    return {'required': True, 'passed': True, 'template': template,
-            'cache': row['cache'], 'pids': sorted(set(matched))}
+    return {'required': True, 'passed': bool(matched), 'cache_hit': bool(matched),
+            'template_selected': True, 'template': template,
+            'cache': row['cache'], 'cache_identity': row['cache_identity'],
+            'pids': sorted(set(matched)), 'observation': 'private maps device/inode matches prepared cache'}
+
+
+def observe_local_ssd_backing(domain_root: str, template: str, pids) -> dict:
+    """Corroborate selected native catalog and actual open local rootfs backing."""
+    root = Path(domain_root).resolve()
+    catalog = root / 'snapshots' / template / 'metadata/catalog.json'
+    metadata = json.loads(catalog.read_text())
+    if metadata.get('snapshot_id') != template:
+        raise RuntimeError('selected template catalog identity does not match creation')
+    opened = []
+    for pid in pids:
+        try:
+            descriptors = list(Path(f'/proc/{pid}/fd').iterdir())
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        for descriptor in descriptors:
+            try:
+                target = descriptor.resolve(strict=True)
+                if target.is_relative_to(root / 'objects/volumes'):
+                    value = descriptor.stat()
+                    opened.append({'pid': pid, 'fd': descriptor.name, 'path': str(target),
+                                   'dev': value.st_dev, 'ino': value.st_ino})
+                    break
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+    return {'local_ssd_template_hit': bool(opened), 'catalog': str(catalog),
+            'catalog_identity': identity(catalog), 'open_rootfs_descriptors': opened,
+            'observation': 'selected native template catalog present and VM rootfs descriptor opened inside current domain; not a page-cache or physical-I/O hit count'}
 
 
 def check_experiment(resources) -> dict:

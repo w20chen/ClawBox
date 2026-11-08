@@ -44,6 +44,7 @@ DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
                   'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim',
                   'resident_capacity_accounting', 'lifecycle_reservation_scale')
 PLACEMENT_FIELDS = (
+    'resume_policy', 'migration_threshold_seconds',
     'placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes', 'session_cpu_slots',
     'tool_call_cpu_policy', 'cpu_qos_policy', 'cpu_qos_group_idle', 'tool_call_cpu_pressure_ratio',
     'tool_call_cpu_pressure_samples', 'tool_call_cpu_group_max_active',
@@ -228,7 +229,11 @@ def lower_arm(design, name, m):
         raise ValueError(f'{name}: value residency requires idle reclaim and tiered storage')
     if snapshots and ck['storage'] != 'disk' and (not r['warm_memory_capacity_mib'] or not r['warm_snapshot_root']):
         raise ValueError(f'{name}: WARM storage requires configured pool capacity and path')
-    if snapshots and ck['storage'] in {'disk', 'tiered'} and not r['cold_snapshot_root']:
+    peer_storage = (r.get('snapshot_scheduling_storage') or {}).get('topology') == 'peer-local-ssd'
+    if pl['resume_policy'] != 'home' and (
+            not snapshots or idle['scope'] != 'agent_and_tool' or os_deployment or not peer_storage):
+        raise ValueError(f'{name}: non-home resume requires peer-local-ssd, managed deployment and agent_and_tool idle reclaim')
+    if snapshots and ck['storage'] in {'disk', 'tiered'} and not r['cold_snapshot_root'] and not peer_storage:
         raise ValueError(f'{name}: disk/tiered snapshots require cold_snapshot_root')
     if shared['borrow'] == 'off':
         r['shared_memory_borrow_limit_mib'] = None
@@ -430,6 +435,7 @@ def fixed_recipe_arms(recipe, *, common, checkpoint_axis=None):
 
 
 def design_overview(spec):
+    from .spec import load_workload_cases
     from .spec import expand_matrix, effective_spec
     rows = []
     common = spec.design['mechanisms']
@@ -456,11 +462,17 @@ def design_overview(spec):
                          differences={f'{d}.{k}': v for d in GROUPS for k, v in p.mechanisms[d].items()
                                       if common[d][k] != v},
                          effective_resources=resolved.resources.model_dump(mode='json'),
-                         effective_placement=resolved.execution.placement_policy))
+                         effective_placement=resolved.execution.placement_policy,
+                         effective_resume_policy=resolved.execution.resume_policy))
     return dict(experiment_id=spec.experiment_id, recipe=spec.design['comparison']['recipe'],
                 dimensions=list(DIMENSIONS), control_groups=['deployment', 'coordination'],
                 conditions=spec.design['conditions'], arms=rows, arm_count=len(expand_matrix(spec)),
                 environment=spec.design['environment'], evidence=spec.design['evidence'],
+                workload={'session_assignment': spec.workload.session_assignment.value,
+                          'base_case_count': len(load_workload_cases(spec.workload)),
+                          'rollouts_per_case': spec.workload.rollouts_per_case,
+                          'offered_sessions': list(spec.execution.concurrency_levels),
+                          'offered_vms': [2*count for count in spec.execution.concurrency_levels]},
                 execution=spec.design['execution'])
 
 
@@ -578,6 +590,8 @@ def configure_design(raw, options):
         workload['repetitions'] = options['repetitions']
     if options.get('session_assignment') is not None:
         workload['session_assignment'] = options['session_assignment']
+    if options.get('rollouts_per_case') is not None:
+        workload['rollouts_per_case'] = options['rollouts_per_case']
     if options.get('concurrency') is not None:
         execution['concurrency_levels'] = parse_concurrency(options['concurrency'])
     if options.get('stagger_seconds') is not None:

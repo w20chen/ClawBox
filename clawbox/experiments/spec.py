@@ -117,9 +117,12 @@ class WorkloadSpec(StrictFrozenModel):
     repetitions: int = Field(default=1, ge=1)
     cases: tuple[WorkloadCase, ...] = ()
     session_assignment: SessionAssignment = SessionAssignment.UNIQUE
+    rollouts_per_case: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def cases_match_source(self) -> "WorkloadSpec":
+        if self.rollouts_per_case != 1 and self.session_assignment is not SessionAssignment.GROUPED:
+            raise ValueError('rollouts_per_case requires grouped session assignment')
         if mismatched := [case.case_id for case in self.cases if case.source is not self.source]:
             raise ValueError("workload.cases source mismatch: " + ", ".join(mismatched))
         if (self.session_assignment is SessionAssignment.ROUND_ROBIN
@@ -233,21 +236,57 @@ class SnapshotBranchingSpec(StrictFrozenModel):
         return self
 
 
+class PeerTransferEndpoint(StrictFrozenModel):
+    netns: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9_.-]+$")
+    address: str = Field(min_length=1)
+    port: int = Field(default=19450, ge=1, le=65535)
+
+
+class PeerRestoreCosts(StrictFrozenModel):
+    """Frozen calibration inputs, distinct from configured bandwidth limits."""
+    provenance: str = Field(min_length=1)
+    effective_transfer_mib_per_second: float = Field(gt=0, allow_inf_nan=False)
+    import_seconds: float = Field(ge=0, allow_inf_nan=False)
+    native_restore_seconds: float = Field(ge=0, allow_inf_nan=False)
+    resource_wait_seconds: float = Field(ge=0, allow_inf_nan=False)
+
+
 class SnapshotSchedulingStorageSpec(StrictFrozenModel):
     """Applied logical-node storage used by the snapshot scheduling study."""
 
+    topology: Literal["simulated-shared", "peer-local-ssd"] = "simulated-shared"
+    transport: Literal["simulated", "peer-network"] = "simulated"
     local_roots: dict[str, str]
-    shared_mounts: dict[str, str]
+    shared_mounts: dict[str, str] = Field(default_factory=dict)
     warm_root: str
-    local_capacity_mib: int = Field(ge=512)
-    shared_capacity_mib: int = Field(ge=512)
+    local_capacity_mib: int | None = Field(default=None, ge=512)
+    shared_capacity_mib: int | None = Field(default=None, ge=512)
+    local_capacity_mib_by_node: dict[str, int] = Field(default_factory=dict)
+    transfer_endpoints: dict[str, PeerTransferEndpoint] = Field(default_factory=dict)
+    restore_costs: PeerRestoreCosts | None = None
+    native_control_socket: str | None = None
+    transfer_timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
     warm_capacity_mib: int = Field(default=32768, ge=1)
     host_receipt: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def two_isolated_nodes(self) -> "SnapshotSchedulingStorageSpec":
         nodes = set(self.local_roots)
-        if len(nodes) != 2 or set(self.shared_mounts) != nodes:
+        if len(nodes) != 2:
+            raise ValueError("snapshot storage requires exactly two local node roots")
+        if self.topology == "peer-local-ssd":
+            socket = PurePosixPath(self.native_control_socket or '')
+            if not socket.is_absolute() or '..' in socket.parts:
+                raise ValueError("peer-local-ssd requires an absolute native_control_socket")
+            if self.transport != "peer-network" or self.shared_mounts or self.shared_capacity_mib is not None:
+                raise ValueError("peer-local-ssd requires peer-network and forbids shared SSD/NFS mounts")
+            if set(self.local_capacity_mib_by_node) != nodes or any(
+                value < 512 for value in self.local_capacity_mib_by_node.values()
+            ):
+                raise ValueError("peer-local-ssd requires a capacity of at least 512 MiB for each node")
+            if set(self.transfer_endpoints) != nodes:
+                raise ValueError("peer-local-ssd requires a transfer endpoint for each node")
+        elif set(self.shared_mounts) != nodes or self.local_capacity_mib is None or self.shared_capacity_mib is None:
             raise ValueError(
                 "snapshot storage requires the same two node IDs in "
                 "local_roots and shared_mounts"
@@ -303,6 +342,8 @@ class ExecutionSpec(StrictFrozenModel):
     ] = "round_robin"
     placement_cpu_overcommit: float = Field(default=1024.0, ge=1, allow_inf_nan=False)
     template_balance_slack: float = Field(default=0.10, ge=0, le=1, allow_inf_nan=False)
+    resume_policy: Literal["home", "load-aware", "cost-aware"] = "home"
+    migration_threshold_seconds: float = Field(default=0.25, ge=0, allow_inf_nan=False)
     # C0 is the pre-extension behavior: full selected-NUMA CPU masks and Linux
     # scheduling. C2 changes Tool vCPU affinity only for active agent-tool execs.
     tool_call_cpu_policy: Literal["c0", "c2"] = "c0"
@@ -349,6 +390,8 @@ class ExecutionSpec(StrictFrozenModel):
     # Every supported run is supervised at the process boundary.  An
     # unbounded arm cannot provide a reliable terminal state or cleanup SLA.
     arm_timeout_seconds: int = Field(default=3600, ge=1)
+    # Fixed offered-arrival measurement horizon, independent of setup/cleanup.
+    measurement_window_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     # The worker enforces arm_timeout_seconds. The supervisor allows this
     # additional time only for VM cleanup and writing the partial result.
     arm_finalization_timeout_seconds: int = Field(default=300, ge=1)
@@ -362,6 +405,7 @@ class ExecutionSpec(StrictFrozenModel):
     memory_sample_interval_seconds: float = Field(default=0.2, gt=0)
     stabilization_seconds: float = Field(default=1.0, ge=0)
     arrival_schedule: ArrivalSchedule = ArrivalSchedule.POISSON
+    normal_arrival_std_seconds: float = Field(default=60., gt=0, allow_inf_nan=False)
     # Explicit arm-relative offered arrivals retain a fixed LS cohort's timing
     # when comparing mixed sessions with its no-BE baseline.
     session_arrival_offsets_seconds: tuple[float, ...] | None = None
@@ -455,10 +499,10 @@ class ExecutionSpec(StrictFrozenModel):
         ):
             raise ValueError("burst requires stagger_interval_seconds=0")
         if (
-            self.arrival_schedule is ArrivalSchedule.POISSON
+            self.arrival_schedule in {ArrivalSchedule.POISSON, ArrivalSchedule.NORMAL}
             and self.stagger_interval_seconds != 0
         ):
-            raise ValueError("poisson requires stagger_interval_seconds=0")
+            raise ValueError("poisson/normal requires stagger_interval_seconds=0")
         return self
 
 
@@ -762,10 +806,27 @@ class ExperimentSpec(StrictFrozenModel):
             return self
         branching = self.execution.snapshot_branching
         storage = self.resources.snapshot_scheduling_storage
-        if (branching is None) != (storage is None):
+        if branching is not None and storage is None:
             raise ValueError(
-                "snapshot_branching and snapshot_scheduling_storage must be configured together"
+                "snapshot_branching requires snapshot_scheduling_storage"
             )
+        peer_storage = storage is not None and storage.topology == "peer-local-ssd"
+        if storage is not None:
+            if set(storage.local_roots) != {node.node_id for node in self.resources.compute_nodes}:
+                raise ValueError("snapshot storage node IDs must match compute_nodes")
+            if storage.warm_capacity_mib != self.resources.warm_memory_capacity_mib:
+                raise ValueError("snapshot storage WARM capacity must equal resources.warm_memory_capacity_mib")
+            if branching is None and not peer_storage:
+                raise ValueError("ordinary trace storage requires topology=peer-local-ssd")
+        if self.execution.resume_policy != "home":
+            if not peer_storage or branching is not None:
+                raise ValueError("non-home resume requires peer-local-ssd in the ordinary trace worker")
+            if self.execution.placement_policy == "os_default" or self.execution.session_cpu_slots:
+                raise ValueError("non-home resume requires managed compute nodes without fixed session CPU slots")
+            if any(p.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE or not p.runtime_snapshot for p in self.policies):
+                raise ValueError("non-home resume requires snapshot_pause reclamation of Runtime and Tool")
+            if self.execution.resume_policy == "cost-aware" and storage.restore_costs is None:
+                raise ValueError("cost-aware resume requires snapshot storage restore_costs with calibration provenance")
         if branching is not None:
             node_ids = {node.node_id for node in self.resources.compute_nodes}
             if len(node_ids) != 2:
@@ -848,6 +909,15 @@ class ExperimentSpec(StrictFrozenModel):
                     "unique session assignment requires at least "
                     f"{required} workload cases"
                 )
+        if self.workload.session_assignment is SessionAssignment.GROUPED:
+            rollouts = self.workload.rollouts_per_case
+            required = len(cases) * rollouts
+            if self.execution.concurrency_levels != (required,):
+                raise ValueError(f'grouped assignment requires one concurrency level equal to cases × rollouts_per_case ({required})')
+            offsets = self.execution.session_arrival_offsets_seconds
+            if offsets is not None and any(len(set(offsets[i:i+rollouts])) != 1
+                                           for i in range(0, required, rollouts)):
+                raise ValueError('grouped rollouts of each case must have the same offered arrival offset')
         if any(policy.template_aware_placement for policy in self.policies):
             if not self.resources.compute_nodes:
                 raise ValueError("template_aware_placement requires resources.compute_nodes")
@@ -891,7 +961,7 @@ class ExperimentSpec(StrictFrozenModel):
             if not (self.resources.warm_snapshot_root or "").strip():
                 raise ValueError("snapshot_only/joint WARM snapshots require resources.warm_snapshot_root")
             if (self.resources.snapshot_storage == "tiered"
-                    and not (self.resources.cold_snapshot_root or "").strip()):
+                    and not (self.resources.cold_snapshot_root or "").strip() and not peer_storage):
                 raise ValueError("tiered snapshot_only/joint requires resources.cold_snapshot_root for capacity fallback")
         assignment = self.execution.session_compute_nodes
         nodes = self.resources.compute_nodes
@@ -1001,7 +1071,7 @@ class ExperimentSpec(StrictFrozenModel):
                 and self.resources.snapshot_storage != "warm-only"
                 and any(policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
                         for policy in self.policies)
-                and not (self.resources.cold_snapshot_root or "").strip()):
+                and not (self.resources.cold_snapshot_root or "").strip() and not peer_storage):
             raise ValueError("incremental-cow reclamation requires resources.cold_snapshot_root")
         if self.resources.snapshot_storage == "warm-only":
             if not self.resources.warm_snapshot_root or self.resources.warm_memory_capacity_mib <= 0:
@@ -1028,6 +1098,7 @@ class ExperimentArm(StrictFrozenModel):
     case: WorkloadCase
     session_cases: tuple[WorkloadCase, ...] = ()
     session_assignment: SessionAssignment = SessionAssignment.SINGLE_CASE
+    rollouts_per_case: int = Field(default=1, ge=1)
     repetition: int
     concurrency: int
     policy: PolicySpec
@@ -1070,7 +1141,7 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
     case_groups = (
         ((workload_cases[0], workload_cases),)
         if spec.workload.session_assignment in {
-            SessionAssignment.ROUND_ROBIN, SessionAssignment.UNIQUE,
+            SessionAssignment.ROUND_ROBIN, SessionAssignment.UNIQUE, SessionAssignment.GROUPED,
         }
         else tuple((case, (case,)) for case in workload_cases)
     )
@@ -1113,6 +1184,7 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
                         arm_id=arm_id, spec_digest=digest, case=case,
                         session_cases=session_cases,
                         session_assignment=spec.workload.session_assignment,
+                        rollouts_per_case=spec.workload.rollouts_per_case,
                         repetition=repetition, concurrency=concurrency, policy=policy,
                         agent=spec.agent, inference=spec.inference, runtime=spec.runtime,
                         sandbox=spec.sandbox,

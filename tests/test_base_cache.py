@@ -55,6 +55,9 @@ def prepared_env(tmp_path, monkeypatch):
                 "source_allocated_bytes": cache.allocated(Path(name)),
             })
             row['templates'].append(template)
+            row.setdefault('aliases', []).extend(
+                {'source': name, 'source_identity': cache.identity(Path(name))}
+                for name in value.aliases.get(template, []))
         return {'plan': value.model_dump(mode='json'), 'entries': list(rows.values())}
     monkeypatch.setattr(cache, 'preview', preview)
     return source, plan, registry
@@ -88,6 +91,32 @@ def test_aliases_are_copied_and_charged_once(prepared_env):
     assert len(result['entries']) == 1
     assert result['entries'][0]['templates'] == ['template-a', 'template-b']
     assert result['allocated_bytes'] == cache.allocated(Path(result['entries'][0]['cache']))
+
+
+def test_independent_ssd_aliases_share_one_cache_and_detect_changed_source(prepared_env):
+    source, plan, registry = prepared_env
+    alias = source.with_name('peer.mem')
+    alias.write_bytes(source.read_bytes())
+    plan = plan.model_copy(update={'aliases': {'template-a': [str(alias)]}})
+    result = cache.prepare(plan, apply=True)
+    assert len(result['entries']) == 2
+    assert len({row['cache'] for row in result['entries']}) == 1
+    assert result['allocated_bytes'] == cache.allocated(Path(result['entries'][0]['cache']))
+    assert cache.status(full=True)['enabled']
+    alias.write_bytes(b'changed')
+    with pytest.raises(RuntimeError, match='identity changed'):
+        cache.status()
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='Linux read-only cache failure cleanup')
+def test_ssd_alias_wrong_bytes_never_publishes_cache(prepared_env):
+    source, plan, registry = prepared_env
+    alias = source.with_name('bad-peer.mem')
+    alias.write_bytes(b'x' * source.stat().st_size)
+    plan = plan.model_copy(update={'aliases': {'template-a': [str(alias)]}})
+    with pytest.raises(RuntimeError, match='alias content'):
+        cache.prepare(plan, apply=True)
+    assert not registry.exists()
 
 
 def test_budget_failure_does_not_publish_or_leave_partial_pages(prepared_env):
@@ -235,6 +264,43 @@ def test_selected_template_must_really_map_cache_during_qualification(prepared_e
     assert not cache.verify_created_mapping(resources, 'vm', 'unselected')['required']
 
 
+def test_timed_mapping_probe_uses_supplied_pids_and_frozen_identity(monkeypatch):
+    from pathlib import Path
+    resources = SimpleNamespace(base_template_cache='required')
+    receipt = {'entries': [{'templates': ['template-a'], 'cache': '/warm/base',
+                            'cache_identity': {'dev': 7, 'ino': 42}}]}
+    monkeypatch.setattr(cache, 'check_experiment', lambda _: pytest.fail('must not rescan registry'))
+    monkeypatch.setattr(cache.os, 'makedev', lambda major, minor: major+minor, raising=False)
+    original = Path.read_text
+    def read(path, *args, **kwargs):
+        if str(path).replace('\\', '/') == '/proc/123/maps':
+            return '1000-2000 rw-p 00000000 03:04 42 /warm/alias\n'
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', read)
+    observed = cache.verify_created_mapping(resources, 'vm', 'template-a', receipt=receipt, pids=[123])
+    assert observed['cache_hit'] and observed['pids'] == [123]
+    missing = cache.verify_created_mapping(resources, 'vm', 'template-a', receipt=receipt, pids=[], fail_on_miss=False)
+    assert missing['cache_hit'] is False
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='Linux process descriptor corroboration')
+def test_local_ssd_base_observation_requires_actual_open_rootfs(tmp_path):
+    catalog = tmp_path/'snapshots/template-a/metadata/catalog.json'
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps({'snapshot_id': 'template-a'}))
+    disk = tmp_path/'objects/volumes/live/rootfs'
+    disk.parent.mkdir(parents=True)
+    disk.write_bytes(b'rootfs')
+    fd = os.open(disk, os.O_RDONLY)
+    try:
+        result = cache.observe_local_ssd_backing(str(tmp_path), 'template-a', [os.getpid()])
+        assert result['local_ssd_template_hit']
+        assert result['open_rootfs_descriptors'][0]['ino'] == disk.stat().st_ino
+    finally:
+        os.close(fd)
+    assert not cache.observe_local_ssd_backing(str(tmp_path), 'template-a', [])['local_ssd_template_hit']
+
+
 def test_init_resolves_catalog_and_never_overwrites(tmp_path, monkeypatch):
     import clawbox.experiments as experiments
     from clawbox.experiments.spec import ResourcesSpec
@@ -250,7 +316,8 @@ def test_init_resolves_catalog_and_never_overwrites(tmp_path, monkeypatch):
     binary = tmp_path / 'vmm'
     binary.write_bytes(cache.CAPABILITY)
     resources = SimpleNamespace(warm_snapshot_root=str(tmp_path / 'warm'), warm_numa_node=2,
-                                warm_memory_capacity_mib=8, cubelet_storage_root=str(storage))
+                                warm_memory_capacity_mib=8, cubelet_storage_root=str(storage),
+                                snapshot_scheduling_storage=None)
     monkeypatch.setattr(experiments, 'load_experiment', lambda _: SimpleNamespace(resources=resources))
     if os.name != 'posix':
         monkeypatch.setattr(cache.BaseCachePlan, 'valid_paths', lambda self: self)

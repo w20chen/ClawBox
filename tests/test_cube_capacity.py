@@ -171,3 +171,27 @@ def test_storage_capacity_failure_has_actionable_remedy(monkeypatch):
             'cubelet_storage_root': '/cube/storage',
             'cube_cow_headroom_per_vm_mib': 144,
         })
+
+
+def test_peer_capacity_checks_each_target_filesystem(monkeypatch):
+    usage = namedtuple('usage', 'total used free')
+    checked = []
+    def disk(path):
+        checked.append(path.as_posix())
+        total = 32 * 1024**3
+        used = (20 if path.as_posix() == '/peer/node0' else 26) * 1024**3
+        return usage(total, used, total - used)
+    monkeypatch.setattr(capacity.shutil, 'disk_usage', disk)
+    report = capacity.storage_capacity_report({
+        'cube_capacity_demand': {'vm_count': 32},
+        'cubelet_storage_root': '/wrong-global-root',
+        'cube_cow_headroom_per_vm_mib': 144,
+        'snapshot_scheduling_storage': {
+            'topology': 'peer-local-ssd',
+            'local_roots': {'node0': '/peer/node0', 'node1': '/peer/node1'},
+        },
+    })
+    assert checked == ['/peer/node0', '/peer/node1']
+    assert report['domains']['node0']['ready']
+    assert not report['domains']['node1']['ready']
+    assert not report['ready']

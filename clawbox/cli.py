@@ -237,7 +237,7 @@ def parser() -> argparse.ArgumentParser:
                                       default=Path.home() / ".config/clawbox/host.json")
     snapshot_storage = sub.add_parser(
         "snapshot-storage",
-        help="prepare isolated XFS/NFS/tmpfs storage for snapshot scheduling",
+        help="prepare local SSD domains and a private peer network",
     )
     snapshot_storage_actions = snapshot_storage.add_subparsers(
         dest="snapshot_storage_action", required=True,
@@ -260,6 +260,51 @@ def parser() -> argparse.ArgumentParser:
         "--apply", action="store_true",
         help="unmount owned storage and detach loops; image files remain",
     )
+    snapshot_storage_prepare = snapshot_storage_actions.add_parser(
+        "prepare", help="import complete immutable templates into applied local SSD domains",
+    )
+    snapshot_storage_prepare.add_argument("config", type=Path)
+    snapshot_storage_prepare.add_argument("--template", action="append", required=True,
+                                          help="verified template ID; repeat for Runtime and every Tool template")
+    snapshot_storage_prepare.add_argument("--control-socket", required=True,
+                                          help="absolute path to the installed native peer control socket")
+    snapshot_storage_prepare.add_argument("--receipt", type=Path, required=True,
+                                          help="new preparation receipt path; never overwrite")
+    snapshot_storage_prepare.add_argument("--workers", type=int, default=1,
+                                          help="positive number of concurrent template preparations (default: 1)")
+    snapshot_network = snapshot_storage_actions.add_parser(
+        "qualify-network", help="measure two overlapping TCP transfers and verify an aggregate rate cap",
+    )
+    snapshot_network.add_argument("config", type=Path)
+    snapshot_network.add_argument("--output", type=Path, required=True,
+                                  help="new immutable transport qualification JSON")
+    snapshot_network.add_argument("--size-mib", type=int, default=128,
+                                  help="size of each of two temporary objects in MiB (default: 128)")
+    snapshot_replicas = snapshot_storage_actions.add_parser(
+        "cleanup-replicas", help="preview run-owned replica cleanup after all VMs stop",
+    )
+    snapshot_replicas.add_argument("config", type=Path)
+    snapshot_replicas.add_argument("--run-id", required=True)
+    snapshot_replicas.add_argument("--control-socket", required=True)
+    snapshot_replicas.add_argument("--apply", action="store_true")
+    snapshot_reserve = snapshot_storage_actions.add_parser(
+        "reserve-image", help="reserve a new image in a reviewed XFS AG and verify its physical SSD extents",
+    )
+    snapshot_reserve.add_argument("--image", type=Path, required=True)
+    snapshot_reserve.add_argument("--capacity-mib", type=int, required=True)
+    snapshot_reserve.add_argument("--backing-device", required=True)
+    snapshot_reserve.add_argument("--physical-device", required=True)
+    snapshot_reserve.add_argument("--allocation-group", type=int, required=True)
+    snapshot_reserve.add_argument("--allocation-group-end", type=int)
+    snapshot_reserve.add_argument("--chunk-mib", type=int, default=16384)
+    snapshot_reserve.add_argument("--resume-receipt", type=Path)
+    snapshot_inspect = snapshot_storage_actions.add_parser(
+        "inspect-backing", help="read XFS allocation-group free space and physical SSD mapping")
+    snapshot_inspect.add_argument("--backing-device", required=True)
+    snapshot_reset = snapshot_storage_actions.add_parser(
+        'reset-cache', help='preview owned SSD page-cache residency; --apply requests narrow advisory eviction between arms')
+    snapshot_reset.add_argument('config', type=Path)
+    snapshot_reset.add_argument('--apply', action='store_true')
     setup = sub.add_parser("setup", help="configure and verify this CubeSandbox host")
     setup.add_argument("--profile", type=Path,
                        default=Path.home() / ".config" / "clawbox" / "host.json")
@@ -427,8 +472,9 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--validation-command")
     configure.add_argument("--repetitions", type=int)
     configure.add_argument(
-        "--session-assignment", choices=("single_case", "round_robin", "unique"),
+        "--session-assignment", choices=("single_case", "round_robin", "unique", "grouped"),
     )
+    configure.add_argument('--rollouts-per-case', type=int, help='independent simultaneous rollouts per case for grouped assignment (default 1)')
     configure.add_argument("--concurrency", help="comma-separated offered levels, e.g. 1,5,60")
     configure.add_argument(
         "--baseline", action="append", dest="baselines",
@@ -713,6 +759,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "snapshot-storage":
             from clawbox.experiments import snapshot_host
 
+            if args.snapshot_storage_action == "inspect-backing":
+                from clawbox.experiments.physical_storage import inspect_backing
+                emit(inspect_backing(args.backing_device))
+                return 0
+            if args.snapshot_storage_action == "reserve-image":
+                from clawbox.experiments.physical_storage import allocate_image, allocate_chunked_image
+                if args.capacity_mib < 512:
+                    raise ValueError("reserved image capacity must be at least 512 MiB")
+                if args.resume_receipt and args.allocation_group_end is None:
+                    raise ValueError("--resume-receipt requires --allocation-group-end")
+                allocator = allocate_image if args.allocation_group_end is None else allocate_chunked_image
+                extra = {} if args.allocation_group_end is None else {
+                    "allocation_group_end": args.allocation_group_end, "chunk_bytes": args.chunk_mib * 1024**2,
+                    "resume_receipt": args.resume_receipt}
+                emit(allocator(args.image, args.capacity_mib * 1024**2,
+                    args.backing_device, args.physical_device, args.allocation_group, **extra))
+                return 0
             if args.snapshot_storage_action == "init":
                 snapshot_host.init(args.config)
                 emit({
@@ -730,6 +793,46 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if report["ready_for_apply"] else 2
             if args.snapshot_storage_action == "apply":
                 emit(snapshot_host.apply(storage_spec))
+                return 0
+            if args.snapshot_storage_action == "qualify-network":
+                emit(snapshot_host.qualify_network(storage_spec, args.output, size_mib=args.size_mib))
+                return 0
+            if args.snapshot_storage_action == "cleanup-replicas":
+                emit(snapshot_host.cleanup_replicas(storage_spec, args.run_id,
+                    args.control_socket, execute=args.apply))
+                return 0
+            if args.snapshot_storage_action == 'reset-cache':
+                from clawbox.experiments.peer_cache import reset_cache
+                emit(reset_cache(storage_spec, execute=args.apply))
+                return 0
+            if args.snapshot_storage_action == "prepare":
+                from clawbox.cube.peer_replica import prepare_templates
+                from clawbox.experiments.spec import SnapshotSchedulingStorageSpec
+                if args.workers < 1:
+                    raise ValueError("snapshot-storage prepare --workers must be a positive integer")
+                report = snapshot_host.check(storage_spec)
+                if not report["ready_for_apply"]:
+                    emit(report)
+                    return 2
+                snapshot_host.validate_peer_storage(SnapshotSchedulingStorageSpec(
+                    **snapshot_host.storage_configuration(storage_spec),
+                    host_receipt=storage_spec.receipt,
+                    native_control_socket=args.control_socket,
+                ))
+                # Reserve the evidence filename before doing any imports.
+                args.receipt.parent.mkdir(parents=True, exist_ok=True)
+                with args.receipt.open("x", encoding="utf-8") as receipt:
+                    try:
+                        result = prepare_templates(
+                            list(dict.fromkeys(args.template)),
+                            {node: item.local_mount for node, item in storage_spec.nodes.items()},
+                            args.control_socket, storage_spec.shared_dram.root, workers=args.workers,
+                        )
+                    except Exception as exc:
+                        json.dump({"status": "failed", "error": str(exc)}, receipt, indent=2)
+                        raise
+                    json.dump(result, receipt, indent=2)
+                emit(result)
                 return 0
             emit(snapshot_host.cleanup(storage_spec, execute=args.apply))
             return 0

@@ -242,7 +242,9 @@ def wait_for_vm_ready(profile: dict) -> None:
             probe = Sandbox.create(template=profile["sandbox"]["template_id"], timeout=120,
                                    lifecycle={"on_timeout": "kill", "auto_resume": False},
                                    distribution_scope=[profile["node"]],
-                                   metadata={"clawbox.owner": "lab-setup-" + uuid.uuid4().hex})
+                                   metadata={"clawbox.owner": "lab-setup-" + uuid.uuid4().hex,
+                                       **({'clawbox.storage.domain': sorted(profile['snapshot_scheduling_storage']['local_roots'])[0]}
+                                          if (profile.get('snapshot_scheduling_storage') or {}).get('topology') == 'peer-local-ssd' else {})})
             break
         except ApiError as exc:
             # Retry only a definitive rejection; never repeat ambiguous creates.

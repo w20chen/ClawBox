@@ -368,6 +368,24 @@ preserving Tool commands. This is an accelerated workload profile, not an
 end-to-end Agent latency comparison. These settings require a new run ID,
 but no host apply, image rebuild, or retraining.
 
+For simultaneous independent rollouts of each base case, use
+`workload.session_assignment: grouped` and `workload.rollouts_per_case: 16`.
+An ordered manifest of 80 cases requires `execution.concurrency_levels: [1280]`.
+Session indices 0–15 use the first case, 16–31 the second, and so on; each
+session creates its own Runtime/Tool pair and replays that case's original trace.
+Set `execution.arrival_schedule: normal`, `execution.normal_arrival_std_seconds: 60`
+and a fixed `execution.random_seed` to draw 80 normally distributed group arrivals,
+sort them, and shift the earliest to zero. All 16 sessions in a group are offered
+at exactly the same instant. Freeze the resulting 1280 offsets in
+`execution.session_arrival_offsets_seconds` for comparisons across policies.
+Preserve `inference.configuration.time_scale: 1.0` for original model delays.
+For uncapped offered sessions, keep `execution.max_active_sessions: null` and
+`mechanisms.placement.session_cpu_slots: []`; ordinary CPU/memory admission still
+controls when a VM can become runnable. Grouping adds no active-group limit.
+Qualification uses one rollout per case and does not establish 1280-session
+performance. Use a new run ID and qualification after changing the grouping or
+arrival inputs; these changes do not require host apply, image rebuild or retraining.
+
 To keep concurrent traces on disjoint cores, set
 `mechanisms.placement.session_cpu_slots` to a list such as
 `[{node_id: node0, cpus: "0,2,4,6"}, {node_id: node1, cpus: "80,82,84,86"}]`.
@@ -657,100 +675,190 @@ After an ambiguous VM-creation error, run `abort` before starting a replacement
 run. Preserve the failed run directory. See [results and measurements](results.md)
 for output files and timing interpretation.
 
-## Snapshot-aware branching across logical nodes
+## Local SSD domains and peer restore
 
-This scenario uses two NUMA/cpuset compute groups, two independent loopback XFS
-filesystems, a 32 GiB NUMA-bound tmpfs WARM cache, and one XFS-backed NFS export
-reached through per-node network namespaces. The checked-in Kunpeng plan applies
-5 ms delay and 1000 Mbit/s in each direction. Review every path and address before
-applying it:
+Use two independent SSD-backed XFS pools for compute nodes `node0` and `node1`,
+and the existing NUMA-bound shared-DRAM pool for WARM snapshots, base RAM and
+live borrowing. The peer network transports missing immutable objects over TCP.
+The destination imports the complete snapshot into its native storage domain
+before restoring it. A single host with two NUMA nodes is a logical-node study;
+it does not establish performance across two physical machines.
 
-```bash
-mkdir -p "$HOME/clawbox-specs"
-cp --no-clobber examples/snapshot-storage-kunpeng.yaml \
-  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml"
-bash scripts/clawbox --sudo experiment snapshot-storage check \
-  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml"
-bash scripts/clawbox --sudo experiment snapshot-storage apply \
-  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml"
-```
+Start with the [installation workflow](installation.md), then apply the ordinary
+host plan on an empty VM pool. After reboot, run
+`sudo bash scripts/recover-cubesandbox-after-reboot.sh 1200` and repeat host apply
+before writing WARM data. Install matching domain-capable CubeAPI, CubeMaster,
+Cubelet and SDK components before preparing replicas.
 
-`check` prints the proposed mounts, capacities, NUMA node, and prerequisites.
-`apply` is repeatable after reboot and reuses an exactly matching saved plan.
-The defaults/checked-in plan use MiB for capacities, milliseconds for each
-direction of delay, and Mbit/s for each direction of bandwidth. Changing a
-mount, capacity, WARM NUMA node, namespace, or address requires cleanup and host
-apply. Preserved loop images are never overwritten; after a capacity change,
-select a new `image_root`. Delay and bandwidth changes can be reapplied in place.
-
-The experiment files contain the currently selected template IDs and immutable
-image digests. Replace them from the applied host profile if the host uses
-different images. That identity change requires qualification and a new run ID,
-but no image rebuild unless the required template image itself is unavailable.
-No training is used by this replay workload.
-
-Run the small real-VM correctness matrix first, then the two formal matrices.
-Each formal file fixes 16 parents, eight branches per parent, maximum concurrency
-64, the 12:4 parent distribution, identical burst batches for all policies, and
-two repetitions per policy:
+Create an editable peer host plan:
 
 ```bash
-bash scripts/clawbox experiment validate \
-  examples/experiments/snapshot-scheduling-correctness-kunpeng.yaml --inputs
-bash scripts/clawbox --sudo experiment launch \
-  examples/experiments/snapshot-scheduling-correctness-kunpeng.yaml \
-  --run-id snapshot-correctness-YYYYMMDD-01 --detach
-bash scripts/clawbox experiment status snapshot-correctness-YYYYMMDD-01
-bash scripts/clawbox --sudo experiment report snapshot-correctness-YYYYMMDD-01
-
-bash scripts/clawbox experiment validate \
-  examples/experiments/snapshot-scheduling-compute-kunpeng.yaml --inputs
-bash scripts/clawbox --sudo experiment launch \
-  examples/experiments/snapshot-scheduling-compute-kunpeng.yaml \
-  --run-id snapshot-compute-YYYYMMDD-01 --detach
-
-bash scripts/clawbox experiment validate \
-  examples/experiments/snapshot-scheduling-disk-kunpeng.yaml --inputs
-bash scripts/clawbox --sudo experiment launch \
-  examples/experiments/snapshot-scheduling-disk-kunpeng.yaml \
-  --run-id snapshot-disk-YYYYMMDD-01 --detach
+bash scripts/clawbox experiment snapshot-storage init peer-host.yaml
 ```
 
-Use `status` and `report` with the same output root. Never reuse a run ID after
-editing a specification. The report writes the unified comparison to `report.md`
-and plot-ready rows to `snapshot-scheduling-summary.csv`; each arm also retains
-parent manifests, resource events, and one JSONL row per rollout.
+Replace every `REVIEW` value with observed host facts. Set each backing filesystem
+UUID, image path, mount, capacity, CPU/NUMA domain and unused namespace/address.
+TCP helpers use the same declared CPU sets and local NUMA memory policy as their
+logical compute node; install `numactl` before applying the plan.
+Set each node's `direct_io: true` for SSD performance measurements so the outer
+loop backing file cannot satisfy COLD reads from another page cache. Apply
+verifies the actual loop-device setting. Reset inner SSD file residency before
+matched arms as described below.
+Choose capacities after counting all template RAM, PMEM images, kernel, frozen
+rootfs, snapshot generations, live CoW growth and transfer staging. The pools
+must remain below Cube's 85% rejection threshold, with additional free space on
+each backing filesystem. `apply` preallocates the new image; it does not format
+an existing disk or replace an existing image. The Kunpeng example is
+`examples/snapshot-storage-kunpeng.yaml`; verify its identities and free space
+before reuse.
 
-Cube's public SDK cannot restore from caller-supplied copied rootfs/memfile
-paths. Therefore a cross-node result is deliberately labelled **Simulated
-Cross-Node Restore**: ClawBox performs and hashes the real local-XFS -> shaped
-NFS -> target-XFS copy, then Cube performs a real native snapshot-to-new-sandbox
-restore bound to the selected NUMA/cpuset. The staged copy is not the input to
-Cube's restore, and this workflow is not evidence of native physical-node
-migration.
-
-Set `execution.snapshot_branching.transfer_mode: peer-direct` for the matched
-one-copy control. It copies the same rootfs payload directly from the source
-logical-node XFS to the target logical-node XFS, with the same fsync, digest,
-cache and capacity checks. This is a same-host cross-XFS proxy: it does not use
-NFS, does not emulate a node-to-node network, and the copied path is still not
-consumed by Cube restore.
-
-The two logical nodes use one physical Cube node and its shared immutable
-template store. Base-template placement is held constant
-(`placement.template_affinity: false`); the comparison schedules parent snapshot
-state and branch work, not node-specific base-template replicas.
-
-Cleanup is preview-only unless `--apply` is explicit. It unmounts only the saved
-scenario mounts, removes its namespaces and export, detaches recorded loop
-devices, and preserves the loop image files:
+If available capacity is inside a linear LVM XFS filesystem, first inspect its
+physical allocation groups. Two arbitrary files on that filesystem do not prove
+independent SSDs:
 
 ```bash
-bash scripts/clawbox experiment snapshot-storage cleanup \
-  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml"
-bash scripts/clawbox --sudo experiment snapshot-storage cleanup \
-  "$HOME/clawbox-specs/snapshot-storage-kunpeng.yaml" --apply
+bash scripts/clawbox --sudo experiment snapshot-storage inspect-backing \
+  --backing-device /dev/mapper/REVIEW > backing-inspection.json
+bash scripts/clawbox --sudo experiment snapshot-storage reserve-image \
+  --image /REVIEW/node0.image --capacity-mib 1572864 \
+  --backing-device /dev/mapper/REVIEW --physical-device /dev/REVIEW_SSD0 \
+  --allocation-group REVIEW_FIRST --allocation-group-end REVIEW_LAST \
+  > node0-reservation.json
 ```
+
+Review the observed free space and choose groups wholly on the intended SSD.
+Repeat with a different SSD and a new image for node1. The command reserves and
+initializes only new owned files; it never writes directly to filesystem blocks.
+If chunk preparation stops, repeat its command with
+`--resume-receipt /path/to/the/image.allocation-ID.json`; it verifies and retains
+completed chunks before continuing.
+Wait for both results to say `status: verified`, then add their `physical_device`
+and `receipt` paths as each node's `physical_device` and
+`image_allocation_receipt`. Set `backing_mount` to the actual common filesystem
+mount and retain its UUID. The shared filesystem metadata/log must be reported
+as a single-host limitation even though all pool payload extents are disjoint.
+
+```bash
+bash scripts/clawbox --sudo experiment snapshot-storage check peer-host.yaml
+bash scripts/clawbox --sudo experiment snapshot-storage apply peer-host.yaml
+bash scripts/clawbox --sudo experiment snapshot-storage qualify-network peer-host.yaml \
+  --output network-qualification.json
+```
+
+The network test temporarily uses a lower rate to check that two overlapping
+transfers share one directional limit, then restores the configured rate. Its
+fixture timings are transport qualification, not workload performance. The
+configured Mbit/s is an upper bound; report the measured rate separately.
+Run this check before workload measurements. It uses two temporary 128 MiB
+objects by default, verifies concurrent duplicate requests transfer an object
+only once, records interface bytes, and removes its fixtures. `--output` must
+name a new file; `--size-mib` changes each object's size within 16–1024 MiB.
+
+Prepare the exact Runtime and case-specific Tool templates. Supply the native
+control socket configured at installation and a new receipt filename:
+
+```bash
+bash scripts/clawbox --sudo experiment snapshot-storage prepare peer-host.yaml \
+  --control-socket "$PEER_CONTROL_SOCKET" \
+  --template "$RUNTIME_TEMPLATE" --template "$TOOL_TEMPLATE_A" --template "$TOOL_TEMPLATE_B" \
+  --receipt template-preparation.json
+```
+
+Preparation defaults to one template at a time. Add `--workers 4` to prepare four
+templates concurrently when importing a larger case set; immutable objects shared
+by templates are copied once per SSD. This changes preparation throughput only,
+outside the measured replay, and requires a new receipt filename. It does not
+limit experiment sessions or change their arrivals. Repeat preparation completes
+missing component version files in owned packages while preserving existing RAM
+base paths used by an active base cache.
+
+Copy the applied receipt's `storage` fields into
+`environment.resources.snapshot_scheduling_storage`, add `host_receipt` and
+`native_control_socket`, and match its node IDs to `compute_nodes`. Set the
+experiment's WARM budget no larger than the applied pool. A global
+`cold_snapshot_root` is unnecessary: each node uses its local domain. Keep
+`execution.snapshot_branching` unset for ordinary replay traces.
+
+Use `mechanisms.idle_reclaim.policy: wait` with `scope: agent_and_tool` and
+`mechanisms.placement.resume_policy: home`, `load-aware`, or `cost-aware`.
+All three use the same snapshot and transfer machinery. Migration is permitted
+only when both roles are fully paused and no conflicting Tool claim or lifecycle
+operation remains. Runtime resumes before model-response delivery; Tool resumes
+on its next actual request. Cost-aware selection additionally requires measured
+`restore_costs` with provenance. Calibrate before freezing the comparison; do not
+change replay times or arrivals between arms.
+
+For a shared base cache, run the existing `base-cache init --spec ... --template
+... --capacity-mib ...`, review the plan, then `base-cache prepare ... --apply`.
+Peer initialization resolves RAM in both domain catalogs. `aliases` maps each
+template to its other SSD RAM paths; preparation verifies identical content and
+registers both local identities against one charged WARM file.
+
+Continue with `validate --inputs`, `doctor --probe-vm`, `qualify`, `launch
+--qualification ... --run-id NEW_ID`, `status`, `collect`, and `report` as in the
+ordinary workflow above. Qualification verifies bidirectional restore and target
+backing files. Separately run an ordinary trace calibration to establish actual
+pressure and migration opportunities; the short qualification replay does not
+establish those conditions. Freeze replica inventory and costs before running
+the policy comparison.
+
+After aborting or finishing a run, stop its worker and wait for VM cleanup.
+Use that run's ID as `RUN_ID`, then preview and apply replica cleanup before
+the next comparison. This requires an idle VM host and no active peer transfers:
+
+```bash
+bash scripts/clawbox --sudo experiment snapshot-storage cleanup-replicas peer-host.yaml \
+  --run-id "$RUN_ID" --control-socket "$PEER_CONTROL_SOCKET"
+bash scripts/clawbox --sudo experiment snapshot-storage cleanup-replicas peer-host.yaml \
+  --run-id "$RUN_ID" --control-socket "$PEER_CONTROL_SOCKET" --apply
+```
+
+Native references are released before deleting that run's replicas. Prepared
+templates, other runs, and objects with remaining references are retained.
+Record the retained template/WARM inventory when preparing the next comparison;
+replica cleanup does not reset the shared base cache.
+
+For matched cold-SSD comparisons, run cache reset after qualification and
+replica cleanup, immediately before each formal arm. Preview first, then apply:
+
+```bash
+bash scripts/clawbox --sudo experiment snapshot-storage reset-cache peer-host.yaml
+bash scripts/clawbox --sudo experiment snapshot-storage reset-cache peer-host.yaml --apply
+```
+
+This requires the applied owned mounts, an idle VM host and no active peer
+transfers. It syncs and requests page-cache eviction only for regular files
+inside the two SSD pools and their exact owned loop-image files, counting
+device/inode identities once. Inner files are synced first, then the backing
+images; their requested bytes and residency are reported separately. This also
+removes eligible preparation remnants when formal loops use direct I/O. Shared WARM bases remain
+warm; original templates outside the pools are untouched. The output reports
+requested bytes and actual `mincore` resident-page counts before/after without
+reading file contents. Eviction advice is not guaranteed: compare the measured
+remaining residency and retained template inventories across arms before
+claiming equal starting conditions. Save each command's JSON with that run's
+evidence. Reset requires no image rebuild, retraining or new host apply; every
+comparison arm still uses a new run ID.
+
+When finished using the peer pools, preview and apply host cleanup:
+
+```bash
+bash scripts/clawbox --sudo experiment snapshot-storage cleanup peer-host.yaml
+bash scripts/clawbox --sudo experiment snapshot-storage cleanup peer-host.yaml --apply
+```
+
+Cleanup stops owned helpers, removes their network namespaces and unmounts the
+owned loop pools. It preserves images, results, original templates and the
+shared-DRAM mount. Repeating `apply` recovers the saved pools and helpers, and
+loads changed helper code after verifying that no peer transfer is active.
+Storage identity/capacity changes require a new pool/plan; shaping changes require
+apply and a new run ID. Scheduling/budget edits require a new run ID, not guest
+image rebuild or ClawTune retraining. Native interface changes require matching
+component installation and fresh qualification.
+
+Historical branching results remain **Simulated Cross-Node Restore**: their
+copied files were not consumed by Cube. They cannot serve as peer-restore
+evidence. The former NFS host-plan schema is not accepted by this workflow.
 
 ## Reproduce the shared-cache placement comparison
 

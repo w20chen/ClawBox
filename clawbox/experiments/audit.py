@@ -93,7 +93,7 @@ def audit_experiment(path: Path, *, expected_levels: tuple[int, ...] | None = No
     ensure_supported_experiment(spec)
     arms = expand_matrix(spec)
     case_multiplier = (
-        1 if spec.workload.session_assignment.value == "round_robin"
+        1 if spec.workload.session_assignment.value in {"round_robin", "unique", "grouped"}
         else len(load_workload_cases(spec.workload))
     )
     expected_arms = (

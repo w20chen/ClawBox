@@ -11,12 +11,14 @@ class SessionAssignment(StrEnum):
     SINGLE_CASE = "single_case"
     ROUND_ROBIN = "round_robin"
     UNIQUE = "unique"
+    GROUPED = "grouped"
 
 
 class ArrivalSchedule(StrEnum):
     BURST = "burst"
     FIXED_STAGGER = "fixed_stagger"
     POISSON = "poisson"
+    NORMAL = "normal"
 
 
 class AgentDriver(StrEnum):

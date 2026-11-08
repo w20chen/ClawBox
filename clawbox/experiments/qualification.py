@@ -9,8 +9,10 @@ import os
 import hashlib
 import json
 import shutil
+import shlex
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 from threading import Lock
@@ -35,7 +37,7 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
 from .worker import atomic_json, session_case_for, session_worker_count
 
 
-QUALIFICATION_SCHEMA_VERSION = 19
+QUALIFICATION_SCHEMA_VERSION = 21
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
 
 
@@ -69,6 +71,15 @@ def _native_probe_options(domain: PriorityDomain | None, role: str) -> dict[str,
         "verify_cgroup": lambda sandbox_id: domain.verify(0, role, sandbox_id),
         "prepare_cgroup": lambda: domain.prepare(0, role),
     }
+
+
+def _peer_probe_options(spec, node=None):
+    storage = spec.resources.snapshot_scheduling_storage
+    if storage is None or storage.topology != 'peer-local-ssd':
+        return {}
+    name = node.node_id if node is not None else sorted(storage.local_roots)[0]
+    return {'storage_domain': name, 'storage_domain_root': storage.local_roots[name],
+            'peer_control_socket': storage.native_control_socket}
 
 
 def _native_qos_observations(domain: PriorityDomain | None) -> list[dict[str, Any]]:
@@ -108,6 +119,7 @@ def qualification_input_manifest(
     from .base_cache import qualification_input
     sharing_artifact = spec.resources.template_base_sharing_artifact
     return {
+        **_peer_qualification_inputs(spec),
         **qualification_input(spec.resources),
         "traces": [
             {
@@ -194,6 +206,7 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
     sharing_artifact = spec.resources.template_base_sharing_artifact
     from .base_cache import qualification_input
     return {
+        **_peer_qualification_inputs(spec),
         **qualification_input(spec.resources),
         "traces": traces,
         "prediction_files": prediction_files,
@@ -205,6 +218,36 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
             if sharing_artifact else None
         ),
     }
+
+
+def _peer_qualification_inputs(spec) -> dict:
+    storage = spec.resources.snapshot_scheduling_storage
+    if storage is None or storage.topology != 'peer-local-ssd':
+        return {}
+    import cubesandbox
+    sdk = Path(cubesandbox.__file__).parent
+    files = [Path(storage.host_receipt),
+             Path('/usr/local/services/cubetoolbox/CubeAPI/bin/cube-api'),
+             Path('/usr/local/services/cubetoolbox/CubeMaster/bin/cubemaster'),
+             Path('/usr/local/services/cubetoolbox/Cubelet/bin/cubelet')]
+    templates = {spec.runtime.template, *(resolve_case_sandbox(case, spec.sandbox).template
+                                         for case in load_workload_cases(spec.workload))}
+    for root in storage.local_roots.values():
+        for template in templates:
+            catalog = Path(root) / 'snapshots' / template / 'metadata/catalog.json'
+            # COLD-miss studies can intentionally omit a target replica. Its
+            # absence is part of the qualification identity, not a fallback.
+            if catalog.exists():
+                files.append(catalog)
+    files.extend(sorted(sdk.rglob('*.py')))
+    def digest(path):
+        with path.open('rb') as stream:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
+    return {'peer_storage': {'files': {str(path): digest(path) for path in files},
+                            'template_inventory': {node: sorted(template for template in templates
+                                if (Path(root)/'snapshots'/template/'metadata/catalog.json').exists())
+                                for node, root in storage.local_roots.items()},
+                            'sdk_import': str(sdk)}}
 
 
 def implementation_digest() -> str:
@@ -306,6 +349,10 @@ def host_profile_for(spec: ExperimentSpec) -> dict[str, Any]:
     return {
         "cube_capacity_demand": demand,
         "cubelet_storage_root": spec.resources.cubelet_storage_root,
+        "snapshot_scheduling_storage": (
+            spec.resources.snapshot_scheduling_storage.model_dump(mode="json")
+            if spec.resources.snapshot_scheduling_storage is not None else None
+        ),
         "cube_cow_headroom_per_vm_mib": (
             spec.resources.cube_cow_headroom_per_vm_mib
         ),
@@ -432,12 +479,15 @@ def supervision_fault_test() -> dict[str, Any]:
 
 
 def _node_spec(spec, node):
+    peer = spec.resources.snapshot_scheduling_storage
     return spec.model_copy(update={"resources": spec.resources.model_copy(update={
         "compute_nodes": (), "local_numa_node": node.numa_node,
         "local_memory_capacity_mib": node.memory_capacity_mib,
         "local_memory_low_watermark_mib": node.low_watermark_mib,
         "local_memory_high_watermark_mib": node.high_watermark_mib,
         "pool_memory_budget_mib": spec.resources.compute_node_budget_mib(node),
+        **({'cold_snapshot_root': str(Path(peer.local_roots[node.node_id]) / 'cold')}
+           if peer is not None and peer.topology == 'peer-local-ssd' else {}),
     })})
 
 
@@ -465,7 +515,7 @@ def _snapshot_sandbox_representatives(
 
 
 def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=None,
-                            _template: str | None = None) -> dict[str, Any]:
+                            _template: str | None = None, _peer_nodes=()) -> dict[str, Any]:
     if spec.schema_version == 4:
         return design_probes(spec, snapshot_roundtrip_test, artifact_root=artifact_root)
     """Exercise checkpoint/restore and placement on every compute node."""
@@ -494,6 +544,9 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 "all_templates_exercised_by_qualification_replay": True,
                 "mechanism": spec.resources.snapshot_mechanism,
                 "storage": spec.resources.snapshot_storage,
+                "peer_bidirectional_restore_verified": all(
+                    item.get('peer_bidirectional_restore_verified') is True
+                    for item in templates.values()),
                 "incremental_delta_verified": all(
                     item.get("incremental_delta_verified", False)
                     for item in templates.values()
@@ -511,10 +564,13 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         nodes = {node.node_id: snapshot_roundtrip_test(
             _node_spec(spec, node), artifact_root=artifact_root / node.node_id,
             _node=node, _template=_template or spec.sandbox.template,
+            **({'_peer_nodes': spec.resources.compute_nodes}
+               if _peer_probe_options(spec, node) else {}),
         ) for node in spec.resources.compute_nodes}
         result = {"required": any(r["required"] for r in nodes.values()),
                   "passed": all(r["passed"] for r in nodes.values()), "nodes": nodes,
                   "mechanism": spec.resources.snapshot_mechanism, "storage": spec.resources.snapshot_storage,
+                  "peer_bidirectional_restore_verified": all(r.get('peer_bidirectional_restore_verified') is True for r in nodes.values()),
                   "incremental_delta_verified": all(r.get("incremental_delta_verified", False) for r in nodes.values()),
                   "cold_relocation_verified": all(
                       r.get("cold_relocation_verified") is True for r in nodes.values()
@@ -568,6 +624,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
             snapshot_compression_binary=spec.resources.snapshot_compression_binary,
             snapshot_storage=spec.resources.snapshot_storage,
             lazy_restore=spec.resources.lazy_restore,
+            **_peer_probe_options(spec, _node),
             numa_borrower=SandboxNumaBorrower(
                 Path(spec.resources.local_memory_cgroup), local_node=spec.resources.local_numa_node,
                 shared_node=spec.resources.warm_numa_node, shared_pool=pool,
@@ -583,9 +640,11 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
     runtime = make_lifecycle(spec.runtime, "runtime") if pair_policy else None
     coordinator = None
     runtime_pid = None
+    runtime_ram_digest = None
     primary_error: BaseException | None = None
     incremental_delta_verified = False
     cold_relocation_verified: bool | None = None
+    peer_transitions = []
     try:
         lifecycle.start()
         before = lifecycle.sandbox.commands.run("printf qualification-before", timeout=30)
@@ -594,11 +653,23 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         if runtime is not None:
             from .policy import PolicyCoordinator
             runtime.start()
-            process = runtime.sandbox.commands.run(
-                "nohup sleep 600 >/dev/null 2>&1 & echo $!", timeout=30)
+            witness = (
+                "import os,hashlib,signal,time,pathlib; "
+                "data=os.urandom(8*1024*1024); "
+                "p=pathlib.Path('/tmp/clawbox-ram-witness'); "
+                "signal.signal(signal.SIGUSR1,lambda *_:p.write_text(hashlib.sha256(data).hexdigest())); "
+                "p.write_text(hashlib.sha256(data).hexdigest()); time.sleep(1200)"
+            )
+            witness_command = (
+                f"nohup python3 -c {shlex.quote(witness)} >/tmp/clawbox-ram-witness.log 2>&1 & echo $!; "
+                "for i in $(seq 1 100); do test -s /tmp/clawbox-ram-witness && exit 0; sleep 0.05; done; exit 1"
+            ) if _peer_nodes else 'nohup sleep 600 >/dev/null 2>&1 & echo $!'
+            process = runtime.sandbox.commands.run(witness_command, timeout=30)
             runtime_pid = process.stdout.strip()
             if process.exit_code or not runtime_pid.isdigit():
                 raise RuntimeError("Runtime snapshot probe could not start PID witness")
+            if _peer_nodes:
+                runtime_ram_digest = runtime.sandbox.files.read('/tmp/clawbox-ram-witness').strip()
             coordinator = PolicyCoordinator(pair_policy,
                 budget_mib=spec.resources.pool_memory_budget_mib,
                 emergency_free_mib=0, operation_headroom_mib=0)
@@ -632,19 +703,100 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 # are already charged and are not spillable snapshot victims.
                 pool.spill_for_admission(pool.capacity_bytes - pool.accounted_bytes + 1)
                 cold_relocation_verified = True
-            if coordinator is not None:
-                coordinator.complete_model_wait(probe_id, str(generation))
-                runtime.restore()
-                alive = runtime.sandbox.commands.run(f"kill -0 {runtime_pid}", timeout=30)
-                if alive.exit_code:
-                    raise RuntimeError("Runtime PID did not survive pair checkpoint/restore")
-                if lifecycle.resident:
-                    raise RuntimeError("Runtime response restore unexpectedly restored Tool")
-            lifecycle.restore()
-            if lifecycle.sandbox.files.read("/tmp/clawbox-qualification-state") != marker:
-                raise RuntimeError(
-                    f"snapshot probe lost guest state after generation {generation}"
-                )
+            if _peer_nodes:
+                if runtime is None or lifecycle.resident or runtime.resident:
+                    raise RuntimeError('peer qualification requires a fully SWAPPED Runtime/Tool pair')
+                from contextlib import ExitStack
+                from .peer_transport import PeerReplicaStore
+                storage = spec.resources.snapshot_scheduling_storage
+                target = next(node for node in _peer_nodes if node.node_id != lifecycle.storage_domain)
+                store = PeerReplicaStore(storage, run_id=probe_id,
+                    emit=lambda event: None)
+                source_domain = lifecycle.storage_domain
+                with ExitStack() as pins:
+                    for vm in (runtime, lifecycle):
+                        if vm._snapshot_key is not None and pool is not None:
+                            pins.enter_context(pool.consume_guard(vm._snapshot_key))
+                    manifests = {vm.role: vm.export_paused_generation() for vm in (runtime, lifecycle)}
+                    replicas = {role: store.stage_replica(manifest, target.node_id)
+                                for role, manifest in manifests.items()}
+                    missing_target_proof = None
+                    if generation == 1:
+                        from clawbox.cube.peer_replica import assert_missing_target_rejected
+                        missing_target_proof = assert_missing_target_rejected(
+                            storage.native_control_socket, replicas['tool'],
+                            storage.local_roots[target.node_id])
+                    imported = {}
+                    for vm in (runtime, lifecycle):
+                        import_started = time.monotonic()
+                        imported[vm.role] = {'result': vm.bind_replica(replicas[vm.role]),
+                            'start_monotonic_s': import_started, 'end_monotonic_s': time.monotonic()}
+                        vm.cold_snapshot_root = str(Path(storage.local_roots[target.node_id]) / 'cold')
+                        if vm.numa_borrower is not None:
+                            vm.numa_borrower = SandboxNumaBorrower(
+                                Path(spec.resources.local_memory_cgroup), local_node=target.numa_node,
+                                shared_node=spec.resources.warm_numa_node, shared_pool=pool,
+                                cpus=target.cpus, node_id=target.node_id,
+                                cleanup_timeout_seconds=spec.resources.pool_transfer_timeout_seconds)
+                native_domain.handoff_swapped_placement(0, target.cpus, target.numa_node,
+                                                        tool=lifecycle, runtime=runtime)
+                peer_transitions.append({'generation': generation, 'source': source_domain,
+                    'target': target.node_id, 'manifests': manifests, 'replicas': replicas,
+                    'imports': imported, 'missing_target_rejection': missing_target_proof})
+            isolation = nullcontext({})
+            if _peer_nodes:
+                from clawbox.cube.peer_replica import source_domain_unavailable
+                isolation = source_domain_unavailable(storage.native_control_socket, source_domain)
+            with isolation as isolation_receipt:
+                if coordinator is not None:
+                    coordinator.complete_model_wait(probe_id, str(generation))
+                    runtime.restore()
+                    alive = runtime.sandbox.commands.run(f"kill -0 {runtime_pid}", timeout=30)
+                    if alive.exit_code:
+                        raise RuntimeError("Runtime PID did not survive pair checkpoint/restore")
+                    if _peer_nodes:
+                        witness_check = runtime.sandbox.commands.run(
+                            f"rm /tmp/clawbox-ram-witness; kill -USR1 {runtime_pid}; "
+                            "for i in $(seq 1 100); do test -s /tmp/clawbox-ram-witness && cat /tmp/clawbox-ram-witness && exit 0; sleep 0.05; done; exit 1",
+                            timeout=30)
+                        if witness_check.exit_code or witness_check.stdout.strip() != runtime_ram_digest:
+                            raise RuntimeError('Runtime random RAM contents did not survive checkpoint/restore')
+                    if lifecycle.resident:
+                        raise RuntimeError("Runtime response restore unexpectedly restored Tool")
+                lifecycle.restore()
+                if lifecycle.sandbox.files.read("/tmp/clawbox-qualification-state") != marker:
+                    raise RuntimeError(f"snapshot probe lost guest state after generation {generation}")
+                if _peer_nodes:
+                    proof = {}
+                    for vm in (runtime, lifecycle):
+                        mappings = []
+                        source_views = []
+                        for pid in _sandbox_pids(vm.sandbox_id):
+                            view = Path(f'/proc/{pid}/root') / storage.local_roots[source_domain].lstrip('/')
+                            if not view.is_dir() or any(view.iterdir()):
+                                raise RuntimeError('target host process still sees source SSD payload')
+                            source_views.append({'pid': pid, 'path': str(view), 'empty': True})
+                            for line in Path(f'/proc/{pid}/maps').read_text().splitlines():
+                                fields = line.split(maxsplit=5)
+                                if len(fields) == 6 and fields[5].startswith('/'):
+                                    mappings.append({'pid': pid, 'path': fields[5]})
+                            for fd in Path(f'/proc/{pid}/fd').iterdir():
+                                try:
+                                    mappings.append({'pid': pid, 'fd': fd.name, 'path': os.readlink(fd)})
+                                except FileNotFoundError:
+                                    pass
+                        target_root = storage.local_roots[vm.storage_domain]
+                        if not any(row['path'].startswith(target_root + '/') for row in mappings):
+                            raise RuntimeError('target VMM did not open imported target-domain backing')
+                        forbidden = [root for node, root in storage.local_roots.items() if node != vm.storage_domain]
+                        if any(row['path'].startswith(root + '/') for row in mappings for root in forbidden):
+                            raise RuntimeError('target VMM opened another node SSD backing')
+                        proof[vm.role] = {'sandbox_id': vm.sandbox_id, 'domain': vm.storage_domain,
+                                          'opened': mappings, 'source_view': source_views}
+                    peer_transitions[-1].update(actual_backing=proof, source_isolation=isolation_receipt,
+                        runtime_ram_sha256=runtime_ram_digest, runtime_pid=runtime_pid)
+            if _peer_nodes:
+                atomic_json(artifact_root / f'peer-generation-{generation}.json', peer_transitions[-1])
         if spec.resources.snapshot_mechanism == "incremental-cow":
             checkpoints = [
                 item for item in lifecycle.timings
@@ -694,6 +846,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "storage": spec.resources.snapshot_storage,
         "incremental_delta_verified": incremental_delta_verified,
         "cold_relocation_verified": cold_relocation_verified,
+        "peer_bidirectional_restore_verified": bool(peer_transitions and len(peer_transitions) == 2 and primary_error is None),
         "timings": lifecycle.timings,
         "pair_checkpoint_verified": bool(runtime is not None and primary_error is None),
         "runtime_pid": runtime_pid,
@@ -728,6 +881,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "storage": spec.resources.snapshot_storage,
         "incremental_delta_verified": incremental_delta_verified,
         "cold_relocation_verified": cold_relocation_verified,
+        "peer_bidirectional_restore_verified": bool(peer_transitions and len(peer_transitions) == 2),
         "timings": lifecycle.timings,
         "pair_checkpoint_verified": bool(runtime is not None and primary_error is None),
         "runtime_pid": runtime_pid,
@@ -828,6 +982,7 @@ def live_borrow_roundtrip_test(
         allow_internet_access=spec.sandbox.allow_internet_access,
         role="tool", numa_borrower=borrower,
         configured_memory_bytes=spec.sandbox.memory_mib * 1024 * 1024,
+        **_peer_probe_options(spec, _node),
         **_native_probe_options(native_domain, "tool"),
     )
     primary_error: BaseException | None = None
@@ -983,7 +1138,7 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         },
     })
     workload = spec.workload.model_copy(update={
-        "cases": tuple(cases), "repetitions": 1,
+        "cases": tuple(cases), "repetitions": 1, "rollouts_per_case": 1,
     })
     execution_updates = {
         # One session per case proves heterogeneous coverage. The worker-pool
@@ -995,6 +1150,8 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         "session_arrival_offsets_seconds": None,
         "stagger_interval_seconds": 0.0,
     }
+    if spec.workload.session_assignment.value == 'grouped':
+        execution_updates['concurrency_levels'] = (len(cases),)
     if spec.execution.tool_placement is not None:
         # Corpus smokes cover images/SSH; the separate native placement gate
         # below proves snapshot fork, placement, state restoration and raw PMU.
@@ -1396,6 +1553,7 @@ def template_base_sharing_test(
                         f"{session_prefix}-{pair_index}", "qualification-template-base",
                     ),
                     allow_internet_access=sandbox.allow_internet_access,
+                    **_peer_probe_options(spec),
                 )
                 lifecycle.start()
                 pair.append(lifecycle)
@@ -1625,6 +1783,10 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         "cleanup_verified": True,
         "scope": "capability_smoke",
     }
+    peer = spec.resources.snapshot_scheduling_storage
+    if peer is not None and peer.topology == 'peer-local-ssd':
+        # This receipt proves the exact domain/catalog and pair-resume contract.
+        expected['qualification_contract_digest'] = qualification_contract_digest(spec)
     mismatches = [
         key for key, value in expected.items() if receipt.get(key) != value
     ]
@@ -1665,6 +1827,10 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
 
 def _probe_mismatches(spec, receipt):
     mismatches = []
+    storage = spec.resources.snapshot_scheduling_storage
+    if (storage is not None and storage.topology == 'peer-local-ssd'
+            and receipt.get('snapshot_roundtrip_test', {}).get('peer_bidirectional_restore_verified') is not True):
+        mismatches.append('peer_bidirectional_restore_verified')
     if spec.resources.local_memory_cgroup and not (
         isinstance(receipt.get('runtime_control_test'), dict)
         and receipt['runtime_control_test'].get('passed') is True
@@ -1733,6 +1899,7 @@ def design_probes(spec, probe, *, artifact_root):
                 'pool_transfer_concurrency', 'pool_transfer_timeout_seconds',
                 'template_base_sharing', 'template_base_sharing_artifact', 'base_template_cache',
                 'runtime_poll_interval_seconds')
+        keys += ('snapshot_scheduling_storage',)
         identity = {key: resources[key] for key in keys}
         identity['snapshot_enabled'] = policy.reclamation.value == 'snapshot_pause'
         identity['cpu_qos_policy'] = child.execution.cpu_qos_policy

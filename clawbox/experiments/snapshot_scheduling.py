@@ -225,6 +225,9 @@ def _shared_arm_directories(
 
 def validate_applied_storage(spec: SnapshotSchedulingStorageSpec) -> dict[str, Any]:
     """Fail before VM creation unless the reviewed XFS/NFS/tmpfs plan is live."""
+    if spec.topology == "peer-local-ssd":
+        from .snapshot_host import validate_peer_storage
+        return validate_peer_storage(spec)
     receipt_path = Path(spec.host_receipt)
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -310,7 +313,8 @@ def cleanup_snapshot_run_storage(
 ) -> list[str]:
     """Remove only run-scoped scenario storage whose task marker still matches."""
     roots = [Path(path) for path in spec.local_roots.values()]
-    roots.append(Path(next(iter(spec.shared_mounts.values()))))
+    if spec.shared_mounts:
+        roots.append(Path(next(iter(spec.shared_mounts.values()))))
     roots.append(Path(spec.warm_root))
     for value in (cold_snapshot_roots or {}).values():
         root = Path(value)

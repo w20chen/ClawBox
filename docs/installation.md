@@ -429,6 +429,54 @@ python -m pip install -e "$CUBE_SOURCE_DIR/sdk/python"
 New workers load the updated SDK. If a patch conflicts, use a newly prepared
 source checkout rather than modifying a running experiment's environment.
 
+## Add two local SSD storage domains
+
+Complete the standard host installation first. Prepare the two owned local pools
+with the [peer restore walkthrough](guide.md#local-ssd-domains-and-peer-restore).
+Use a new CubeSandbox source directory with the release builder's full patch
+recipe; `peer-local-storage-domain.patch` extends the matching API, Master,
+Cubelet and Python SDK. Keep the current Cube version and verified guest assets.
+This host interface change does not require rebuilding existing guest templates
+or retraining ClawTune.
+
+An existing host with the pinned builder image can build only the changed host
+components. This uses the same source recipe and preserves guest assets and
+the installed Shim:
+
+```bash
+bash scripts/build-cubesandbox-release.sh --peer-components --source "$CUBE_SOURCE_DIR"
+```
+
+After building, with all VMs cleaned up, install the matching components:
+
+```bash
+sudo bash scripts/install-peer-cubesandbox.sh \
+  "$CUBE_SOURCE_DIR" "$PWD" peer-host.yaml \
+  /run/clawbox-peer/native.sock "$PWD/.venv/bin/python"
+```
+
+The installer requires mounted domain pools and an empty VM cgroup. It saves
+the previous binaries, SDK source, and service configuration under
+`/data/clawbox-backend-backups/peer-*`, installs API/Master/Cubelet plus SDK, and
+waits for a successful domain health response matching the configured storage roots. It retains the installed Shim and its
+existing snapshot/base-cache optimizations. Keep the printed installation receipt.
+Domain health verification is followed by template preparation, base-cache preparation,
+and real VM qualification in the walkthrough before launching a new run ID.
+
+To undo this installation after cleaning the experiment VMs:
+
+```bash
+sudo bash scripts/install-peer-cubesandbox.sh --rollback "$PEER_BACKUP_DIR"
+```
+
+Set `PEER_BACKUP_DIR` to the exact directory printed by the installation being
+reverted. Rollback restores that installation's saved components and SDK; run
+host checks and qualify the restored configuration before experiments. Stop the
+owned transport helpers and unmount the domain pools with `snapshot-storage
+cleanup ... --apply` only after VM cleanup; results and pool images are retained.
+After a reboot, recover the standard host, reapply the peer host plan, prepare
+the base cache, and renew qualification before use.
+
 ## Maintain storage
 
 Preview recognized crash dumps, then explicitly apply the cleanup:

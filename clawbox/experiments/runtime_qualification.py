@@ -266,6 +266,10 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
     client = CubeSandboxClient(journal=OwnedSandboxJournal(artifact_root/'owned-sandboxes.jsonl'))
     parent = Path(spec.resources.local_memory_cgroup)
     local_node, cpus = _qualification_compute_placement(spec.resources)
+    from .qualification import _peer_probe_options
+    peer_options = _peer_probe_options(spec)
+    cold_root = (str(Path(peer_options['storage_domain_root']) / 'cold')
+                 if peer_options else spec.resources.cold_snapshot_root)
     domain = PriorityDomain(
         parent, concurrency=2, repetition=0, legacy=False,
         placements={0: (cpus, local_node), 1: (cpus, local_node)},
@@ -299,14 +303,15 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
                     cgroup_token=domain.token(index,role), verify_cgroup=verify,
                     prepare_cgroup=lambda index=index,role=role: domain.prepare(index,role),
                     warm_snapshot_root=spec.resources.warm_snapshot_root,
-                    cold_snapshot_root=spec.resources.cold_snapshot_root,
+                    cold_snapshot_root=cold_root,
                     snapshot_mechanism=spec.resources.snapshot_mechanism,
                     snapshot_compression=spec.resources.snapshot_compression,
                     snapshot_compression_binary=spec.resources.snapshot_compression_binary,
                     lazy_restore=spec.resources.lazy_restore,
                     snapshot_storage=spec.resources.snapshot_storage, snapshot_pool=pool,
                     default_snapshot_tier=spec.resources.default_snapshot_tier,
-                    snapshot_reservation_bytes=(vm.memory_mib+256)*MIB)
+                    snapshot_reservation_bytes=(vm.memory_mib+256)*MIB,
+                    **peer_options)
                 lifecycles.append(lifecycle)
                 lifecycle.start()
                 from .base_cache import verify_created_mapping

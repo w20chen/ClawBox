@@ -32,10 +32,16 @@ they rewrite result artifacts.
 | `host check FILE` | Check the plan and prerequisites without applying it. |
 | `host apply FILE [--profile PROFILE]` | Apply a reviewed plan on an idle host; default profile is `~/.config/clawbox/host.json`. |
 | `host clean [--apply]` | Preview or remove recognized crash dumps; `--root`, `--older-than-hours` (24), `--min-size-mib` (100). |
-| `snapshot-storage init FILE` | Write a new editable two-logical-node XFS/NFS/tmpfs plan; never overwrite. |
+| `snapshot-storage init FILE` | Write a schema-2 peer-local-ssd host plan with explicit disk identities; never overwrite. |
 | `snapshot-storage check FILE` | Show the reviewed storage/network plan and verify root, tools, space, and NUMA prerequisites. |
-| `snapshot-storage apply FILE` | Create or recover the plan. Exact repeats reuse saved state; configuration mismatches fail without replacing loop images. |
+| `snapshot-storage inspect-backing --backing-device DEVICE` | Read XFS allocation-group free space and linear device mapping; does not reserve space. |
+| `snapshot-storage reserve-image --image FILE --capacity-mib N --backing-device DEVICE --physical-device SSD --allocation-group N [--allocation-group-end N] [--chunk-mib 16384] [--resume-receipt FILE]` | Reserve a new owned image and prove every payload extent resides on the selected SSD. A group range initializes and assembles bounded chunks; output includes the required allocation receipt. |
+| `snapshot-storage apply FILE` | Create or recover the plan on an idle VM host. Reuse saved pools; allow reviewed rate/latency/MTU changes. Storage identity/capacity changes require a new pool. |
 | `snapshot-storage cleanup FILE [--apply]` | Preview by default; explicit apply removes only recorded mounts/network state and preserves loop images. |
+| `snapshot-storage prepare FILE --template ID ... --control-socket PATH --receipt FILE [--workers N]` | Import complete verified templates into both applied native domains; receipt filename must be new. `N` is a positive number of concurrent template preparations, default `1`; shared immutable objects are copied once per SSD. Preparation occurs outside replay and does not cap sessions. |
+| `snapshot-storage qualify-network FILE --output FILE [--size-mib 128]` | Verify two concurrent transfers share the aggregate directional limit; restore the configured qdisc afterwards. |
+| `snapshot-storage cleanup-replicas FILE --run-id ID --control-socket PATH [--apply]` | Preview by default; release native references and remove only this run's unreferenced replicas. Requires no active VMs or peer transfers. |
+| `snapshot-storage reset-cache FILE [--apply]` | Preview SSD file residency by default. On an idle Linux host with applied owned mounts, sync unique regular inodes inside the two local SSD roots, then their exact owned backing images, and request `POSIX_FADV_DONTNEED`; preserve WARM and all other external files. Inner files and backing images have separate requested-byte and actual before/after `mincore` page counts. Advice is not guaranteed, including with direct-I/O loops. Use after qualification/replica cleanup and before each matched formal arm; no host apply or image rebuild required. |
 | `setup` | Direct single-compute-node setup using template/node and LOCAL/WARM options; the editable `host` workflow is preferred. |
 | `images [--role runtime\|sandbox]` | Build/register integration images using an existing profile. Repeat `--role` or omit it for both. |
 | `configure BASE OUTPUT` | Generate an editable specification; `--profile`, `--recipe`, `--set`, `--force`, and the options below. |
@@ -69,7 +75,7 @@ dedicated CLI flag.
 | Group | Options |
 | --- | --- |
 | Design | `--experiment-id`, `--recipe`, `--fixed-methods`, `--checkpoint-axis encoding\|storage\|residency`, repeated `--set GROUP.FIELD=YAML_VALUE` |
-| Workload | `--trace`, `--workload-manifest`, `--case-id`, `--prompt`, `--repository`, `--base-commit`, `--validation-command`, `--repetitions`, `--session-assignment single_case\|round_robin\|unique` |
+| Workload | `--trace`, `--workload-manifest`, `--case-id`, `--prompt`, `--repository`, `--base-commit`, `--validation-command`, `--repetitions`, `--session-assignment single_case\|round_robin\|unique\|grouped`, `--rollouts-per-case` |
 | VM identity | `--runtime-template-id`, `--tool-template-id`, `--runtime-image-reference`, `--tool-image-reference`, `--runtime-image-digest`, `--tool-image-digest`, `--target-node` |
 | VM shape | `--runtime-vcpu`, `--tool-vcpu`, `--runtime-memory-gib`, `--tool-memory-gib`, `--tool-workspace` |
 | Prediction | `--prediction-mode runtime\|frozen\|cold-start\|host-live`, `--prediction-artifact`, `--prediction-reservation-scale`, `--static-tool-memory-mib INTEGER\|auto`, `--admission-margin-mib` |
@@ -129,48 +135,105 @@ Linux logical CPU IDs; vCPU counts do not reserve physical cores.
 | `execution` | Offered concurrency, arrivals, timeouts, concurrency bounds, diagnostics |
 | `measurement` | Sampling, stabilization, final validation, worker output fallback |
 
-### Snapshot branching scenario
+### Peer-local-SSD restore
 
-`execution.snapshot_branching` enables the BPO-style parent/branch runner. It is
-used with `environment.resources.snapshot_scheduling_storage`; ordinary Agent
-experiments are unchanged.
+Ordinary replay uses `environment.resources.snapshot_scheduling_storage` without
+`execution.snapshot_branching`. Its fields are:
 
 | Field | Default / unit | Meaning |
 | --- | --- | --- |
-| `pressure` | required | `compute-memory` or `local-disk`; labels the fixed pressure condition. |
-| `transfer_mode` | `shared-relay` | `shared-relay` performs local-XFS -> NFS -> target-XFS; `peer-direct` performs one same-host cross-XFS copy without NFS. |
-| `parent_nodes` | 12 `node0`, 4 `node1` | Source logical node for every immutable parent; exactly two distinct node IDs. |
-| `branches_per_parent` | 8 | Independent native snapshot restores per parent. |
-| `arrival_batches` | `[32,32,32,32]` | Fixed burst sizes; the sum must equal parents times branches. |
-| `arrival_batch_interval_seconds` | 1.0 s | Interval between submitted bursts; no artificial Tool or I/O delay. |
-| `per_node_concurrency` | 32 | Hard simultaneous rollout slot limit for each logical node. |
-| `per_node_memory_mib` | 32768 MiB | Equal per-node rollout admission budget. |
-| `migration_threshold_seconds` | 0.25 s | Minimum predicted ready-time benefit required before Snapshot-Aware crosses nodes. |
-| `initial_restore_seconds` | 0.5 s | Cold-start estimate until measured restore history exists. |
-| `initial_transfer_mib_per_second` | 256 MiB/s | Cold-start stage estimate until cache state makes bytes zero; actual copies are always timed. |
-| `parent_memory_state_mib`, `parent_rootfs_payload_mib` | 64, 16 MiB | Real parent in-memory state and workload-modified rootfs payload sizes. |
-| `branch_memory_work_mib`, `branch_file_work_mib` | 128, 64 MiB | Real per-rollout memory and file work. |
-| `branch_disk_reservation_mib` | 128 MiB | Per-rollout local XFS reservation used for hard capacity admission. |
-| `branch_cpu_rounds` | 48 | SHA-256 work iterations; not a sleep duration. |
-| `command_timeout_seconds` | 300 s | Per-branch guest workload deadline. |
-| `snapshot_version` | 1 | Version component of the `Snapshot ID + Version` cache key. |
+| `topology`, `transport` | explicitly `peer-local-ssd`, `peer-network` | Two local XFS domains, no shared SSD/NFS fallback. |
+| `local_roots` | required node-to-path map | Native domain roots matching the applied host receipt. |
+| `local_capacity_mib_by_node` | required MiB per node, at least 512 | Must match applied loop pools; actual use and headroom are checked independently. |
+| `transfer_endpoints` | required node-to-endpoint map | Each endpoint has `netns`, `address`, and TCP `port`. |
+| `warm_root`, `warm_capacity_mib` | explicit path and MiB | Existing shared DRAM, bounded by applied capacity. |
+| `host_receipt`, `native_control_socket` | required absolute paths | Applied topology evidence and installed native control endpoint. |
+| `transfer_timeout_seconds` | 300 s | Timeout for a peer object transfer; positive seconds. |
+| `restore_costs` | required for cost-aware | `provenance`, measured `effective_transfer_mib_per_second`, `import_seconds`, `native_restore_seconds`, `resource_wait_seconds`. Unknown costs cannot be represented as measured zeros. |
 
-Storage fields are `local_roots` and `shared_mounts` maps for the same two node
-IDs, `warm_root`, `local_capacity_mib`, `shared_capacity_mib`,
-`warm_capacity_mib`, and `host_receipt`. Local roots must resolve to two distinct
-XFS sources; shared mounts must resolve to the same NFS export; WARM must be
-tmpfs. The receipt and live capacities must match before any VM is created.
+`mechanisms.placement.resume_policy` defaults to `home`; `load-aware` ranks
+resource readiness, and `cost-aware` includes missing objects and active transfer
+competition. `migration_threshold_seconds` defaults to 0.25 s and is nonnegative.
+Initial `placement.policy` remains a separate decision. Non-home resume requires
+managed compute nodes, pair snapshot reclamation and no fixed session CPU slots.
+Cold snapshots use each node's local domain. Existing compression, lazy restore,
+base cache, admission, CPU policies and memory borrowing retain their own controls.
 
-The scenario accepts placement policies `affinity`, `load_aware`, and
-`snapshot_aware`. Affinity queues on the parent node. Load-Aware minimizes only
-predicted queue time among hard-feasible nodes. Snapshot-Aware minimizes queue +
-stage + restore and applies `migration_threshold_seconds`. All use the same cache
-and arrival state. Any scenario/configuration edit requires a new run ID. Storage
-or network edits require host apply as described above; workload size changes do
-not require image rebuild or retraining.
+`execution.measurement_window_seconds` defaults to unset. Set positive seconds
+for a fixed window starting at the first planned arrival; completion throughput
+uses this full denominator and retains unfinished sessions. Early completion
+does not shorten it. `arm_timeout_seconds` remains the overall execution bound;
+allow setup time beyond the measurement horizon. Resource averages use the
+actual observation interval rather than assuming idle samples after early exit.
 
-Resolved results also contain internal `resources` and `policies` objects. Use
-the schema-4 locations above when editing inputs.
+The host plan uses `schema_version: 2`, `topology: peer-local-ssd`, `state_root`,
+`receipt`, and exactly two `nodes`. Each node explicitly supplies `numa_node`,
+`cpus`, `backing_mount`, `filesystem_uuid`, `image_path`, `local_mount`,
+`capacity_mib`, `netns`, `node_veth`, and `transfer_address` (IPv4 CIDR).
+`backing_headroom_mib` defaults to 4096; `transfer_port` defaults to 19191.
+TCP source helpers and target receivers use that node's `cpus` and a strict
+`numa_node` memory policy through `numactl`. Receiver settings come from the
+verified host receipt. Changing these fields requires idle host apply and a new
+run ID; transfer buffers and newly allocated SSD cache pages use the compute
+node's budget. Existing resident cache pages are not relocated by this policy.
+`direct_io` defaults to `false`. Set it to `true` for SSD experiments to bypass
+the outer backing-image page cache. Apply checks the actual loop device's DIO
+flag; fully allocated, aligned files are required. This is separate from inner
+filesystem page-cache residency and its reset command. Changing DIO requires a
+new pool plan and a new run ID; old correctness-only pools can remain buffered.
+For a linear LVM backing filesystem, configure both optional fields
+`physical_device` and `image_allocation_receipt` from a successful
+`reserve-image` result. Every extent must belong to that SSD, and the two nodes
+must use different physical SSDs. The receipt binds image inode, capacity,
+filesystem UUID and SSD serial. `apply` formats this owned blank reservation
+with discard disabled and verifies placement again. It preserves existing XFS
+contents. Filesystem metadata/log sharing remains a limitation of this topology.
+`network.bandwidth_mbit_per_direction` is required, in decimal Mbit/s shared by
+all transfers in that direction. `latency_ms_one_way` defaults to zero and
+`mtu` to 1500. `shared_dram` supplies the existing `root`, `numa_node` (default 2),
+`capacity_mib` and saved host-profile `receipt`. Host changes require apply;
+capacity changes select a new image, preserving old data. Any experiment change
+requires a new run ID. No field here requires prediction retraining or guest
+image rebuild; native API changes require matching components and qualification.
+
+`reserve-image` requires root, mounted XFS with reflink, `xfs_db`, `dd`, `lsblk`,
+`blkid`, and `dmsetup` for linear LVM. Capacity is MiB and must be at least 512.
+Allocation group numbers are inclusive and come from `inspect-backing`; choose
+groups mapped wholly to the intended SSD. Without an end group, a single
+allocation is attempted. With an end group, chunks start at `--chunk-mib`
+(default 16384 MiB), shrinking to 1 MiB near fragmentation. Chunk assembly
+writes zeroes outside experiment measurement and can take minutes. An existing
+image is never replaced. A failed one-shot allocation removes only its recorded
+new inode; a failed chunk assembly preserves owned partial files and receipts
+for inspection. Repeat the same range command with `--resume-receipt FILE` to
+verify the recorded inode, completed size and physical extents before continuing
+the partial reservation. The image lock prevents concurrent reservation writers.
+Free-space inspection alone is not proof of capacity: only a
+`status: verified` receipt and subsequent host check qualify the reservation.
+
+`snapshot-storage qualify-network` requires applied pools/helpers and a new
+`--output` filename. `--size-mib` is per temporary object: default 128, range
+16–1024 MiB. Two distinct objects run concurrently at the configured rate, then
+at a temporary rate derived from measured throughput. The test also checks
+same-object deduplication. It restores the configured network and removes its
+fixtures even when qualification fails. These measurements describe transport
+qualification, not VM throughput or physical SSD I/O.
+
+`snapshot-storage cleanup-replicas` must run before unmounting the host pools.
+`--run-id` names the completed/aborted run; `--control-socket` must expose the
+matching native domain roots. Without `--apply`, it only previews. Apply first
+requires native confirmation that VM references are released, then removes that
+run's packages and collects only their unreferenced objects. Prepared templates,
+other runs, results and the shared base cache remain. This command does not reset
+the WARM inventory for a comparison; configure and record that inventory separately.
+
+Base-cache plans accept `aliases: {TEMPLATE: [SSD_RAM_PATH, ...]}` (default empty).
+Preparation verifies aliases byte-for-byte; local inode identities remain checked
+on use. Aliases share one WARM file and one allocation charge. Changing aliases
+requires idle-host cache preparation and fresh experiment qualification.
+
+Historical `snapshot_branching` source and reports remain available for interpreting
+simulated results; the old NFS storage plan is not a deployment path.
 
 ## Host plan
 
@@ -245,6 +308,16 @@ its `case_id`, source, prompt, repository/revision, replay reference, optional
 validation command, and metadata. A case-level `sandbox` is a complete Tool VM
 description, not a partial override. Optional `snapshot_reuse_probability` is a
 value in `[0,1]` used by value-based snapshot residency.
+
+`grouped` assigns each case a contiguous group of `workload.rollouts_per_case`
+independent sessions (default 1, positive integer; CLI `--rollouts-per-case`).
+The only concurrency level must equal case count times rollouts per case.
+Each group shares its original replay trace and offered arrival instant; every
+session creates separate Runtime and Tool VMs with independent mutable state.
+This field does not limit active groups or sessions. Non-grouped assignments
+require `rollouts_per_case: 1`. Qualification executes one rollout per case;
+formal runs retain the configured group size. Changes require a new run ID and
+qualification, but no host apply, image rebuild or retraining.
 
 ## Mechanisms
 
@@ -582,11 +655,12 @@ Fields are under `execution`:
 | `arm_finalization_timeout_seconds` | 300 | Additional supervisor allowance for cleanup/results, seconds. Failed-session cleanup cancels pending model responses/replay waits and preserves their error records. |
 | `command_timeout_seconds` | 300 | Tool command deadline, seconds. Each admitted invocation uses a fresh SSH connection so earlier calls cannot consume its connection lifetime. Changing the deadline requires a new run ID, not an image rebuild. |
 | `replay_tool_timeout_multiplier` | 1.0 | Unitless multiplier, 1.0–100.0, applied only to recorded replay Tool deadlines after admission. Fast commands do not wait longer; only expiry is extended. Use a new run ID after changing it. |
-| `arrival_schedule` | `poisson` | `burst`, `fixed_stagger`, or `poisson` |
-| `stagger_interval_seconds` | 0 | Positive for fixed staggering; zero for burst/Poisson |
+| `arrival_schedule` | `poisson` | `burst`, `fixed_stagger`, `poisson`, or `normal`; grouped assignment generates one arrival per case and repeats it for all rollouts |
+| `normal_arrival_std_seconds` | 60 | Positive standard deviation in seconds. Normal scheduling draws one seeded N(0, sigma) value per group/session, sorts the draws and subtracts the minimum so the first arrival is zero. No clipping or rescaling; the resulting last arrival is not a fixed window. Seed also includes repetition and ordered case IDs; policies share arrivals. New run ID required; no host apply, rebuild or retraining. |
+| `stagger_interval_seconds` | 0 | Positive for fixed staggering; zero for burst/Poisson/normal |
 | `poisson_arrival_window_fraction` | 2.0 | Expected window divided by median scaled trace duration |
 | `poisson_arrival_window_seconds` | `null` | Positive explicit expected window; overrides the fraction |
-| `session_arrival_offsets_seconds` | `null` | Explicit nondecreasing finite offsets, in seconds from arm start; one per offered session, with exactly one concurrency level. Overrides generated arrival times. Preserve each LS case's offset when removing BE for a no-BE reference. Changing offsets requires a new run ID; no host apply, image rebuild, or retraining. |
+| `session_arrival_offsets_seconds` | `null` | Explicit nondecreasing finite offsets, in seconds from arm start; one per offered session, with exactly one concurrency level. Overrides generated arrival times. Grouped rollouts of the same case must have identical offsets. Preserve each LS case's offset when removing BE for a no-BE reference. Changing offsets requires a new run ID; no host apply, image rebuild, or retraining. |
 | `control_timing_details` | `false` | Enable nested control spans, GC tracing, raw lifecycle dumps, duplicate payloads, and Runtime working-KB exports |
 | `model_request_content_retention` | `failures` | `failures` keeps compact successful Model Gateway records and exact request/response content only for incomplete, errored, non-200, or undelivered requests. `all` retains exact content for every request for a full-audit run. The setting changes result retention only; use a new run ID. It requires no host apply, image rebuild, or retraining. |
 

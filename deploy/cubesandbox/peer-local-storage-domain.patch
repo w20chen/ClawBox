@@ -1,0 +1,1173 @@
+diff --git a/CubeAPI/src/cubemaster/mod.rs b/CubeAPI/src/cubemaster/mod.rs
+index c040f0f..b5278bf 100644
+--- a/CubeAPI/src/cubemaster/mod.rs
++++ b/CubeAPI/src/cubemaster/mod.rs
+@@ -1497,6 +1497,8 @@ pub struct SandboxUpdateRequest {
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub snapshot_generation: Option<u64>,
+     pub snapshot_mechanism: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub storage_domain: Option<String>,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+diff --git a/CubeAPI/src/handlers/sandboxes.rs b/CubeAPI/src/handlers/sandboxes.rs
+index ff13119..32e36ed 100644
+--- a/CubeAPI/src/handlers/sandboxes.rs
++++ b/CubeAPI/src/handlers/sandboxes.rs
+@@ -391,7 +391,7 @@ pub async fn resume_sandbox(
+     let sandbox = state
+         .services
+         .sandboxes
+-        .resume_sandbox(&sandbox_id, body.timeout, body.snapshot_mechanism.as_deref())
++        .resume_sandbox(&sandbox_id, body.timeout, body.snapshot_mechanism.as_deref(), body.storage_domain.as_deref())
+         .await?;
+ 
+     tracing::info!(sandbox_id = %sandbox_id, "resume_sandbox: success");
+@@ -436,7 +436,7 @@ pub async fn connect_sandbox(
+     let sandbox = state
+         .services
+         .sandboxes
+-        .connect_sandbox(&sandbox_id, body.timeout, body.snapshot_mechanism.as_deref())
++        .connect_sandbox(&sandbox_id, body.timeout, body.snapshot_mechanism.as_deref(), body.storage_domain.as_deref())
+         .await?;
+     Ok((StatusCode::OK, Json(sandbox)))
+ }
+diff --git a/CubeAPI/src/models/mod.rs b/CubeAPI/src/models/mod.rs
+index 15e90f4..c1aedda 100644
+--- a/CubeAPI/src/models/mod.rs
++++ b/CubeAPI/src/models/mod.rs
+@@ -616,6 +616,7 @@ pub struct ResumedSandbox {
+     pub auto_pause: bool,
+     #[serde(default)]
+     pub snapshot_mechanism: Option<String>,
++    pub storage_domain: Option<String>,
+ }
+ 
+ /// Request body for POST /sandboxes/{id}/connect.
+@@ -626,6 +627,7 @@ pub struct ConnectSandbox {
+     pub timeout: Option<i32>,
+     #[serde(default)]
+     pub snapshot_mechanism: Option<String>,
++    pub storage_domain: Option<String>,
+ }
+ 
+ /// Request body for POST /sandboxes/{id}/snapshots.
+@@ -824,6 +826,7 @@ pub struct RelocateSnapshotRequest {
+     pub snapshot_tier: String,
+     pub memory_snapshot_path: String,
+     pub snapshot_generation: u64,
++    pub storage_domain: Option<String>,
+ }
+ 
+ #[derive(Debug, Deserialize, ToSchema)]
+diff --git a/CubeAPI/src/services/sandboxes.rs b/CubeAPI/src/services/sandboxes.rs
+index eef8e45..f47185d 100644
+--- a/CubeAPI/src/services/sandboxes.rs
++++ b/CubeAPI/src/services/sandboxes.rs
+@@ -257,6 +257,9 @@ impl SandboxService {
+         ]);
+ 
+         let labels = metadata.map(|mut meta| {
++            if let Some(value) = meta.get("clawbox.storage.domain") {
++                annotations.insert("clawbox.storage.domain".to_string(), value.clone());
++            }
+             if let Some(value) = meta.remove(HOSTDIR_MOUNT_KEY) {
+                 annotations.insert(HOSTDIR_MOUNT_KEY.to_string(), value);
+             }
+@@ -415,14 +418,11 @@ impl SandboxService {
+             snapshot_generation: Some(placement.snapshot_generation),
+             snapshot_mechanism: None,
+         };
++        let mut request = self.build_update_request(sandbox_id, "relocate_snapshot", None, Some(&pause_placement));
++        request.storage_domain = placement.storage_domain.clone();
+         let response = self
+             .cubemaster
+-            .update_sandbox(&self.build_update_request(
+-                sandbox_id,
+-                "relocate_snapshot",
+-                None,
+-                Some(&pause_placement),
+-            ))
++            .update_sandbox(&request)
+             .await
+             .map_err(|e| map_update_cubemaster_err(e, sandbox_id))?;
+         ensure_update_result(
+@@ -438,9 +438,11 @@ impl SandboxService {
+         sandbox_id: &str,
+         timeout: Option<i32>,
+         snapshot_mechanism: Option<&str>,
++        storage_domain: Option<&str>,
+     ) -> AppResult<Sandbox> {
+         let mut update = self.build_update_request(sandbox_id, "resume", timeout, None);
+         update.snapshot_mechanism = snapshot_mechanism.map(str::to_owned);
++        update.storage_domain = storage_domain.map(str::to_owned);
+         let resp = self
+             .cubemaster
+             .update_sandbox(&update)
+@@ -474,12 +476,14 @@ impl SandboxService {
+         sandbox_id: &str,
+         timeout: Option<i32>,
+         snapshot_mechanism: Option<&str>,
++        storage_domain: Option<&str>,
+     ) -> AppResult<Sandbox> {
+         let mut d = self.fetch_sandbox_detail(sandbox_id).await?;
+ 
+         if d.status == SandboxStatus::Paused {
+             let mut update = self.build_update_request(sandbox_id, "resume", timeout, None);
+             update.snapshot_mechanism = snapshot_mechanism.map(str::to_owned);
++        update.storage_domain = storage_domain.map(str::to_owned);
+             let resp = self
+                 .cubemaster
+                 .update_sandbox(&update)
+@@ -758,6 +762,7 @@ impl SandboxService {
+             memory_snapshot_path: placement.and_then(|value| value.memory_snapshot_path.clone()),
+             snapshot_generation: placement.and_then(|value| value.snapshot_generation),
+             snapshot_mechanism: placement.and_then(|value| value.snapshot_mechanism.clone()),
++            storage_domain: None,
+         }
+     }
+ 
+diff --git a/CubeMaster/pkg/base/constants/snapshot_backend.go b/CubeMaster/pkg/base/constants/snapshot_backend.go
+index 969ac4d..fb4b255 100644
+--- a/CubeMaster/pkg/base/constants/snapshot_backend.go
++++ b/CubeMaster/pkg/base/constants/snapshot_backend.go
+@@ -29,6 +29,15 @@ const (
+ // NormalizeSnapshotBackend maps create/pause backend input onto xfs | s3.
+ // Empty and historical cubecow aliases become xfs.
+ func NormalizeSnapshotBackend(raw string) (string, error) {
++	raw = strings.ToLower(strings.TrimSpace(raw))
++	if strings.HasPrefix(raw, "xfs@") {
++		domain := strings.TrimPrefix(raw, "xfs@")
++		if domain == "" || strings.ContainsAny(domain, "/\\. :\t\n") {
++			return "", fmt.Errorf("invalid storage domain %q", domain)
++		}
++		return raw, nil
++	}
++
+ 	switch strings.ToLower(strings.TrimSpace(raw)) {
+ 	case "", SnapshotBackendXFS, "cow", "cubecow", "reflink", "xfscow":
+ 		return SnapshotBackendXFS, nil
+diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
+index eb01543..334cdae 100644
+--- a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
++++ b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
+@@ -182,6 +182,17 @@ func relocatePauseSnapshot(ctx context.Context, req *types.UpdateRequest, hostIP
+ 			"clawbox.snapshot.generation":           strconv.FormatUint(req.SnapshotGeneration, 10),
+ 		},
+ 	}
++	backend := rec.Backend
++	if req.StorageDomain != "" {
++		var err error
++		backend, err = constants.NormalizeSnapshotBackend("xfs@" + req.StorageDomain)
++		if err != nil {
++			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
++			rsp.Ret.RetMsg = err.Error()
++			return rsp
++		}
++	}
++	cubeReq.Annotations[constants.CubeAnnotationStorageBackend] = backend
+ 	cubeRsp, callErr := cubelet.UpdateWithTimeout(ctx, cubelet.GetCubeletAddr(targetIP), cubeReq, pauseCubeletRPCTimeout)
+ 	if callErr != nil || cubeRsp == nil || cubeRsp.GetRet() == nil {
+ 		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
+@@ -377,6 +388,16 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
+ 		}
+ 	}
+ 	snapID := rec.SnapshotID
++	restoreBackend := rec.Backend
++	if domain := strings.TrimSpace(req.StorageDomain); domain != "" {
++		var domainErr error
++		restoreBackend, domainErr = constants.NormalizeSnapshotBackend("xfs@" + domain)
++		if domainErr != nil {
++			rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
++			rsp.Ret.RetMsg = domainErr.Error()
++			return rsp
++		}
++	}
+ 
+ 	// Pause Detach released these plugin volumes (node 1→0). If the user
+ 	// deleted any meanwhile, refuse Resume — Attach would otherwise recreate
+@@ -436,7 +457,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
+ 			constants.CubeAnnotationPauseSnapshotID:           snapID,
+ 		},
+ 	}
+-	if b := strings.TrimSpace(rec.Backend); b != "" {
++	if b := strings.TrimSpace(restoreBackend); b != "" {
+ 		cubeletReq.Backend = b
+ 		cubeletReq.Annotations[constants.CubeAnnotationStorageBackend] = b
+ 	}
+@@ -452,6 +473,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
+ 		cubeletReq.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
+ 	}
+ 	fillResumeRecreateFields(ctx, req.SandboxID, cubeletReq, createReq)
++	if req.StorageDomain != "" {
++		cubeletReq.Annotations["clawbox.storage.domain"] = req.StorageDomain
++	}
+ 
+ 	calleeEndpoint := cubelet.GetCubeletAddr(targetIP)
+ 	if placement != nil && placement.CrossNode {
+@@ -524,6 +548,20 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
+ 			req.SandboxID, rec.SnapshotID, targetIP, err)
+ 	}
+ 
++	// Publish the domain used by this successful native restore before a later pause.
++	if restoreBackend != rec.Backend && createReq != nil {
++		createReq.Backend = restoreBackend
++		if createReq.Annotations == nil {
++			createReq.Annotations = map[string]string{}
++		}
++		createReq.Annotations[constants.CubeAnnotationStorageBackend] = restoreBackend
++		createReq.Annotations["clawbox.storage.domain"] = req.StorageDomain
++		if err := sandboxspec.Put(ctx, req.SandboxID, createReq, sandboxspec.PutOptions{HostIP: targetIP}); err != nil {
++			rsp.Ret.RetCode = int(errorcode.ErrorCode_DBError)
++			rsp.Ret.RetMsg = fmt.Sprintf("resumed but domain persistence failed: %v", err)
++			return rsp
++		}
++	}
+ 	// Binding must go so the next Pause can allocate a new id.
+ 	if err := pausesnap.Delete(ctx, snapID); err != nil {
+ 		log.G(ctx).Warnf("resume: delete pause snap meta %s: %v", snapID, err)
+diff --git a/CubeMaster/pkg/service/sandbox/types/types.go b/CubeMaster/pkg/service/sandbox/types/types.go
+index bc940a9..111c6d6 100644
+--- a/CubeMaster/pkg/service/sandbox/types/types.go
++++ b/CubeMaster/pkg/service/sandbox/types/types.go
+@@ -832,7 +832,8 @@ type UpdateRequest struct {
+ 	SnapshotTier       string `json:"snapshot_tier,omitempty"`
+ 	MemorySnapshotPath string `json:"memory_snapshot_path,omitempty"`
+ 	SnapshotGeneration uint64 `json:"snapshot_generation,omitempty"`
+-	SnapshotMechanism string `json:"snapshot_mechanism,omitempty"`
++	SnapshotMechanism  string `json:"snapshot_mechanism,omitempty"`
++	StorageDomain      string `json:"storage_domain,omitempty"`
+ }
+ 
+ // UpdateNetworkRequest is the wire shape for POST /cube/sandbox/network. The
+diff --git a/CubeMaster/pkg/templatecenter/storage_backend.go b/CubeMaster/pkg/templatecenter/storage_backend.go
+index 7569d3f..9925398 100644
+--- a/CubeMaster/pkg/templatecenter/storage_backend.go
++++ b/CubeMaster/pkg/templatecenter/storage_backend.go
+@@ -5,6 +5,7 @@
+ package templatecenter
+ 
+ import (
++	"fmt"
+ 	"strings"
+ 
+ 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
+@@ -78,6 +79,10 @@ func resolvePersistedCreateBackend(req *sandboxtypes.CreateCubeSandboxReq) (stri
+ }
+ 
+ func isPinnedSnapshotBackend(raw string) bool {
++	if strings.HasPrefix(raw, "xfs@") {
++		_, err := constants.NormalizeSnapshotBackend(raw)
++		return err == nil
++	}
+ 	switch strings.ToLower(strings.TrimSpace(raw)) {
+ 	case constants.SnapshotBackendXFS, constants.SnapshotBackendS3:
+ 		return true
+@@ -123,6 +128,17 @@ func InheritCreateBackendFromTemplate(req, templateReq *sandboxtypes.CreateCubeS
+ 	if req == nil {
+ 		return nil
+ 	}
++	domain := strings.TrimSpace(req.Annotations["clawbox.storage.domain"])
+ 	clearCreateRequestBackend(req)
++	if domain != "" {
++		base, err := constants.NormalizeSnapshotBackend(storageBackendFromCreate(templateReq))
++		if err != nil {
++			return err
++		}
++		if base != "xfs" && !strings.HasPrefix(base, "xfs@") {
++			return fmt.Errorf("storage domains require XFS templates")
++		}
++		return stampCreateRequestBackend(req, "xfs@"+domain)
++	}
+ 	return stampCreateRequestBackend(req, storageBackendFromCreate(templateReq))
+ }
+diff --git a/Cubelet/plugins/cbri/cubeboxcbri/cubebox.go b/Cubelet/plugins/cbri/cubeboxcbri/cubebox.go
+index bfa2858..a0905c0 100644
+--- a/Cubelet/plugins/cbri/cubeboxcbri/cubebox.go
++++ b/Cubelet/plugins/cbri/cubeboxcbri/cubebox.go
+@@ -270,6 +270,15 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
+ 			}
+ 		}
+ 
++		if strings.Contains(pauseResumeCatalogBackend(flowOpts), "@") {
++			for _, key := range []string{constants.AnnotationsVMKernelPath, constants.AnnotationsVMOSImagePath, constants.AnnotationsVMAgentPath} {
++				rebound, err := storage.PeerRuntimePath(pauseResumeCatalogBackend(flowOpts), snapBasePath, annotations[key])
++				if err != nil {
++					return nil, err
++				}
++				annotations[key] = rebound
++			}
++		}
+ 		annotations[constants.AnnotationVMSnapshotPath] = snapBasePath
+ 		memoryVolURL := snapshotRestoreMemoryVolURLFromStorageInfo(flowOpts)
+ 		if memoryVolURL != "" {
+@@ -348,6 +357,34 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
+ 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "gen video annotation failed: %v", err)
+ 	}
+ 	specOpts = append(specOpts, videoOpts...)
++	if strings.Contains(pauseResumeCatalogBackend(flowOpts), "@") {
++		meta := snapshotRestoreRawPath(ctx, flowOpts)
++		specOpts = append(specOpts, func(ctx context.Context, client oci.Client, container *containers.Container, spec *specs.Spec) error {
++			data, err := os.ReadFile(filepath.Join(meta, "peer-runtime.json"))
++			if err != nil {
++				return err
++			}
++			var paths map[string]string
++			if err = json.Unmarshal(data, &paths); err != nil {
++				return err
++			}
++			for key, value := range spec.Annotations {
++				for source, target := range paths {
++					// JSON annotations contain literal quoted host paths; plain path annotations
++					// are compared exactly to avoid replacing a directory prefix accidentally.
++					if value == source {
++						value = target
++					} else {
++						from, _ := json.Marshal(source)
++						to, _ := json.Marshal(target)
++						value = strings.ReplaceAll(value, string(from), string(to))
++					}
++				}
++				spec.Annotations[key] = value
++			}
++			return nil
++		})
++	}
+ 	return specOpts, nil
+ }
+ 
+@@ -572,7 +609,21 @@ func snapshotRestoreRawPath(ctx context.Context, flowOpts *workflow.CreateContex
+ 	if flowOpts != nil && flowOpts.LocalRunTemplate != nil {
+ 		raw = strings.TrimSpace(flowOpts.LocalRunTemplate.Snapshot.Snapshot.Path)
+ 	}
+-	if flowOpts == nil || !flowOpts.IsPauseResume() {
++	if flowOpts == nil {
++		return raw
++	}
++	if strings.Contains(pauseResumeCatalogBackend(flowOpts), "@") {
++		id, ok := flowOpts.GetSnapshotTemplateID()
++		if !ok {
++			return "/nonexistent/clawbox-missing-snapshot"
++		}
++		meta := pauseCatalogMetaDir(ctx, id, pauseResumeCatalogBackend(flowOpts))
++		if meta == "" {
++			return "/nonexistent/clawbox-missing-snapshot"
++		}
++		return meta
++	}
++	if !flowOpts.IsPauseResume() {
+ 		return raw
+ 	}
+ 	// Cross-node there is no package to look up, and the run template was
+@@ -669,7 +720,11 @@ func mountRestoreMetadata(ctx context.Context, flowOpts *workflow.CreateContext,
+ 
+ func pauseCatalogMetaDir(ctx context.Context, snapID, preferred string) string {
+ 	seen := map[string]struct{}{}
+-	for _, backend := range []string{preferred, cow.BackendXFS, cow.BackendS3} {
++	backends := []string{preferred, cow.BackendXFS, cow.BackendS3}
++	if strings.Contains(preferred, "@") {
++		backends = []string{preferred}
++	}
++	for _, backend := range backends {
+ 		backend = strings.TrimSpace(backend)
+ 		if backend == "" {
+ 			continue
+diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
+index fd13624..8d2c5db 100644
+--- a/Cubelet/services/cubebox/pause_cow.go
++++ b/Cubelet/services/cubebox/pause_cow.go
+@@ -52,6 +52,15 @@ func directPauseMemoryPath(req *cubebox.UpdateCubeSandboxRequest) (string, bool,
+ 		return "", false, fmt.Errorf("invalid snapshot tier %q", tier)
+ 	}
+ 	root := filepath.Clean(strings.TrimSpace(os.Getenv(rootName)))
++	if tier == "cold" {
++		backend, err := storageBackendFromAnnotations(ann)
++		if err != nil {
++			return "", false, err
++		}
++		if strings.HasPrefix(backend, "xfs@") {
++			root = storage.BackendStorageRoot(backend)
++		}
++	}
+ 	target := filepath.Clean(strings.TrimSpace(ann["clawbox.snapshot.memory.path"]))
+ 	if root == "." || !filepath.IsAbs(root) || !filepath.IsAbs(target) {
+ 		return "", false, fmt.Errorf("%s and memory path must be absolute", rootName)
+@@ -427,6 +436,26 @@ func (s *service) updateWithPauseCow(
+ 	if err := writePauseSandboxSpec(layout.MetaWork, pauseSpec); err != nil {
+ 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write pause sandbox_spec: %v", err))
+ 	}
++	if strings.HasPrefix(backend, "xfs@") {
++		parentID := strings.TrimSpace(sb.Annotations[constants.MasterAnnotationAppSnapshotTemplateID])
++		if parentID == "" {
++			parentID = strings.TrimSpace(sb.Labels[constants.MasterAnnotationAppSnapshotTemplateID])
++		}
++		if runtimeID := strings.TrimSpace(sb.Annotations[constants.MasterAnnotationRuntimeSnapshotID]); runtimeID != "" {
++			parentID = runtimeID
++		}
++		parent, parentErr := storage.GetLocalSnapshotFor(workCtx, backend, parentID)
++		if parentErr != nil {
++			return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("peer checkpoint parent catalog: %v", parentErr))
++		}
++		runtimeMap, mapErr := os.ReadFile(filepath.Join(parent.MetaDir, "peer-runtime.json"))
++		if mapErr != nil {
++			return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("peer checkpoint runtime bindings: %v", mapErr))
++		}
++		if mapErr = os.WriteFile(filepath.Join(layout.MetaWork, "peer-runtime.json"), runtimeMap, 0600); mapErr != nil {
++			return failPause(errorcode.ErrorCode_Unknown, mapErr.Error())
++		}
++	}
+ 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
+ 	deactivateMemory := memoryObject
+ 	if directMemory {
+@@ -447,6 +476,7 @@ func (s *service) updateWithPauseCow(
+ 
+ 	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
+ 		SnapshotID:              snapID,
++		ClawBoxRunID:            sb.Labels["clawbox.run"],
+ 		InstanceType:            "cubebox",
+ 		SpecDir:                 specDir,
+ 		SnapshotPath:            layout.Home,
+diff --git a/Cubelet/services/cubebox/pause_package.go b/Cubelet/services/cubebox/pause_package.go
+index 380eed6..b82fb45 100644
+--- a/Cubelet/services/cubebox/pause_package.go
++++ b/Cubelet/services/cubebox/pause_package.go
+@@ -213,9 +213,8 @@ func (b pauseRestoreBinding) applyTo(req *cubebox.RunCubeSandboxRequest) {
+ 	}
+ 	req.Annotations[constants.MasterAnnotationRuntimeSnapshotAttachedAt] = attachedAt
+ 	req.Annotations[constants.MasterAnnotationStorageBackend] = b.backend
+-	if strings.TrimSpace(req.GetBackend()) == "" {
+-		req.Backend = b.backend
+-	}
++	req.Backend = b.backend
++ if strings.HasPrefix(b.backend, "xfs@") { req.Annotations["clawbox.storage.domain"] = strings.TrimPrefix(b.backend, "xfs@") }
+ 	if b.remoteUUIDs != "" {
+ 		req.Annotations[constants.MasterAnnotationSnapshotRemoteUUIDs] = b.remoteUUIDs
+ 	}
+diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
+index bc7be92..c599afb 100644
+--- a/Cubelet/services/cubebox/relocate_snapshot.go
++++ b/Cubelet/services/cubebox/relocate_snapshot.go
+@@ -18,7 +18,6 @@ import (
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+-	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
+ )
+ 
+ // relocatePauseSnapshot performs WARM -> COLD without an SSD staging file:
+@@ -45,7 +44,13 @@ func (s *service) relocatePauseSnapshot(
+ 		rsp.Ret.RetMsg = err.Error()
+ 		return rsp, nil
+ 	}
+-	entry, err := storage.GetLocalSnapshotFor(ctx, cow.BackendXFS, snapshotID)
++	backend, err := storageBackendFromAnnotations(req.GetAnnotations())
++	if err != nil {
++		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
++		rsp.Ret.RetMsg = err.Error()
++		return rsp, nil
++	}
++	entry, err := storage.GetLocalSnapshotFor(ctx, backend, snapshotID)
+ 	if err != nil || entry.Kind != storage.CatalogKindPauseSnapshot || entry.MemoryKind != directMemoryKind {
+ 		if err == nil {
+ 			err = fmt.Errorf("snapshot %s is not a direct pause snapshot", snapshotID)
+@@ -56,7 +61,13 @@ func (s *service) relocatePauseSnapshot(
+ 	}
+ 	source := filepath.Clean(entry.MemoryVol)
+ 	warmRoot := filepath.Clean(strings.TrimSpace(os.Getenv("CLAWBOX_WARM_SNAPSHOT_ROOT")))
+-	rel, relErr := filepath.Rel(warmRoot, source)
++	sourceBacking, backingErr := filepath.EvalSymlinks(source)
++	if backingErr != nil {
++		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
++		rsp.Ret.RetMsg = backingErr.Error()
++		return rsp, nil
++	}
++	rel, relErr := filepath.Rel(warmRoot, sourceBacking)
+ 	if warmRoot == "." || relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+ 		rsp.Ret.RetMsg = "authoritative source is not in the configured WARM root"
+@@ -100,7 +111,7 @@ func (s *service) relocatePauseSnapshot(
+ 	}
+ 	previous := entry.MemoryVol
+ 	entry.MemoryVol = destination
+-	if err = storage.WriteSnapshotCatalogFor(cow.BackendXFS, entry); err != nil {
++	if err = storage.WriteSnapshotCatalogFor(backend, entry); err != nil {
+ 		entry.MemoryVol = previous
+ 		cleanupDirectMemorySnapshot(destination)
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+@@ -109,7 +120,7 @@ func (s *service) relocatePauseSnapshot(
+ 	}
+ 	if err = os.Remove(source); err != nil {
+ 		entry.MemoryVol = previous
+-		revertErr := storage.WriteSnapshotCatalogFor(cow.BackendXFS, entry)
++		revertErr := storage.WriteSnapshotCatalogFor(backend, entry)
+ 		if revertErr == nil {
+ 			cleanupDirectMemorySnapshot(destination)
+ 		}
+@@ -118,6 +129,9 @@ func (s *service) relocatePauseSnapshot(
+ 		return rsp, nil
+ 	}
+ 	cleanupDirectMemorySnapshot(source)
++	if sourceBacking != source {
++		cleanupDirectMemorySnapshot(sourceBacking)
++	}
+ 	return rsp, nil
+ }
+ 
+diff --git a/Cubelet/services/cubebox/template_ops.go b/Cubelet/services/cubebox/template_ops.go
+index 3668e1a..c64cdf9 100644
+--- a/Cubelet/services/cubebox/template_ops.go
++++ b/Cubelet/services/cubebox/template_ops.go
+@@ -494,7 +494,7 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
+ 		rsp.Ret.RetMsg = err.Error()
+ 		return rsp, nil
+ 	}
+-	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) {
++	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) && !strings.Contains(backend, "@") {
+ 		if other := otherCowBackend(backend); other != backend {
+ 			if _, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
+ 				backend = other
+@@ -557,7 +557,7 @@ func resolveCleanupRefs(ctx context.Context, backend, templateID string, objects
+ 		return finalizeCleanupRefs(backend, templateID, refs), ensureSnapshotCleanupPath(ctx, backend, templateID, callerSnapshotPath), nil
+ 	}
+ 	entry, err := storage.GetLocalSnapshotFor(ctx, backend, templateID)
+-	if err != nil || entry == nil {
++	if (err != nil || entry == nil) && !strings.Contains(backend, "@") {
+ 		if other := otherCowBackend(backend); other != backend {
+ 			if alt, altErr := storage.GetLocalSnapshotFor(ctx, other, templateID); altErr == nil && alt != nil {
+ 				entry, err, backend = alt, nil, other
+diff --git a/Cubelet/storage/cow/backend.go b/Cubelet/storage/cow/backend.go
+index 831c7ac..4d58c8a 100644
+--- a/Cubelet/storage/cow/backend.go
++++ b/Cubelet/storage/cow/backend.go
+@@ -19,6 +19,13 @@ const (
+ // NormalizeBackend maps request/config aliases onto BackendXFS or BackendS3.
+ // Empty input defaults to BackendXFS for backward compatibility.
+ func NormalizeBackend(raw string) (string, error) {
++ raw = strings.ToLower(strings.TrimSpace(raw))
++ if strings.HasPrefix(raw, "xfs@") {
++  domain := strings.TrimPrefix(raw, "xfs@")
++  if domain == "" || strings.ContainsAny(domain, "/\\. :\t\n") { return "", fmt.Errorf("invalid storage domain %q", domain) }
++  return raw, nil
++ }
++
+ 	switch strings.ToLower(strings.TrimSpace(raw)) {
+ 	case "", BackendXFS, NameXfsCow, "cow", "cubecow", "reflink":
+ 		return BackendXFS, nil
+diff --git a/Cubelet/storage/local.go b/Cubelet/storage/local.go
+index 0acae64..1f7641b 100644
+--- a/Cubelet/storage/local.go
++++ b/Cubelet/storage/local.go
+@@ -1025,7 +1025,7 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
+ 	}
+ 	if volumeKind == "clawbox-direct-file" {
+ 		clean := filepath.Clean(volumeName)
+-		allowed := false
++		allowed := PeerPathAllowed(backend, clean)
+ 		for _, name := range []string{
+ 			"CLAWBOX_WARM_SNAPSHOT_ROOT", "CLAWBOX_COLD_SNAPSHOT_ROOT",
+ 		} {
+@@ -1084,7 +1084,7 @@ func (l *local) prefetchRestoreMemoryVolURL(ctx context.Context, opts *workflow.
+ // image. S3 is true because the live disk is an NVMe lvol.
+ func pauseResumeClonesLiveMemory(backend string) bool {
+ 	normalized, err := cow.NormalizeBackend(backend)
+-	return err == nil && normalized != cow.BackendXFS
++	return err == nil && normalized == cow.BackendS3
+ }
+ 
+ // pauseResumeMemoryOwnerID is the sandbox that must own a private copy of the
+@@ -1318,8 +1318,13 @@ func (l *local) storeForBackend(backend string) (cow.Store, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	switch normalized {
+-	case cow.BackendS3:
++	if strings.HasPrefix(normalized, "xfs@") {
++  domain, ok := peerDomains[strings.TrimPrefix(normalized, "xfs@")]
++  if !ok { return nil, fmt.Errorf("storage domain %q is not configured", normalized) }
++  return domain.store, nil
++ }
++ switch normalized {
++ case cow.BackendS3:
+ 		if l.s3CowManager != nil {
+ 			return l.s3CowManager, nil
+ 		}
+diff --git a/Cubelet/storage/peer_domain.go b/Cubelet/storage/peer_domain.go
+new file mode 100644
+index 0000000..cbb3bda
+--- /dev/null
++++ b/Cubelet/storage/peer_domain.go
+@@ -0,0 +1,407 @@
++package storage
++
++// ClawBox peer-local-SSD control plane. The Unix socket is root-only and carries
++// metadata, never network payload. Payload transfer is owned by the experiment's
++// two TCP endpoints; publication below allocates through the target CubeCow engine.
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"net"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++
++	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubecow"
++	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
++	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
++	"golang.org/x/sys/unix"
++)
++
++type peerDomain struct {
++	root   string
++	engine *cubecow.Engine
++	store  cow.Store
++}
++
++var peerDomains = map[string]*peerDomain{}
++var peerImportLocks sync.Map
++
++func initPeerDomains() error {
++	raw := strings.TrimSpace(os.Getenv("CLAWBOX_STORAGE_DOMAINS"))
++	if raw == "" {
++		return nil
++	}
++	var roots map[string]string
++	if err := json.Unmarshal([]byte(raw), &roots); err != nil {
++		return err
++	}
++	for name, root := range roots {
++		if _, err := cow.NormalizeBackend("xfs@" + name); err != nil {
++			return err
++		}
++		if !filepath.IsAbs(root) || filepath.Clean(root) == "/" {
++			return fmt.Errorf("invalid domain root %q", root)
++		}
++		root = filepath.Clean(root)
++		var stat unix.Statfs_t
++		if err := unix.Statfs(root, &stat); err != nil {
++			return fmt.Errorf("domain %s must exist on applied pool: %w", name, err)
++		}
++		if stat.Type != unix.XFS_SUPER_MAGIC {
++			return fmt.Errorf("domain %s must be XFS", name)
++		}
++		payload, _ := json.Marshal(map[string]any{"log": localStorage.config.Cow.Log.toMap(), "backend": map[string]any{"kind": "reflink", "reflink": map[string]any{"root_dir": filepath.Join(root, "objects")}}})
++		engine, err := cubecow.InitWithoutLoggingFromJSON(string(payload))
++		if err != nil {
++			return fmt.Errorf("init domain %s: %w", name, err)
++		}
++		peerDomains[name] = &peerDomain{root: root, engine: engine, store: newCowVolumeManager(engine)}
++		SetSnapshotCatalogRootsFor("xfs@"+name, filepath.Join(root, SnapshotKindNormal), filepath.Join(root, SnapshotKindPause))
++	}
++	socket := os.Getenv("CLAWBOX_PEER_CONTROL_SOCKET")
++	if !filepath.IsAbs(socket) {
++		return fmt.Errorf("CLAWBOX_PEER_CONTROL_SOCKET must be absolute")
++	}
++	if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
++		return err
++	}
++	if info, err := os.Lstat(socket); err == nil {
++		if info.Mode()&os.ModeSocket == 0 {
++			return fmt.Errorf("control socket path exists and is not socket")
++		}
++		conn, dialErr := net.Dial("unix", socket)
++		if dialErr == nil {
++			conn.Close()
++			return fmt.Errorf("peer control socket already active")
++		}
++		if err := os.Remove(socket); err != nil {
++			return err
++		}
++	}
++	listener, err := net.Listen("unix", socket)
++	if err != nil {
++		return err
++	}
++	if err := os.Chmod(socket, 0600); err != nil {
++		listener.Close()
++		return err
++	}
++	mux := http.NewServeMux()
++	mux.HandleFunc("/snapshot", peerSnapshotHandler)
++	mux.HandleFunc("/import", peerImportHandler)
++	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
++		peerJSON(w, map[string]any{"capability": "CLAWBOX_PEER_DOMAIN_V1", "domains": roots}, nil)
++	})
++	mux.HandleFunc("/cleanup", peerCleanupHandler)
++	go http.Serve(listener, mux)
++	return nil
++}
++
++func pathUnder(root, path string) bool {
++	root, err := filepath.EvalSymlinks(root)
++	if err != nil {
++		return false
++	}
++	path, err = filepath.EvalSymlinks(path)
++	if err != nil {
++		return false
++	}
++	relative, err := filepath.Rel(root, path)
++	return err == nil && relative != ".." && !strings.HasPrefix(relative, "../")
++}
++
++func PeerPathAllowed(backend, path string) bool {
++	if domain, ok := peerDomains[strings.TrimPrefix(backend, "xfs@")]; strings.HasPrefix(backend, "xfs@") && ok {
++		return pathUnder(domain.root, path) || (os.Getenv("CLAWBOX_WARM_SNAPSHOT_ROOT") != "" && pathUnder(os.Getenv("CLAWBOX_WARM_SNAPSHOT_ROOT"), path))
++	}
++	return false
++}
++
++func PeerRuntimePath(backend, home, source string) (string, error) {
++	if source == "" {
++		return "", nil
++	}
++	data, err := os.ReadFile(filepath.Join(home, SnapshotMetadataDir, "peer-runtime.json"))
++	if err != nil {
++		return "", fmt.Errorf("domain runtime manifest missing: %w", err)
++	}
++	var paths map[string]string
++	if err = json.Unmarshal(data, &paths); err != nil {
++		return "", err
++	}
++	target := paths[source]
++	if target == "" && PeerPathAllowed(backend, source) {
++		target = source
++	}
++	if target == "" || !PeerPathAllowed(backend, target) {
++		return "", fmt.Errorf("runtime asset %s unavailable in domain %s", source, backend)
++	}
++	return target, nil
++}
++
++func peerJSON(w http.ResponseWriter, v any, err error) {
++	w.Header().Set("Content-Type", "application/json")
++	if err != nil {
++		w.WriteHeader(409)
++		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
++		return
++	}
++	json.NewEncoder(w).Encode(v)
++}
++
++func peerSnapshotHandler(w http.ResponseWriter, r *http.Request) {
++	if r.Method != "GET" {
++		w.WriteHeader(405)
++		return
++	}
++	backend := r.URL.Query().Get("backend")
++	if backend == "" {
++		backend = "xfs"
++	}
++	if _, err := requireCowStoreFor(backend); err != nil {
++		peerJSON(w, nil, err)
++		return
++	}
++	id := r.URL.Query().Get("id")
++	if id == "" {
++		memory := r.URL.Query().Get("memory_path")
++		entries, err := ListLocalSnapshotsFor(r.Context(), backend)
++		if err != nil {
++			peerJSON(w, nil, err)
++			return
++		}
++		for _, entry := range entries {
++			if entry.MemoryVol == memory {
++				if id != "" {
++					peerJSON(w, nil, fmt.Errorf("ambiguous memory path"))
++					return
++				}
++				id = entry.SnapshotID
++			}
++		}
++	}
++	if err := pathutil.ValidateSafeID(id); err != nil {
++		peerJSON(w, nil, err)
++		return
++	}
++	value, err := ResolveLocalSnapshotFor(r.Context(), backend, id)
++	peerJSON(w, value, err)
++}
++
++type peerImportRequest struct {
++	Domain   string               `json:"storage_domain"`
++	RunID    string               `json:"run_id"`
++	Catalog  SnapshotCatalogEntry `json:"catalog"`
++	Rootfs   string               `json:"rootfs_path"`
++	Metadata string               `json:"metadata_path"`
++	Memory   string               `json:"memory_path"`
++	Runtime  map[string]string    `json:"runtime_paths"`
++}
++
++func peerImportHandler(w http.ResponseWriter, r *http.Request) {
++	if r.Method != "POST" {
++		w.WriteHeader(405)
++		return
++	}
++	var req peerImportRequest
++	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
++		peerJSON(w, nil, err)
++		return
++	}
++	result, err := publishPeerReplica(r.Context(), req)
++	peerJSON(w, result, err)
++}
++
++func publishPeerReplica(ctx context.Context, req peerImportRequest) (*SnapshotCatalogEntryResolved, error) {
++	domain, ok := peerDomains[req.Domain]
++	if !ok {
++		return nil, fmt.Errorf("unknown target domain %q", req.Domain)
++	}
++	backend := "xfs@" + req.Domain
++	id := req.Catalog.SnapshotID
++	if err := pathutil.ValidateSafeID(id); err != nil {
++		return nil, err
++	}
++	lockValue, _ := peerImportLocks.LoadOrStore(backend+"/"+id, &sync.Mutex{})
++	lock := lockValue.(*sync.Mutex)
++	lock.Lock()
++	defer lock.Unlock()
++	if old, err := ResolveLocalSnapshotFor(ctx, backend, id); err == nil {
++		return old, nil
++	}
++	for _, path := range []string{req.Rootfs, req.Metadata, req.Memory} {
++		if path != "" && !PeerPathAllowed(backend, path) {
++			return nil, fmt.Errorf("import path %q escapes target domain", path)
++		}
++	}
++	for _, target := range req.Runtime {
++		if !PeerPathAllowed(backend, target) {
++			return nil, fmt.Errorf("runtime path escapes target domain: %s", target)
++		}
++	}
++	// Reject unresolved source filesystem paths in payload metadata before publish.
++	// The Python exporter/relocator audits all actual payload dependencies.
++	info, err := os.Stat(req.Rootfs)
++	if err != nil {
++		return nil, err
++	}
++	if !info.Mode().IsRegular() {
++		return nil, fmt.Errorf("rootfs must be frozen regular file")
++	}
++	name := cowTemplateRootfsName(id)
++	dev, err := domain.engine.CreateVolume(name, uint64(info.Size()))
++	if err != nil {
++		return nil, err
++	}
++	committed := false
++	defer func() {
++		if !committed {
++			domain.engine.DeleteVolume(name)
++		}
++	}()
++	// Both files are in the target XFS. Never perform cross-filesystem reflink.
++	in, err := os.Open(req.Rootfs)
++	if err != nil {
++		return nil, err
++	}
++	defer in.Close()
++	out, err := os.OpenFile(dev, os.O_WRONLY, 0600)
++	if err != nil {
++		return nil, err
++	}
++	err = unix.IoctlFileClone(int(out.Fd()), int(in.Fd()))
++	if err == nil {
++		err = out.Sync()
++	}
++	out.Close()
++	if err != nil {
++		return nil, fmt.Errorf("target rootfs reflink: %w", err)
++	}
++	home := SnapshotHome(backend, req.Catalog.Kind, id)
++	if err = os.MkdirAll(home, 0755); err != nil {
++		return nil, err
++	}
++	// Metadata directory is a private, relocated package copy, never the CAS.
++	targetMeta := filepath.Join(home, SnapshotMetadataDir)
++	if err = os.Rename(req.Metadata, targetMeta); err != nil {
++		return nil, err
++	}
++	entry := req.Catalog
++	if req.RunID != "" {
++		entry.ClawBoxRunID = req.RunID
++	}
++	entry.Backend = backend
++	entry.SnapshotPath = home
++	entry.MetaDir = targetMeta
++	entry.RootfsVol = name
++	entry.RootfsKind = cow.KindVolume
++	entry.BuildRootfsVol = ""
++	entry.BuildRootfsKind = ""
++	entry.MetadataVol = ""
++	entry.MetadataKind = ""
++	entry.MemoryVol = req.Memory
++	entry.MemoryKind = "clawbox-direct-file"
++	if req.Memory == "" {
++		entry.MemoryKind = ""
++	}
++	runtimeJSON, _ := json.Marshal(req.Runtime)
++	if err = os.WriteFile(filepath.Join(targetMeta, "peer-runtime.json"), runtimeJSON, 0600); err != nil {
++		return nil, err
++	}
++	if err = EnsureShimSpecDirLink(home, entry.SpecDir); err != nil {
++		return nil, err
++	}
++	if err = WriteSnapshotCatalogFor(backend, &entry); err != nil {
++		return nil, err
++	}
++	committed = true
++	return ResolveLocalSnapshotFor(ctx, backend, id)
++}
++
++// Destructive cleanup is permitted only after all VMM references have ended.
++// A host-idle gate is intentionally conservative for this single-host study.
++func peerCleanupHandler(w http.ResponseWriter, r *http.Request) {
++	var req struct {
++		RunID string `json:"run_id"`
++		Apply bool   `json:"apply"`
++	}
++	if r.Method != "POST" {
++		w.WriteHeader(405)
++		return
++	}
++	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
++		peerJSON(w, nil, err)
++		return
++	}
++	if req.RunID == "" {
++		peerJSON(w, nil, fmt.Errorf("run_id is required"))
++		return
++	}
++	entries := map[string][]*SnapshotCatalogEntry{}
++	for domain := range peerDomains {
++		values, err := ListLocalSnapshotsFor(r.Context(), "xfs@"+domain)
++		if err != nil {
++			peerJSON(w, nil, err)
++			return
++		}
++		for _, value := range values {
++			if value.ClawBoxRunID == req.RunID {
++				entries[domain] = append(entries[domain], value)
++			}
++		}
++	}
++	if req.Apply {
++		processes, err := os.ReadDir("/proc")
++		if err != nil {
++			peerJSON(w, nil, err)
++			return
++		}
++		for _, process := range processes {
++			body, err := os.ReadFile(filepath.Join("/proc", process.Name(), "cmdline"))
++			if err != nil {
++				continue
++			}
++			executable := filepath.Base(strings.SplitN(string(body), "\x00", 2)[0])
++			if executable == "containerd-shim-cube-rs" || executable == "cloud-hypervisor" || executable == "cube-hypervisor" {
++				peerJSON(w, nil, fmt.Errorf("VM process %s exists; abort/cleanup VMs before replica GC", process.Name()))
++				return
++			}
++		}
++		for domain, values := range entries {
++			for _, entry := range values {
++				backend := "xfs@" + domain
++				if !pathUnder(peerDomains[domain].root, entry.SnapshotPath) {
++					peerJSON(w, nil, fmt.Errorf("catalog home escapes owning domain"))
++					return
++				}
++				if err := CleanupObjectsFor(r.Context(), backend, []CowObjectRef{{Name: entry.RootfsVol, Kind: entry.RootfsKind, Role: "rootfs"}}); err != nil {
++					peerJSON(w, nil, err)
++					return
++				}
++				if entry.MemoryKind == "clawbox-direct-file" && PeerPathAllowed(backend, entry.MemoryVol) {
++					for _, suffix := range []string{"", ".lineage.json", ".metrics.json", ".zstd-pages.json"} {
++						if err := os.Remove(entry.MemoryVol + suffix); err != nil && !os.IsNotExist(err) {
++							peerJSON(w, nil, err)
++							return
++						}
++					}
++					for _, suffix := range []string{".layers", ".zstd-pages"} {
++						if err := os.RemoveAll(entry.MemoryVol + suffix); err != nil {
++							peerJSON(w, nil, err)
++							return
++						}
++					}
++				}
++				if err := os.RemoveAll(entry.SnapshotPath); err != nil {
++					peerJSON(w, nil, err)
++					return
++				}
++				DeleteSnapshotCatalogFor(backend, entry.SnapshotID)
++			}
++		}
++	}
++	peerJSON(w, map[string]any{"run_id": req.RunID, "applied": req.Apply, "catalogs": entries, "native_references_released": req.Apply}, nil)
++}
+diff --git a/Cubelet/storage/peer_domain_test.go b/Cubelet/storage/peer_domain_test.go
+new file mode 100644
+index 0000000..d186750
+--- /dev/null
++++ b/Cubelet/storage/peer_domain_test.go
+@@ -0,0 +1,48 @@
++package storage
++
++import (
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// Explicit host preflight invokes the production constructor against two empty
++// task-owned XFS pools, without starting network or VM services.
++func TestPeerDomainHostPreflight(t *testing.T) {
++	roots := strings.Split(os.Getenv("CLAWBOX_PEER_PREFLIGHT_ROOTS"), ":")
++	if len(roots) != 2 || roots[0] == "" {
++		t.Skip("set CLAWBOX_PEER_PREFLIGHT_ROOTS to two owned XFS roots")
++	}
++	level, format, file, rotation := "info", "compact", filepath.Join(t.TempDir(), "cow.log"), "daily"
++	localStorage.config = &Config{Cow: CowInlineConfig{Log: CowLogConfig{Level: &level, Format: &format, File: &file, Rotation: &rotation}}}
++	domains := map[string]string{"node0": roots[0], "node1": roots[1]}
++	body, _ := json.Marshal(domains)
++	t.Setenv("CLAWBOX_STORAGE_DOMAINS", string(body))
++	t.Setenv("CLAWBOX_PEER_CONTROL_SOCKET", filepath.Join(t.TempDir(), "native.sock"))
++	if err := initPeerDomains(); err != nil {
++		t.Fatal(err)
++	}
++	for name, domain := range peerDomains {
++		volume := fmt.Sprintf("clawbox-preflight-%d-%s", os.Getpid(), name)
++		path, err := domain.engine.CreateVolume(volume, 65536)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !PeerPathAllowed("xfs@"+name, path) {
++			t.Fatalf("own volume rejected: %s", path)
++		}
++		other := "node0"
++		if name == other {
++			other = "node1"
++		}
++		if PeerPathAllowed("xfs@"+other, path) {
++			t.Fatal("foreign domain accepted")
++		}
++		if err = domain.engine.DeleteVolume(volume); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
+diff --git a/Cubelet/storage/plugin.go b/Cubelet/storage/plugin.go
+index 215a99a..9f17248 100644
+--- a/Cubelet/storage/plugin.go
++++ b/Cubelet/storage/plugin.go
+@@ -415,6 +415,7 @@ func init() {
+ 					return nil, err
+ 				}
+ 				localStorage.cowEngine = eng
++    if err := initPeerDomains(); err != nil { return nil, err }
+ 				CubeLog.Infof("cubecow xfs handle initialized from %s", initSource)
+ 			}
+ 
+diff --git a/Cubelet/storage/s3_snapshot_layout.go b/Cubelet/storage/s3_snapshot_layout.go
+index a216675..23f482e 100644
+--- a/Cubelet/storage/s3_snapshot_layout.go
++++ b/Cubelet/storage/s3_snapshot_layout.go
+@@ -80,7 +80,12 @@ func backendDirName(backend string) string {
+ 
+ // BackendStorageRoot is <work>/xfs or <work>/s3.
+ func BackendStorageRoot(backend string) string {
+-	return filepath.Join(CubeletStorageWorkPath(), backendDirName(backend))
++	if strings.HasPrefix(backend, "xfs@") {
++  if domain, ok := peerDomains[strings.TrimPrefix(backend, "xfs@")]; ok { return domain.root }
++  // Fail closed in all consumers: unknown domains cannot resolve the legacy root.
++  return "/nonexistent/clawbox-unknown-domain/" + strings.TrimPrefix(backend, "xfs@")
++ }
++ return filepath.Join(CubeletStorageWorkPath(), backendDirName(backend))
+ }
+ 
+ // SnapshotKindRoot is <work>/<backend>/{snapshots|pause-snapshots}.
+diff --git a/Cubelet/storage/snapshot_catalog.go b/Cubelet/storage/snapshot_catalog.go
+index 84c6d5e..979bc0f 100644
+--- a/Cubelet/storage/snapshot_catalog.go
++++ b/Cubelet/storage/snapshot_catalog.go
+@@ -41,15 +41,16 @@ import (
+ // a kernel mismatch requires rebuilding the snapshot/template replica, but does
+ // not by itself require rebuilding the rootfs ext4 artifact.
+ type SnapshotCatalogEntry struct {
+-	SnapshotID   string `json:"snapshot_id"`
+-	InstanceType string `json:"instance_type,omitempty"`
+-	SpecDir      string `json:"spec_dir,omitempty"`
+-	SnapshotPath string `json:"snapshot_path"`
+-	MetaDir      string `json:"meta_dir"`
+-	RootfsVol    string `json:"rootfs_vol"`
+-	RootfsKind   string `json:"rootfs_kind"`
+-	MemoryVol    string `json:"memory_vol"`
+-	MemoryKind   string `json:"memory_kind"`
++	SnapshotID              string `json:"snapshot_id"`
++	ClawBoxRunID            string `json:"clawbox_run_id,omitempty"`
++	InstanceType            string `json:"instance_type,omitempty"`
++	SpecDir                 string `json:"spec_dir,omitempty"`
++	SnapshotPath            string `json:"snapshot_path"`
++	MetaDir                 string `json:"meta_dir"`
++	RootfsVol               string `json:"rootfs_vol"`
++	RootfsKind              string `json:"rootfs_kind"`
++	MemoryVol               string `json:"memory_vol"`
++	MemoryKind              string `json:"memory_kind"`
+ 	MemorySnapshotMechanism string `json:"memory_snapshot_mechanism,omitempty"`
+ 	// MetadataVol/Kind is the S3 package metadata volume (cloned from the
+ 	// node-local base snapshot or a parent package metadata volume).
+@@ -386,7 +387,10 @@ func ResolveLocalSnapshotFor(ctx context.Context, backend, snapshotID string) (*
+ 	if err != nil {
+ 		return nil, fmt.Errorf("resolve rootfs dev: %w", err)
+ 	}
+-	memoryDev, err := ResolveObjectPathFor(ctx, backend, entry.MemoryVol, entry.MemoryKind)
++	memoryDev := entry.MemoryVol
++	if entry.MemoryKind != "clawbox-direct-file" {
++		memoryDev, err = ResolveObjectPathFor(ctx, backend, entry.MemoryVol, entry.MemoryKind)
++	}
+ 	if err != nil {
+ 		return nil, fmt.Errorf("resolve memory dev: %w", err)
+ 	}
+diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
+index e320580..71449b4 100644
+--- a/sdk/python/cubesandbox/sandbox.py
++++ b/sdk/python/cubesandbox/sandbox.py
+@@ -337,7 +337,7 @@ class Sandbox:
+ 
+     @classmethod
+     def connect(cls, sandbox_id: str, *, config: Config | None = None,
+-                snapshot_mechanism: str | None = None) -> "Sandbox":
++                snapshot_mechanism: str | None = None, storage_domain: str | None = None) -> "Sandbox":
+         """POST /sandboxes/:sandboxID/connect - Connect to an existing sandbox.
+ 
+         Resumes the sandbox if it is currently paused.
+@@ -359,8 +359,7 @@ class Sandbox:
+         if snapshot_mechanism not in (None, "full-copy", "incremental-cow"):
+             raise ValueError("invalid snapshot mechanism")
+         resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
+-                      json=({"snapshot_mechanism": snapshot_mechanism}
+-                            if snapshot_mechanism else {}),
++                      json={**({"snapshot_mechanism": snapshot_mechanism} if snapshot_mechanism else {}), **({"storage_domain": storage_domain} if storage_domain else {})},
+                       headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+                       timeout=cfg.request_timeout)
+         _check_response(resp)
+@@ -548,7 +547,7 @@ class Sandbox:
+ 
+     def relocate_snapshot(self, *, snapshot_tier: str,
+                           memory_snapshot_path: str,
+-                          snapshot_generation: int) -> dict:
++                          snapshot_generation: int, storage_domain: str | None = None) -> dict:
+         """Move a paused direct-memory snapshot between managed tiers."""
+         if snapshot_tier != "cold":
+             raise ValueError("snapshot relocation destination must be cold")
+@@ -558,6 +557,7 @@ class Sandbox:
+             "snapshot_tier": snapshot_tier,
+             "memory_snapshot_path": memory_snapshot_path,
+             "snapshot_generation": snapshot_generation,
++            "storage_domain": storage_domain,
+         }
+         resp = self._session.post(
+             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshot/relocate",

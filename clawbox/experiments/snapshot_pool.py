@@ -471,6 +471,14 @@ class WarmSnapshotPool:
         with self._lock:
             return self._manifests[key]
 
+    def rebind_path(self, key: SnapshotKey, *, expected_path: str, path: str) -> None:
+        """Move a pinned generation's naming ownership without charging its inode twice."""
+        with self._lock:
+            item = self._manifests[key]
+            if item.path != expected_path or item.pinned < 1:
+                raise RuntimeError("WARM path handoff requires the current pinned generation")
+            item.path = path
+
     def remove(self, key: SnapshotKey, *, consume_pinned: bool = False) -> SnapshotManifest:
         with self._lock:
             item = self._manifests[key]

@@ -39,6 +39,7 @@ class SessionState:
     wait_id: str | None = None
     wait_started_monotonic_s: float | None = None
     response_ready: bool = False
+    migration_in_progress: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +299,79 @@ class PolicyCoordinator:
             self._signal_admission_waiters_locked()
             self._condition.notify_all()
 
+    def claim_migration(self, session_id: str) -> SessionState:
+        """Fence a fully paused pair without dropping its wait or demand state."""
+        with self._condition:
+            state = self._sessions[session_id]
+            if (state.tool_active or state.eviction_in_progress
+                    or state.migration_in_progress or state.runtime_lifecycle is None):
+                raise RuntimeError(f"session is not idle for migration: {session_id}")
+            for vm in (state.lifecycle, state.runtime_lifecycle):
+                # Read the transition marker without acquiring lifecycle locks
+                # under the shared admission condition.
+                marker = getattr(vm, '_state', None)
+                if getattr(marker, 'value', marker) != 'swapped':
+                    raise RuntimeError(f"migration requires both roles SWAPPED: {session_id}")
+            if any(request.session_id == session_id
+                   for request in self._waiter_requests.values()):
+                raise RuntimeError(f"session has pending admission: {session_id}")
+            if any(key[0] == session_id and key[1] in {'tool_admission', 'create', 'restore'}
+                   for key in self.demand.claims):
+                raise RuntimeError(f"session has an active admission claim: {session_id}")
+            state.migration_in_progress = True
+            return state
+
+    def release_migration(self, session_id: str) -> None:
+        with self._condition:
+            state = self._sessions.get(session_id)
+            if state is not None:
+                state.migration_in_progress = False
+            self._condition.notify_all()
+
+    def handoff(self, session_id: str, target: 'PolicyCoordinator', *,
+                memory_samples: dict | None = None) -> SessionState:
+        """Move the existing state and scoped claims under their common lock.
+
+        The caller owns the migration fence and has confirmed native restore.
+        In particular this is not unregister/register: wait IDs, response-ready
+        state, and claims belonging to another scope are preserved.
+        """
+        if self.demand is not target.demand:
+            raise ValueError('session handoff requires one shared DemandLedger')
+        with self._condition:
+            state = self._sessions[session_id]
+            if not state.migration_in_progress:
+                raise RuntimeError('session handoff requires migration ownership')
+            if target is self:
+                return state
+            if session_id in target._sessions:
+                raise RuntimeError(f'duplicate target session: {session_id}')
+            if any(r.session_id == session_id for r in self._waiter_requests.values()):
+                raise RuntimeError('cannot hand off a pending admission waiter')
+            samples = (memory_samples if memory_samples is not None
+                       else self._memory_samples.get(session_id, {}))
+            for key, claim in self.demand.claims.items():
+                if key[0] != session_id or claim.scope != self.demand_scope:
+                    continue
+                self.demand._adjust_pending_upper_bound(claim.scope, 0, -claim.local_amount)
+                target.demand._adjust_pending_upper_bound(target.demand_scope, 0, claim.local_amount)
+                claim.scope = target.demand_scope
+                claim.sample = samples.get(key[1])
+                # Preserve the global baseline. Local history belongs to the
+                # old NUMA node; the paused target starts with no local charge.
+                claim.baseline = (claim.baseline[0], 0)
+            for name in ('_reservations', '_capacity_claims', '_resident_capacity_claims'):
+                source_values, target_values = getattr(self, name), getattr(target, name)
+                if session_id in source_values:
+                    target_values[session_id] = target_values.get(session_id, 0) + source_values.pop(session_id)
+            self._memory_samples.pop(session_id, None)
+            target._memory_samples[session_id] = samples
+            target._sessions[session_id] = self._sessions.pop(session_id)
+            self._signal_admission_waiters_locked()
+            target._signal_admission_waiters_locked()
+            self._condition.notify_all()
+            return state
+
     def set_tool_active(self, session_id: str, active: bool) -> None:
         with timed_lock(self.demand.progress_lock, 'admission.set_tool_active'):
             state = self._sessions[session_id]
@@ -305,7 +379,7 @@ class PolicyCoordinator:
             # lock for the blocking Cube checkpoint.  A new Tool operation (or
             # final validation) must wait for that already-committed eviction,
             # then restore through the normal managed path.
-            while active and state.eviction_in_progress:
+            while active and (state.eviction_in_progress or state.migration_in_progress):
                 self._condition.wait()
             state.tool_active = active
             state.eviction_eligible = not active
@@ -318,7 +392,7 @@ class PolicyCoordinator:
             state = self._sessions.get(session_id)
             if state is None:
                 return False
-            while active and state.eviction_in_progress:
+            while active and (state.eviction_in_progress or state.migration_in_progress):
                 self._condition.wait()
             state.tool_active = active
             state.eviction_eligible = not active
@@ -334,6 +408,7 @@ class PolicyCoordinator:
                 state is None
                 or state.tool_active
                 or state.eviction_in_progress
+                or state.migration_in_progress
                 or (session_id, "tool_admission") in self.demand.claims
             ):
                 return False
@@ -357,7 +432,7 @@ class PolicyCoordinator:
             return 0.0
         with timed_lock(self.demand.progress_lock, 'admission.begin_condition'):
             state = self._sessions[session_id]
-            while state.eviction_in_progress:
+            while state.eviction_in_progress or state.migration_in_progress:
                 with span('admission.eviction_wait'):
                     self._condition.wait()
             state.tool_active = True
@@ -400,7 +475,7 @@ class PolicyCoordinator:
         # condition, eliminating a scheduling gap and a second lock convoy.
         with timed_lock(self.demand.progress_lock, 'admission.begin_condition'):
             state = self._sessions[session_id]
-            while state.eviction_in_progress:
+            while state.eviction_in_progress or state.migration_in_progress:
                 with span('admission.eviction_wait'):
                     self._condition.wait()
             with span('admission.active_update'):
@@ -1515,7 +1590,8 @@ class PolicyCoordinator:
             return None
         candidates = [state for state in self._sessions.values()
                       if state.session_id != exclude and state.eviction_eligible
-                      and not state.eviction_in_progress and not state.tool_active
+                      and not state.eviction_in_progress and not state.migration_in_progress
+                      and not state.tool_active
                       and state.lifecycle.resident]
         if self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
             # Model duration is unknown online. A request remains idle until

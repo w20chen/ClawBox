@@ -202,13 +202,16 @@ class CubeSandboxClient:
                        allow_internet_access: bool = True,
                        network_allow_out: list[str] | None = None,
                         network_deny_out: list[str] | None = None,
-                        create_trace: list[dict[str, Any]] | None = None) -> Any:
+                        create_trace: list[dict[str, Any]] | None = None,
+                        storage_domain: str | None = None) -> Any:
         network = {}
         if network_allow_out:
             network["allow_out"] = network_allow_out
         if network_deny_out:
             network["deny_out"] = network_deny_out
         ownership_metadata = ownership.metadata()
+        if storage_domain:
+            ownership_metadata["clawbox.storage.domain"] = storage_domain
         try:
             with _creation_span(create_trace, "sdk_create"):
                 sandbox = self._sandbox_class.create(
@@ -284,7 +287,8 @@ class CubeSandboxClient:
         return sandbox
 
     def connect_sandbox(self, sandbox_id: str, *,
-                        snapshot_mechanism: str = "incremental-cow") -> Any:
+                        snapshot_mechanism: str = "incremental-cow",
+                        storage_domain: str | None = None) -> Any:
         # Resuming the same immutable sandbox ID is idempotent. CubeMaster can
         # transiently reject or drop HTTP requests during a large restore
         # wave, so retry the control-plane transport without creating a new VM.
@@ -292,6 +296,7 @@ class CubeSandboxClient:
             sandbox = retry_with_backoff(
                 lambda: self._sandbox_class.connect(
                     sandbox_id, **self._sdk_kwargs(),
+                    **({"storage_domain": storage_domain} if storage_domain else {}),
                     **({"snapshot_mechanism": snapshot_mechanism}
                        if snapshot_mechanism != "full-copy" else {}),
                 ),
@@ -733,7 +738,8 @@ class CubeSandboxClient:
 
     @staticmethod
     def relocate_snapshot(sandbox: Any, *, tier: str,
-                          memory_snapshot_path: str, generation: int) -> Mapping[str, Any]:
+                          memory_snapshot_path: str, generation: int,
+                          storage_domain: str | None = None) -> Mapping[str, Any]:
         method = getattr(sandbox, "relocate_snapshot", None)
         if method is None:
             raise RuntimeError("installed CubeSandbox SDK lacks snapshot relocation")
@@ -741,6 +747,7 @@ class CubeSandboxClient:
             snapshot_tier=tier,
             memory_snapshot_path=memory_snapshot_path,
             snapshot_generation=generation,
+            **({"storage_domain": storage_domain} if storage_domain else {}),
         )
         if not isinstance(result, Mapping):
             raise RuntimeError("snapshot relocation did not return an identity")
