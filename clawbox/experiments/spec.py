@@ -531,6 +531,7 @@ class ResourcesSpec(StrictFrozenModel):
     idle_reclaim_costs: IdleReclaimCostSpec | None = None
     template_base_sharing: Literal["disabled", "required"] = "disabled"
     template_base_sharing_artifact: str | None = None
+    base_template_cache: Literal["disabled", "required"] = "disabled"
 
     def compute_node_budget_mib(self, node: ComputeNode) -> int:
         """Static ledgers use capacity; measured admission uses HIGH."""
@@ -561,6 +562,12 @@ class ResourcesSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def valid_shared_memory_watermarks(self) -> "ResourcesSpec":
+        if self.base_template_cache == "required" and (
+            self.snapshot_mechanism != "incremental-cow" or not self.lazy_restore
+            or not self.warm_snapshot_root or not self.warm_memory_capacity_mib
+            or self.warm_numa_node is None
+        ):
+            raise ValueError("base_template_cache requires incremental-cow, lazy restore and a configured WARM NUMA pool")
         if (self.snapshot_transfer_concurrency is not None
                 and self.snapshot_transfer_concurrency > self.pool_transfer_concurrency):
             raise ValueError(

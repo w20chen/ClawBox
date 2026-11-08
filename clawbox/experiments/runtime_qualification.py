@@ -276,7 +276,9 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
     primary = None
     cleanup = []
     snapshots = any(p.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE for p in spec.policies)
+    from .base_cache import qualification_warm_bytes
     pool = WarmSnapshotPool(spec.resources.warm_memory_capacity_mib*MIB,
+        external_warm_bytes=qualification_warm_bytes(spec.resources),
         transfer_concurrency=spec.resources.pool_transfer_concurrency,
         snapshot_transfer_concurrency=spec.resources.snapshot_transfer_concurrency,
         transfer_timeout_seconds=spec.resources.pool_transfer_timeout_seconds) if spec.resources.warm_memory_capacity_mib else None
@@ -307,14 +309,20 @@ def runtime_roundtrip_test(spec, *, artifact_root: Path) -> dict:
                     snapshot_reservation_bytes=(vm.memory_mib+256)*MIB)
                 lifecycles.append(lifecycle)
                 lifecycle.start()
+                from .base_cache import verify_created_mapping
+                cache_mapping = verify_created_mapping(spec.resources, lifecycle.sandbox_id, vm.template)
                 leaf=domain.leaves[index,role]
                 observations.append({'phase':'created', 'role':role,'priority':domain.priorities[index],
+                    'base_template_cache': cache_mapping,
                     'current_bytes':int((leaf/'memory.current').read_text()),
                     'memory_stat':(leaf/'memory.stat').read_text()})
                 if snapshots:
                     lifecycle.sandbox.files.write('/tmp/clawbox-priority-marker',probe_id)
                     lifecycle.checkpoint_and_evict()
                     lifecycle.restore()
+                    observations.append({'phase': 'restored', 'role': role,
+                        'base_template_cache': verify_created_mapping(
+                            spec.resources, lifecycle.sandbox_id, vm.template)})
                     if lifecycle.sandbox.files.read('/tmp/clawbox-priority-marker')!=probe_id:
                         raise RuntimeError('priority probe lost guest state across restore')
     except BaseException as exc:

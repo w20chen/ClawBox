@@ -63,6 +63,64 @@ When upgrading from ClawTune with EdgeKappaKB, first follow
 Use the updated seed, refreshed Runtime template, and a new run ID; old KB
 manifests containing EdgeKappa are not supported by the new ClawTune.
 
+### Prewarm shared template RAM
+
+Use this optional step when multiple sessions reuse the same immutable base.
+Keep the SSD originals. Install the patched native release described in
+[installation](installation.md); existing guest templates remain reusable.
+
+```bash
+bash scripts/clawbox --sudo experiment base-cache init base-cache.yaml \
+  --spec experiment.yaml --capacity-mib 8192 \
+  --template YOUR_RUNTIME_TEMPLATE --template YOUR_SELECTED_TOOL_TEMPLATE
+# Review the resolved files and budget in base-cache.yaml.
+# If this is a Shim-only native update, install the tested build into the
+# exact vmm_binary path printed by init, while the VM pool and cache are idle:
+# sudo bash scripts/install-incremental-cubesandbox.sh --shim-only BUILT_SHIM INSTALLED_SHIM
+bash scripts/clawbox --sudo experiment base-cache prepare base-cache.yaml
+bash scripts/clawbox --sudo experiment base-cache prepare base-cache.yaml --apply
+bash scripts/clawbox --sudo experiment base-cache status --verify-bytes
+```
+
+Preparation copies each unique SSD base once to NUMA-bound, non-swapping tmpfs,
+verifies its bytes and activates a fixed cache. Repeat prepare reuses an identical
+cache. Keep the host idle during prepare/cleanup; do not launch VMs concurrently.
+`init` reads the native XFS catalogs and does not change templates. For manually
+reviewed paths, `examples/base-template-cache.yaml` shows the same plan format.
+In the experiment YAML set `environment.resources.base_template_cache: required`
+and use the same WARM root/node and an adequate shared-memory budget. Cached
+bases count once in the existing WARM occupancy, alongside snapshots and shared
+live memory. The preparation time is separate from VM arrival/creation timing.
+Budget for the full RAM-file sizes of the selected unique bases, including zero
+pages; allocation is completed during preparation. Unselected templates keep
+using SSD. Choose the frequently reused bases that fit in WARM, leaving room
+for checkpoint deltas and shared live memory.
+When cases override the Tool template, select their actual template IDs; the
+generic `environment.sandbox` template may not be used by any trace.
+
+Create/restore select the WARM file only for private memory mappings. Snapshot
+lineage retains the SSD identity, so COLD spill still reuses the durable base.
+The cache stays fixed for the experiment; no runtime eviction is performed.
+If physical template-sharing evidence was measured on cached files, regenerate
+that [evidence](workloads.md#prove-template-sharing) when replacing the cache.
+Use a new run ID and qualify the new native binary. After a reboot, apply the
+host plan to restore WARM and rerun prepare before starting an experiment.
+
+```bash
+# After all VMs have been destroyed; preview first. SSD templates are preserved.
+bash scripts/clawbox --sudo experiment base-cache cleanup
+bash scripts/clawbox --sudo experiment base-cache cleanup --apply
+```
+
+If preparation was interrupted or cached files were damaged, use `cleanup --config
+base-cache.yaml` to preview its owned partial files, then repeat with `--apply`
+and prepare again. This never removes the source SSD templates.
+
+For a cache-off comparison, clean up first and set
+`environment.resources.base_template_cache: disabled`. Use the same new native
+binary for both arms; it also buffers lineage JSON reads. Comparing an old
+binary against a cached new binary would mix both changes in the result.
+
 ## 2. Run a smoke experiment
 
 ```bash

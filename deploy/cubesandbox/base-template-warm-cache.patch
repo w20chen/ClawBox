@@ -1,0 +1,246 @@
+diff --git a/hypervisor/vmm/src/base_cache.rs b/hypervisor/vmm/src/base_cache.rs
+new file mode 100644
+--- /dev/null
++++ b/hypervisor/vmm/src/base_cache.rs
+@@ -0,0 +1,197 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Fixed host-prepared RAM cache. Snapshot identities always remain on SSD.
++use serde::Deserialize;
++use std::collections::HashMap;
++use std::fs::{File, Metadata, OpenOptions};
++use std::io::{self, BufReader};
++use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
++use std::path::{Path, PathBuf};
++use std::sync::OnceLock;
++
++const REGISTRY_PATH: &str = "/run/clawbox/base-cache.json";
++const CAPABILITY: &str = "CLAWBOX_BASE_CACHE_V1";
++
++#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
++struct Identity {
++    dev: u64,
++    ino: u64,
++    size: u64,
++    mtime_sec: i64,
++    mtime_nsec: i64,
++}
++
++impl Identity {
++    fn of(value: &Metadata) -> Self {
++        Self { dev: value.dev(), ino: value.ino(), size: value.len(),
++               mtime_sec: value.mtime(), mtime_nsec: value.mtime_nsec() }
++    }
++}
++
++#[derive(Debug, Deserialize)]
++struct Entry {
++    source_identity: Identity,
++    cache_identity: Identity,
++    cache: PathBuf,
++}
++
++#[derive(Deserialize)]
++struct Manifest {
++    schema_version: u32,
++    entries: Vec<Entry>,
++}
++
++type Registry = HashMap<(u64, u64), Entry>;
++static REGISTRY: OnceLock<Result<Registry, String>> = OnceLock::new();
++
++fn invalid(message: impl std::fmt::Display) -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, format!("{CAPABILITY}: {message}"))
++}
++
++fn load(path: &Path) -> io::Result<Registry> {
++    let file = match File::open(path) {
++        Ok(file) => file,
++        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
++        Err(error) => return Err(error),
++    };
++    let manifest: Manifest = serde_json::from_reader(BufReader::new(file))?;
++    if manifest.schema_version != 1 || manifest.entries.is_empty() {
++        return Err(invalid("invalid registry schema or empty cache"));
++    }
++    let mut entries = HashMap::new();
++    for entry in manifest.entries {
++        if !entry.cache.is_absolute() || entry.source_identity.size != entry.cache_identity.size {
++            return Err(invalid("invalid cache path or size"));
++        }
++        let key = (entry.source_identity.dev, entry.source_identity.ino);
++        if entries.insert(key, entry).is_some() {
++            return Err(invalid("duplicate SSD identity"));
++        }
++    }
++    Ok(entries)
++}
++
++fn resolve(file: File, entries: &Registry) -> io::Result<File> {
++    if entries.is_empty() {
++        return Ok(file);
++    }
++    let source = file.metadata()?;
++    let entry = match entries.get(&(source.dev(), source.ino())) {
++        Some(entry) => entry,
++        None => return Ok(file),
++    };
++    if Identity::of(&source) != entry.source_identity {
++        return Err(invalid("SSD base changed; prepare the cache again before starting VMs"));
++    }
++    let cache = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&entry.cache)?;
++    let metadata = cache.metadata()?;
++    if !metadata.is_file() || Identity::of(&metadata) != entry.cache_identity
++        || metadata.permissions().mode() & 0o222 != 0
++    {
++        return Err(invalid("WARM cache changed or is writable; prepare it again"));
++    }
++    log::info!("{CAPABILITY} hit source_dev={} source_ino={} cache={}",
++               source.dev(), source.ino(), entry.cache.display());
++    Ok(cache)
++}
++
++/// Changes only the backing file descriptor. Callers keep the canonical SSD
++/// path for validation, dirty tracking, lineage inheritance and COLD spill.
++pub fn open(path: &Path) -> io::Result<File> {
++    let entries = REGISTRY.get_or_init(|| load(Path::new(REGISTRY_PATH)).map_err(|e| e.to_string()));
++    match entries {
++        Ok(entries) => resolve(File::open(path)?, entries),
++        Err(error) => Err(invalid(error)),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::fs;
++    use std::os::fd::AsRawFd;
++
++    struct Directory(PathBuf);
++    impl Directory {
++        fn new() -> Self {
++            let path = std::env::temp_dir().join(format!("cube-base-cache-{}-{}",
++                std::process::id(), uuid::Uuid::new_v4()));
++            fs::create_dir(&path).unwrap();
++            Self(path)
++        }
++        fn path(&self) -> &Path { &self.0 }
++    }
++    impl Drop for Directory {
++        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
++    }
++
++    fn fixture(root: &Path) -> (PathBuf, PathBuf, Registry) {
++        let source = root.join("ssd.mem");
++        let cache = root.join("warm.mem");
++        fs::write(&source, vec![42u8; 65536]).unwrap();
++        fs::copy(&source, &cache).unwrap();
++        fs::set_permissions(&cache, fs::Permissions::from_mode(0o444)).unwrap();
++        let source_identity = Identity::of(&fs::metadata(&source).unwrap());
++        let cache_identity = Identity::of(&fs::metadata(&cache).unwrap());
++        let mut entries = Registry::new();
++        entries.insert((source_identity.dev, source_identity.ino), Entry {
++            source_identity, cache_identity, cache: cache.clone(),
++        });
++        (source, cache, entries)
++    }
++
++    #[test]
++    fn hardlink_aliases_share_cache_and_private_writes_are_isolated() {
++        let root = Directory::new();
++        let (source, cache, entries) = fixture(root.path());
++        let alias = root.path().join("cold-base.mem");
++        fs::hard_link(&source, &alias).unwrap();
++        let a = resolve(File::open(&source).unwrap(), &entries).unwrap();
++        let b = resolve(File::open(&alias).unwrap(), &entries).unwrap();
++        assert_eq!(a.metadata().unwrap().ino(), b.metadata().unwrap().ino());
++        assert_eq!(a.metadata().unwrap().ino(), fs::metadata(&cache).unwrap().ino());
++        unsafe {
++            let p = libc::mmap(std::ptr::null_mut(), 65536, libc::PROT_READ | libc::PROT_WRITE,
++                               libc::MAP_PRIVATE, a.as_raw_fd(), 0);
++            assert_ne!(p, libc::MAP_FAILED);
++            *(p as *mut u8) = 7;
++            assert_eq!(fs::read(&cache).unwrap()[0], 42);
++            assert_eq!(fs::read(&source).unwrap()[0], 42);
++            assert_eq!(fs::read(&alias).unwrap()[0], 42);
++            assert_eq!(libc::munmap(p, 65536), 0);
++        }
++    }
++
++    #[test]
++    fn stale_source_missing_cache_and_writable_cache_fail() {
++        let root = Directory::new();
++        let (source, cache, entries) = fixture(root.path());
++        fs::set_permissions(&cache, fs::Permissions::from_mode(0o644)).unwrap();
++        assert!(resolve(File::open(&source).unwrap(), &entries).is_err());
++        fs::remove_file(&cache).unwrap();
++        assert!(resolve(File::open(&source).unwrap(), &entries).is_err());
++        fs::write(&source, b"changed").unwrap();
++        assert!(resolve(File::open(&source).unwrap(), &entries).is_err());
++    }
++
++    #[test]
++    fn absent_registry_and_unselected_sources_preserve_original_file() {
++        let root = Directory::new();
++        let (source, _, entries) = fixture(root.path());
++        let empty = load(&root.path().join("absent.json")).unwrap();
++        let original = fs::metadata(&source).unwrap().ino();
++        assert_eq!(resolve(File::open(&source).unwrap(), &empty).unwrap().metadata().unwrap().ino(), original);
++        let other = root.path().join("delta.mem");
++        fs::write(&other, b"delta").unwrap();
++        assert_eq!(resolve(File::open(&other).unwrap(), &entries).unwrap().metadata().unwrap().ino(), fs::metadata(&other).unwrap().ino());
++    }
++
++    #[test]
++    fn malformed_registry_is_an_error_not_a_silent_fallback() {
++        let root = Directory::new();
++        let path = root.path().join("registry.json");
++        fs::write(&path, br#"{"schema_version":2,"entries":[]}"#).unwrap();
++        assert!(load(&path).is_err());
++        fs::write(&path, b"partial JSON").unwrap();
++        assert!(load(&path).is_err());
++    }
++}
+diff --git a/hypervisor/vmm/src/lib.rs b/hypervisor/vmm/src/lib.rs
+--- a/hypervisor/vmm/src/lib.rs
++++ b/hypervisor/vmm/src/lib.rs
+@@ -70,6 +70,7 @@
+ pub mod api;
+ pub mod checkpoint_metrics;
+ mod snapshot_lineage;
++mod base_cache;
+ mod clone3;
+ pub mod config;
+ #[cfg(feature = "guest_debug")]
+diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_manager.rs
+--- a/hypervisor/vmm/src/memory_manager.rs
++++ b/hypervisor/vmm/src/memory_manager.rs
+@@ -1389,7 +1389,7 @@
+             // individual layer is necessarily a complete base mapping. Start
+             // with lazy anonymous memory and map every effective range below.
+             let memory_file = if fast_restore && lineage.is_none() {
+-                Some(memory_file_target.open_read().map_err(Error::SnapshotOpen)?)
++                Some(crate::base_cache::open(&memory_file_target.path).map_err(Error::SnapshotOpen)?)
+             } else { None };
+ 
+             let mm = MemoryManager::new(
+@@ -1425,7 +1425,7 @@
+             if let Some(lineage) = lineage {
+                 let mut manager = mm.lock().unwrap();
+                 for layer in &lineage.layers {
+-                    let file = File::open(layer.file_path(&memory_file_target.path))
++                    let file = crate::base_cache::open(&layer.file_path(&memory_file_target.path))
+                         .map_err(Error::SnapshotOpen)?;
+                     for range in &layer.ranges {
+                         let memory = manager.guest_memory.memory();
+diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapshot_lineage.rs
+--- a/hypervisor/vmm/src/snapshot_lineage.rs
++++ b/hypervisor/vmm/src/snapshot_lineage.rs
+@@ -171,7 +171,7 @@
+             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+             Err(e) => return Err(e),
+         };
+-        let lineage: Self = serde_json::from_reader(file)?;
++        let lineage: Self = serde_json::from_reader(std::io::BufReader::new(file))?;
+         if lineage.schema_version != 1 || lineage.layers.is_empty()
+             || lineage.logical_bytes != layout.iter().map(|r| r.length).sum::<u64>()
+             || page_size == 0

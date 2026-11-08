@@ -35,7 +35,7 @@ from .supervisor import ExperimentSupervisor, process_is_alive, process_identity
 from .worker import atomic_json, session_case_for, session_worker_count
 
 
-QUALIFICATION_SCHEMA_VERSION = 18
+QUALIFICATION_SCHEMA_VERSION = 19
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
 
 
@@ -105,8 +105,10 @@ def qualification_input_manifest(
 ) -> dict[str, Any]:
     """Bind a receipt to the exact mutable files used by the specification."""
     inputs = validated_inputs if validated_inputs is not None else validate_inputs(spec)
+    from .base_cache import qualification_input
     sharing_artifact = spec.resources.template_base_sharing_artifact
     return {
+        **qualification_input(spec.resources),
         "traces": [
             {
                 "case_id": item["case_id"],
@@ -190,7 +192,9 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
                 for value in paths
             ]
     sharing_artifact = spec.resources.template_base_sharing_artifact
+    from .base_cache import qualification_input
     return {
+        **qualification_input(spec.resources),
         "traces": traces,
         "prediction_files": prediction_files,
         "template_base_sharing_artifact": (
@@ -351,6 +355,8 @@ def require_empty_vm_domain(path: str | Path) -> None:
 
 
 def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> None:
+    from .base_cache import check_experiment
+    check_experiment(spec.resources)
     from .cpu_qos import check_cpu_qos_support
     for policy in {arm.execution.cpu_qos_policy for arm in expand_matrix(spec)}:
         check_cpu_qos_support(policy)
@@ -535,8 +541,10 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         policy_name="qualification-snapshot-roundtrip",
     )
     native_domain = _native_probe_domain(spec, _node)
+    from .base_cache import qualification_warm_bytes
     pool = (
         WarmSnapshotPool(spec.resources.warm_memory_capacity_mib * 1024 * 1024,
+                         external_warm_bytes=qualification_warm_bytes(spec.resources),
                          transfer_concurrency=spec.resources.pool_transfer_concurrency,
                          snapshot_transfer_concurrency=spec.resources.snapshot_transfer_concurrency,
                          transfer_timeout_seconds=spec.resources.pool_transfer_timeout_seconds)
@@ -619,9 +627,10 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                     raise RuntimeError("WARM snapshot pool has invalid committed usage")
                 # Force the authoritative final WARM generation through the
                 # production spill callback. This specifically proves that an
-                # external template RAM Base is materialized in self-contained
-                # COLD lineage before the volatile WARM files are removed.
-                pool.spill_for_admission(pool.capacity_bytes - committed + 1)
+                # external template RAM base is retained in self-contained COLD
+                # lineage before WARM files are removed. Fixed base cache pages
+                # are already charged and are not spillable snapshot victims.
+                pool.spill_for_admission(pool.capacity_bytes - pool.accounted_bytes + 1)
                 cold_relocation_verified = True
             if coordinator is not None:
                 coordinator.complete_model_wait(probe_id, str(generation))
@@ -789,8 +798,10 @@ def live_borrow_roundtrip_test(
     artifact_root.mkdir(parents=True, exist_ok=False)
     journal = OwnedSandboxJournal(artifact_root / "owned-sandboxes.jsonl")
     client = CubeSandboxClient(journal=journal)
+    from .base_cache import qualification_warm_bytes
     shared_pool = WarmSnapshotPool(
         spec.resources.warm_memory_capacity_mib * 1024 * 1024,
+        external_warm_bytes=qualification_warm_bytes(spec.resources),
         borrow_capacity_bytes=limit_mib * 1024 * 1024,
         transfer_concurrency=spec.resources.pool_transfer_concurrency,
         snapshot_transfer_concurrency=spec.resources.snapshot_transfer_concurrency,
@@ -1072,7 +1083,7 @@ def _file_mappings(pid: int) -> dict[tuple[str, int], dict[str, int | str]]:
                 key = (match.group(1), inode)
                 current = result.setdefault(
                     key, {"path": path, "size_kib": 0, "rss_kib": 0,
-                          "pss_kib": 0, "shared_clean_kib": 0},
+                          "pss_kib": 0, "shared_clean_kib": 0, "shared_dirty_kib": 0},
                 )
             continue
         if current is None or ":" not in line:
@@ -1081,6 +1092,7 @@ def _file_mappings(pid: int) -> dict[tuple[str, int], dict[str, int | str]]:
         field = {
             "Size": "size_kib", "Rss": "rss_kib", "Pss": "pss_kib",
             "Shared_Clean": "shared_clean_kib",
+            "Shared_Dirty": "shared_dirty_kib",
         }.get(name)
         if field:
             current[field] = int(current[field]) + int(value.split()[0])
@@ -1096,14 +1108,31 @@ def _sandbox_file_mappings(sandbox_id: str) -> dict[tuple[str, int], dict[str, i
             if target is None:
                 aggregate[identity] = dict(item)
                 continue
-            for field in ("size_kib", "rss_kib", "pss_kib", "shared_clean_kib"):
-                target[field] = int(target[field]) + int(item[field])
+            for field in ("size_kib", "rss_kib", "pss_kib", "shared_clean_kib", "shared_dirty_kib"):
+                target[field] = int(target.get(field, 0)) + int(item.get(field, 0))
     return aggregate
+
+
+def _shared_ram_kib(mapping: dict[str, Any]) -> int:
+    # Prepared tmpfs pages are Shared_Dirty in smaps even when the immutable
+    # file is mapped privately. Guest CoW writes are private, not shared pages.
+    return int(mapping.get("shared_clean_kib", 0)) + int(mapping.get("shared_dirty_kib", 0))
+
+
+def _ram_path_identifies_template(path: Path, template: str) -> bool:
+    if '.clawbox-base-cache' in path.parts:
+        from .base_cache import status
+        return any(Path(row['cache']) == path and template in row['templates']
+                   for row in status().get('entries', []))
+    return template in str(path)
 
 
 def _same_template_ram_mapping(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_path = Path(str(left["path"]))
     right_path = Path(str(right["path"]))
+    if left_path == right_path and '.clawbox-base-cache' in left_path.parts:
+        from .base_cache import status
+        return any(Path(row['cache']) == left_path for row in status().get('entries', []))
     return (
         left_path == right_path
         and left_path.name.endswith("-memory")
@@ -1275,13 +1304,13 @@ def _validated_prior_template_evidence(
                 raise ValueError(f"prior template-sharing VM evidence is missing for {template}")
             if not _same_template_ram_mapping(left, right):
                 raise ValueError(f"prior template-sharing paths differ for {template}")
-            if template not in str(left.get("path", "")):
+            if not _ram_path_identifies_template(Path(str(left.get("path", ""))), template):
                 raise ValueError(f"prior template-sharing path does not identify {template}")
             if min(int(left.get("size_kib", 0)), int(right.get("size_kib", 0))) < minimum_kib:
                 raise ValueError(f"prior template-sharing mapping is too small for {template}")
             if min(
-                int(left.get("shared_clean_kib", 0)),
-                int(right.get("shared_clean_kib", 0)),
+                _shared_ram_kib(left),
+                _shared_ram_kib(right),
             ) <= 0:
                 raise ValueError(f"prior template-sharing mapping is not shared for {template}")
         validated[template] = rows
@@ -1381,7 +1410,7 @@ def template_base_sharing_test(
                     continue
                 if min(left["size_kib"], right["size_kib"]) < minimum_kib:
                     continue
-                if min(left["shared_clean_kib"], right["shared_clean_kib"]) <= 0:
+                if min(_shared_ram_kib(left), _shared_ram_kib(right)) <= 0:
                     continue
                 common.append({"device_inode": list(identity), "vm_0": left, "vm_1": right})
             if not common:
@@ -1481,7 +1510,7 @@ def template_base_sharing_test(
             for template, (_index, _sandbox, errors, _last_error)
             in retryable_failures.items()
         },
-        "metric": "Linux smaps Shared_Clean/Pss for common Cube *-memory device+inode mapping",
+        "metric": "Linux smaps Shared_Clean+Shared_Dirty/Pss for common template RAM device+inode mapping",
         "failure": f"{type(primary_error).__name__}: {primary_error}" if primary_error else None,
         "cleanup_errors": cleanup_errors,
     }
@@ -1702,7 +1731,7 @@ def design_probes(spec, probe, *, artifact_root):
                 'cold_snapshot_root', 'snapshot_mechanism', 'snapshot_storage',
                 'snapshot_destination', 'lazy_restore', 'shared_memory_borrow_limit_mib',
                 'pool_transfer_concurrency', 'pool_transfer_timeout_seconds',
-                'template_base_sharing', 'template_base_sharing_artifact',
+                'template_base_sharing', 'template_base_sharing_artifact', 'base_template_cache',
                 'runtime_poll_interval_seconds')
         identity = {key: resources[key] for key in keys}
         identity['snapshot_enabled'] = policy.reclamation.value == 'snapshot_pause'

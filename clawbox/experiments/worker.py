@@ -2171,9 +2171,10 @@ class ExperimentWorker:
 
     def run(self, *, arm_ids: set[str] | None = None,
             write_summary: bool = True) -> list[ResultEnvelope]:
+        from .base_cache import experiment_lease
         self._run_entered_monotonic = time.monotonic()
         self._run_entered_process_cpu = time.process_time()
-        with worker_cyclic_gc(self.spec.execution.worker_cyclic_gc_enabled), timing_details(self.spec.execution.control_timing_details), monitor_gc(), worker_thread_scheduling(
+        with experiment_lease(), worker_cyclic_gc(self.spec.execution.worker_cyclic_gc_enabled), timing_details(self.spec.execution.control_timing_details), monitor_gc(), worker_thread_scheduling(
                 self.spec.execution.worker_thread_switch_interval_seconds):
             return self._run(arm_ids=arm_ids, write_summary=write_summary)
 
@@ -2255,6 +2256,8 @@ class ExperimentWorker:
             return False
 
     def _run_arm(self, arm: ExperimentArm, result_path: Path, marker_path: Path) -> ResultEnvelope:
+        from .base_cache import check_experiment
+        base_cache_receipt = check_experiment(arm.resources)
         started_at = utcnow()
         started = time.monotonic()
         started_process_cpu = time.process_time()
@@ -2467,6 +2470,7 @@ class ExperimentWorker:
         first_event_started_process_cpu = time.process_time()
         events.write({
             "event": "shared_memory_pool_initialized",
+            "base_template_cache": base_cache_receipt,
             "worker_startup_stage_seconds": {
                 "module_to_run": max(
                     0.0, self._run_entered_monotonic

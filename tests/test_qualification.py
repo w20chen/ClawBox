@@ -77,6 +77,7 @@ Size:            1048576 kB
 Rss:                 32 kB
 Pss:                 16 kB
 Shared_Clean:        32 kB
+Shared_Dirty:       16 kB
 60000000-70000000 rw-p 00000000 00:00 0
 Size:             262144 kB
 Rss:               1024 kB
@@ -85,11 +86,12 @@ Size:            7340032 kB
 Rss:                 80 kB
 Pss:                 40 kB
 Shared_Clean:        80 kB
+Shared_Dirty:       40 kB
 """
     monkeypatch.setattr(Path, 'read_text', lambda self, **kwargs: smaps)
     assert qualification_module._file_mappings(123) == {
         ('08:01', 42): {'path': '/data/volumes/tpl-memory', 'size_kib': 8388608,
-                       'rss_kib': 112, 'pss_kib': 56, 'shared_clean_kib': 112},
+                       'rss_kib': 112, 'pss_kib': 56, 'shared_clean_kib': 112, 'shared_dirty_kib': 56},
     }
 
 
@@ -111,7 +113,7 @@ def test_sandbox_mapping_aggregation_does_not_double_first_process(monkeypatch):
         "_file_mappings",
         lambda pid: {identity: {
             "path": "/warm/base.mem", "size_kib": 100,
-            "rss_kib": pid, "pss_kib": 5, "shared_clean_kib": 4,
+            "rss_kib": pid, "pss_kib": 5, "shared_clean_kib": 4, "shared_dirty_kib": 2,
         }},
     )
 
@@ -119,7 +121,7 @@ def test_sandbox_mapping_aggregation_does_not_double_first_process(monkeypatch):
 
     assert result == {
         "path": "/warm/base.mem", "size_kib": 200,
-        "rss_kib": 23, "pss_kib": 10, "shared_clean_kib": 8,
+        "rss_kib": 23, "pss_kib": 10, "shared_clean_kib": 8, "shared_dirty_kib": 4,
     }
 
 
@@ -129,6 +131,21 @@ def test_template_sharing_evidence_excludes_shared_root_filesystems():
 
     assert qualification_module._same_template_ram_mapping(ram, dict(ram))
     assert not qualification_module._same_template_ram_mapping(rootfs, dict(rootfs))
+
+
+def test_cached_template_proof_uses_registered_identity_not_cache_filename(monkeypatch):
+    from clawbox.experiments import base_cache
+    path = Path('/warm/.clawbox-base-cache/prepared-one/000000.mem')
+    row = {'path': str(path)}
+    monkeypatch.setattr(base_cache, 'status', lambda: {
+        'entries': [{'cache': str(path), 'templates': ['tool-a', 'tool-alias']}],
+    })
+    assert qualification_module._same_template_ram_mapping(row, dict(row))
+    assert qualification_module._ram_path_identifies_template(path, 'tool-a')
+    assert qualification_module._ram_path_identifies_template(path, 'tool-alias')
+    assert not qualification_module._ram_path_identifies_template(path, 'tool-b')
+    monkeypatch.setattr(base_cache, 'status', lambda: {'entries': []})
+    assert not qualification_module._same_template_ram_mapping(row, dict(row))
 
 
 def test_template_sharing_retries_only_explicit_cube_ttrpc_create_errors():
@@ -252,7 +269,7 @@ def test_template_sharing_probe_releases_each_pair_before_next_template(
         return {("00:01", 7): {
             "path": f"/data/cubelet/volumes/{template}-memory/{template}-memory",
             "size_kib": 3 * 1024 * 1024,
-            "rss_kib": 1, "pss_kib": 1, "shared_clean_kib": 1,
+            "rss_kib": 1, "pss_kib": 1, "shared_clean_kib": 0, "shared_dirty_kib": 1,
         }}
 
     monkeypatch.setattr(qualification_module, "CubeSandboxClient", Client)

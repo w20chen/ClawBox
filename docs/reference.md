@@ -412,6 +412,47 @@ bin. These are finite-batch metrics, not a maximum sustainable throughput
 estimate. Analysis changes require no new run, host apply, image rebuild, or
 retraining.
 
+### Fixed shared-DRAM base cache
+
+`environment.resources.base_template_cache` is `disabled` by default; `required`
+requires an active, validated cache and incremental-CoW lazy restore. A host/spec
+mismatch fails before VM arrivals. The worker records the prepared cache receipt
+in `shared_memory_pool_initialized`; it does not copy or hash bases per VM.
+
+`experiment base-cache init PLAN.yaml --spec EXPERIMENT.yaml --capacity-mib N
+--template ID [--template ID ...]` resolves RAM paths from native XFS catalogs.
+It refuses to overwrite a plan. The Shim is resolved from each template's
+recorded component version; `--vmm-binary` is for nonstandard component roots.
+The global `/usr/local/bin` Shim may differ from the version used by templates.
+`experiment base-cache prepare PLAN.yaml` previews; `--apply` prepares/activates.
+`status` verifies identities; `status --verify-bytes` also checks SHA-256.
+`cleanup` previews owned cache removal; `cleanup --apply` removes it on an idle
+host. Original templates and COLD snapshots are retained.
+`cleanup --config PLAN.yaml` also finds interrupted preparations owned by that
+exact plan; preview before adding `--apply`.
+
+| Plan field | Meaning |
+| --- | --- |
+| `warm_root` | Existing tmpfs root with `noswap` and `mpol=bind:<numa_node>`; run host apply first |
+| `numa_node` | Shared DRAM NUMA node ID |
+| `capacity_mib` | Positive maximum cache data allocation in MiB; part of, not additional to, the experiment WARM budget. Selected RAM files are fully materialized, including zero pages, before arrivals |
+| `vmm_binary` | Actual installed patched Shim file; preparation checks its cache capability and records its identity |
+| `templates` | Explicit template identity to immutable SSD RAM-file path mapping; same-inode aliases share one cached copy |
+
+The native registry is `/run/clawbox/base-cache.json`; cache data is under
+`warm_root/.clawbox-base-cache/`. Both are prepared state, not template storage.
+The cache changes mappings host-wide for selected bases. Select/configure it
+before qualification and keep it fixed until all VMs are gone. Original SSD
+identities remain in lineage, including after WARM checkpoint or COLD spill.
+Source or cache identity changes fail rather than silently weakening the policy.
+Reboot clears the registry; restore the WARM mount and repeat preparation.
+The native update needs a release rebuild/install and a new run ID, but no guest
+image rebuild, predictor retraining, or kernel change.
+For a tested Shim-only change, `sudo bash scripts/install-incremental-cubesandbox.sh
+--shim-only BUILT_SHIM INSTALLED_SHIM` atomically replaces the versioned binary
+identified by the plan, preserves a backup and prints the rollback command.
+It refuses live VMs or an active cache and does not restart unrelated services.
+
 ### Snapshot and lifecycle limits
 
 Fields are under `mechanisms.checkpoint`:

@@ -135,7 +135,8 @@ generations to COLD. Retained lazy-restore generations remain unspillable.
 Incremental CoW snapshots can reference an immutable template RAM base. A logical
 reference alone does not prove physical sharing. Template-aware qualification
 checks matching large file-backed mappings in two VMMs, supported by
-`Shared_Clean` and PSS. Deduplicate layer device/inode identities when computing
+`Shared_Clean + Shared_Dirty` and PSS (tmpfs bases can be reported as shared dirty).
+Deduplicate layer device/inode identities when computing
 storage totals.
 
 ## PMU measurements

@@ -340,6 +340,8 @@ def test_runtime_forecast_ttl_roundtrips_to_every_arm():
 
 
 def test_runtime_missing_psi_fails_before_host_or_vm_setup(tmp_path, monkeypatch):
+    from clawbox.experiments import base_cache
+    monkeypatch.setattr(base_cache, 'check_experiment', lambda _: {'enabled': False})
     from clawbox.experiments import qualification
     raw = export_design(design('runtime'))
     raw['environment']['resources']['local_memory_cgroup'] = str(tmp_path)
@@ -351,7 +353,10 @@ def test_runtime_missing_psi_fails_before_host_or_vm_setup(tmp_path, monkeypatch
 
 
 def test_os_only_design_checks_common_physical_shared_pool(monkeypatch):
+    from clawbox.experiments import base_cache
+    monkeypatch.setattr(base_cache, 'check_experiment', lambda _: {'enabled': False})
     from clawbox.experiments import qualification
+    monkeypatch.setattr(qualification, 'require_empty_vm_domain', lambda _: None)
     raw = base()
     raw['mechanisms'].update(
         deployment={'mode': 'os-default'},
@@ -933,7 +938,10 @@ def test_explicit_runtime_shape_survives_runtime_model_conversion():
 
 
 def test_pure_ledger_host_check_uses_common_physical_profile(monkeypatch):
+    from clawbox.experiments import base_cache
+    monkeypatch.setattr(base_cache, 'check_experiment', lambda _: {'enabled': False})
     from clawbox.experiments import qualification
+    monkeypatch.setattr(qualification, 'require_empty_vm_domain', lambda _: None)
     raw = base()
     raw['comparison'] = dict(recipe='resident-capacity', arms=[recipe_arms('resident-capacity')[2]])
     spec = ExperimentSpec.model_validate(raw)

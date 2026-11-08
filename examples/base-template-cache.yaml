@@ -1,0 +1,11 @@
+# Replace the identities and paths with your registered templates and their
+# canonical SSD RAM-file paths (resolved by experiment base-cache init).
+# Prepare only on an idle VM pool, after experiment host apply mounts WARM.
+warm_root: /mnt/clawbox-warm
+numa_node: 2
+capacity_mib: 8192
+# Use the actual installed file, not /usr/local/bin's symlink.
+vmm_binary: /data/cubelet/root/component_versions/cube-shim/REPLACE_VERSION/bin/containerd-shim-cube-rs
+templates:
+  REPLACE_RUNTIME_TEMPLATE: /absolute/path/to/runtime-template-memory
+  REPLACE_TOOL_TEMPLATE: /absolute/path/to/tool-template-memory

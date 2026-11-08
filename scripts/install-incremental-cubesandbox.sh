@@ -1,6 +1,39 @@
 #!/usr/bin/env bash
 # Install a tested four-component CubeSandbox build on an idle standalone host.
 set -Eeuo pipefail
+if [[ ${1:-} == --shim-only ]]; then
+  (( $# == 3 )) || { echo 'usage: sudo bash scripts/install-incremental-cubesandbox.sh --shim-only BUILT_SHIM INSTALLED_SHIM' >&2; exit 64; }
+  (( EUID == 0 )) || { echo 'run as root' >&2; exit 1; }
+  source_shim=$(realpath "$2")
+  target_shim=$(realpath "$3")
+  [[ -x "$source_shim" && -x "$target_shim" && "$source_shim" != "$target_shim" && $(basename "$target_shim") == containerd-shim-cube-rs ]] || {
+    echo 'supply distinct existing executable source and installed versioned Shim paths' >&2; exit 1;
+  }
+  install -d -m 700 /run/clawbox
+  exec 9>/run/clawbox/base-cache.lock
+  flock -n 9 || { echo 'experiment/cache maintenance is active; wait before installing' >&2; exit 1; }
+  [[ ! -e /run/clawbox/base-cache.json ]] || { echo 'run experiment base-cache cleanup before replacing the Shim' >&2; exit 1; }
+  python3 - <<'PY'
+from pathlib import Path
+for entry in Path('/proc').iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        name = Path((entry/'cmdline').read_bytes().split(b'\0')[0].decode()).name
+        if name in {'containerd-shim-cube-rs', 'cloud-hypervisor', 'cube-hypervisor'}:
+            raise SystemExit('live VM process ' + entry.name + '; finish/destroy VMs before installing')
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+PY
+  backup_dir=$(mktemp -d /var/tmp/clawbox-shim-backup.XXXXXXXX)
+  cp -p "$target_shim" "$backup_dir/containerd-shim-cube-rs"
+  install -m 755 "$source_shim" "$target_shim.clawbox-new"
+  mv -f "$target_shim.clawbox-new" "$target_shim"
+  sha256sum "$backup_dir/containerd-shim-cube-rs" "$target_shim"
+  printf 'Installed Shim only; existing templates and other components preserved.\nBackup: %s\n' "$backup_dir/containerd-shim-cube-rs"
+  printf 'Rollback on an idle, cache-disabled host: sudo bash scripts/install-incremental-cubesandbox.sh --shim-only %q %q\n' "$backup_dir/containerd-shim-cube-rs" "$target_shim"
+  exit 0
+fi
 if (( $# != 4 )); then
   echo "usage: sudo $0 CUBE_SOURCE_DIR CLAWBOX_DIR WARM_ROOT COLD_ROOT" >&2
   exit 64

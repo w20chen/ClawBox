@@ -40,6 +40,7 @@ NUMA_CLEAN_FILE_PATCH_FILE=$SCRIPT_DIR/numa-clean-file-and-checkpoint-summary.pa
 CGROUP_BIRTH_PATCH_FILE=$SCRIPT_DIR/cgroup-birth.patch
 COLD_STREAM_PATCH_FILE=$SCRIPT_DIR/cold-snapshot-streaming.patch
 MEMORY_RECLAIM_PATCH_FILE=$SCRIPT_DIR/memory-snapshot-reclaim.patch
+BASE_CACHE_PATCH_FILE=$SCRIPT_DIR/base-template-warm-cache.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -72,6 +73,7 @@ PATCH_FILES=(
   "$CGROUP_BIRTH_PATCH_FILE"
   "$COLD_STREAM_PATCH_FILE"
   "$MEMORY_RECLAIM_PATCH_FILE"
+  "$BASE_CACHE_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -160,6 +162,28 @@ apply_memory_reclaim_patch() {
   fi
 }
 
+apply_base_cache_patch() {
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$BASE_CACHE_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$BASE_CACHE_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$BASE_CACHE_PATCH_FILE"
+  fi
+}
+
+# This final patch changes mmap/read hunks in memory-reclaim. Check it before
+# trying to reverse-check earlier, superseded contexts on a repeated build.
+if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$BASE_CACHE_PATCH_FILE" >/dev/null 2>&1; then
+  if [[ -f "$PATCHSET_STAMP" ]]; then
+    require_current_patchset "$PATCHSET_STAMP" complete
+  else
+    require_current_patchset "$PATCHSET_PENDING" interrupted
+  fi
+  git -C "$SOURCE_DIR" diff --check
+  printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
+  rm -f "$PATCHSET_PENDING"
+  echo "standalone patch set already prepared: $SOURCE_DIR"
+  exit 0
+fi
+
 # The final birth patch supersedes the priority patch's attachment hunk.
 if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$CGROUP_BIRTH_PATCH_FILE" >/dev/null 2>&1; then
   if [[ -f "$PATCHSET_STAMP" ]]; then
@@ -170,6 +194,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   apply_upstream_pagemap_fix
   apply_cold_stream_patch
   apply_memory_reclaim_patch
+  apply_base_cache_patch
   git -C "$SOURCE_DIR" diff --check
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
@@ -257,6 +282,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   apply_upstream_pagemap_fix
   apply_cold_stream_patch
   apply_memory_reclaim_patch
+  apply_base_cache_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone priority patch set already prepared: $SOURCE_DIR"
@@ -364,6 +390,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
   apply_upstream_pagemap_fix
   apply_cold_stream_patch
   apply_memory_reclaim_patch
+  apply_base_cache_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -433,6 +460,7 @@ apply_once "$NUMA_CLEAN_FILE_PATCH_FILE" "retain shared file backing during NUMA
 apply_once "$CGROUP_BIRTH_PATCH_FILE" "start shims in their assigned cgroup without migrating shared mappings"
 apply_cold_stream_patch
 apply_memory_reclaim_patch
+apply_once "$BASE_CACHE_PATCH_FILE" "fixed shared-DRAM base mappings and buffered lineage reads"
 
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"

@@ -186,6 +186,22 @@ def parser() -> argparse.ArgumentParser:
     catalog = sub.add_parser('recipes', help='list six-dimension experiment recipes')
     catalog.add_argument('--json', action='store_true', dest='as_json')
     sub.add_parser('schema', help='print the complete editable schema-4 JSON Schema')
+    cache = sub.add_parser('base-cache', help='prepare fixed shared-DRAM template RAM caches before VM arrivals')
+    cache_actions = cache.add_subparsers(dest='cache_action', required=True)
+    cache_init = cache_actions.add_parser('init', help='resolve selected template RAM files from native catalogs into a reviewable YAML')
+    cache_init.add_argument('config', type=Path)
+    cache_init.add_argument('--spec', type=Path, required=True)
+    cache_init.add_argument('--template', action='append', required=True)
+    cache_init.add_argument('--capacity-mib', type=int, required=True)
+    cache_init.add_argument('--vmm-binary', help='explicit installed Shim file for nonstandard component roots; default: template catalog component version')
+    cache_prepare = cache_actions.add_parser('prepare', help='preview a cache YAML; --apply prewarms and activates it on an idle host')
+    cache_prepare.add_argument('config', type=Path)
+    cache_prepare.add_argument('--apply', action='store_true')
+    cache_status = cache_actions.add_parser('status', help='verify active cache identities and report actual allocation')
+    cache_status.add_argument('--verify-bytes', action='store_true', help='also hash source and cache files; preparation cost, not a per-VM check')
+    cache_cleanup = cache_actions.add_parser('cleanup', help='preview owned cache cleanup; original SSD templates are preserved')
+    cache_cleanup.add_argument('--apply', action='store_true')
+    cache_cleanup.add_argument('--config', type=Path, help='also recover interrupted preparations owned by this exact plan')
     for name in ("validate", "plan", "run"):
         command = sub.add_parser(name)
         command.add_argument("spec", type=Path)
@@ -661,6 +677,18 @@ def main(argv: list[str] | None = None) -> int:
                 [str(repository), *([python_path] if python_path else [])]
             )
             return subprocess.call(command, env=environment)
+        if args.command == "base-cache":
+            from clawbox.experiments import base_cache
+            if args.cache_action == "init":
+                emit(base_cache.init_plan(args.config, spec_path=args.spec, templates=args.template,
+                                         capacity_mib=args.capacity_mib, vmm_binary=args.vmm_binary))
+            elif args.cache_action == "prepare":
+                emit(base_cache.prepare(base_cache.load_plan(args.config), apply=args.apply))
+            elif args.cache_action == "status":
+                emit(base_cache.status(full=args.verify_bytes))
+            else:
+                emit(base_cache.cleanup(apply=args.apply, plan=base_cache.load_plan(args.config) if args.config else None))
+            return 0
         if args.command == "host":
             from clawbox.experiments import host
             if args.host_action == "inspect":
