@@ -181,6 +181,13 @@ completed/failed/unfinished counts and fixed-window rates for this comparison.
 The peer report's agent-tool SSH operations include `exec` and filesystem bridge
 operations, excluding backend-maintenance. This count is not the number of
 LLM tool calls; one model-level call can perform several bridge operations.
+Peer VM CPU accounting establishes an observed `cpu.stat` baseline for each
+newly tracked cgroup, excluding cumulative usage from previous pool leases.
+CPU before that observation is not measured. Missing, malformed or reset
+counters increment `unobserved_counter_intervals`; affected intervals are
+unknown and must not be interpreted as zero. Audit older per-node CPU totals
+that lack this baseline. Updating the recorder requires a new run ID and
+qualification, but no host apply, image rebuild or retraining.
 
 The host plan uses `schema_version: 2`, `topology: peer-local-ssd`, `state_root`,
 `receipt`, and exactly two `nodes`. Each node explicitly supplies `numa_node`,

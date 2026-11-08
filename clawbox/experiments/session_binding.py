@@ -153,6 +153,15 @@ class PeerCpuAccounting:
         self.groups = {}
         self.cpu_usec = {node: 0 for node in domains}
         self.lost_tails = {node: 0 for node in domains}
+        self.unknown_intervals = {node: 0 for node in domains}
+
+    @staticmethod
+    def _counter(path):
+        values = dict(line.split() for line in (path / 'cpu.stat').read_text().splitlines())
+        current = int(values['usage_usec'])
+        if current < 0:
+            raise ValueError('negative VM cgroup CPU counter')
+        return current
 
     def _read(self, key, entry):
         node, path, identity, previous = entry
@@ -162,30 +171,42 @@ class PeerCpuAccounting:
                 self.lost_tails[node] += 1
                 self.groups.pop(key, None)
                 return
-            values = dict(line.split() for line in (path / 'cpu.stat').read_text().splitlines())
-            current = int(values['usage_usec'])
+            current = self._counter(path)
             if current < previous:
-                raise RuntimeError('VM cgroup CPU counter decreased')
+                raise ValueError('VM cgroup CPU counter decreased')
             self.cpu_usec[node] += current - previous
             self.groups[key] = node, path, identity, current
         except FileNotFoundError:
             if path.exists():
-                raise  # A missing controller on a live cgroup is not an exit.
-            self.lost_tails[node] += 1
+                self.unknown_intervals[node] += 1
+            else:
+                self.lost_tails[node] += 1
+            self.groups.pop(key, None)
+        except (OSError, ValueError, KeyError):
+            self.unknown_intervals[node] += 1
             self.groups.pop(key, None)
 
     def register(self, session, role, path, node):
         path = Path(path)
-        stat = path.stat()
-        identity = stat.st_dev, stat.st_ino
         key = session, role
         with self.lock:
             old = self.groups.get(key)
             if old is not None:
                 self._read(key, old)
+            try:
+                stat = path.stat()
+                identity = stat.st_dev, stat.st_ino
+                baseline = self._counter(path)
+            except (OSError, ValueError, KeyError):
+                self.unknown_intervals[node] += 1
+                self.groups.pop(key, None)
+                return
             previous = self.groups.get(key)
             if previous is None or previous[2] != identity:
-                self.groups[key] = node, path, identity, 0
+                # Native CleanForReuse keeps the leaf and its cumulative CPU
+                # counter. CPU before this observation belongs to an unknown
+                # prior lease, not automatically to this experiment VM.
+                self.groups[key] = node, path, identity, baseline
             else:
                 self.groups[key] = node, path, identity, previous[3]
             self._read(key, self.groups[key])
@@ -208,5 +229,6 @@ class PeerCpuAccounting:
                     'scope': 'runtime_and_tool_cgroups', 'coverage': 'sampled_lower_bound',
                     'monotonic_s': time.monotonic(),
                     'nodes': {node: {'observed_cpu_seconds': value / 1e6,
-                                    'unobserved_exit_tails': self.lost_tails[node]}
+                                    'unobserved_exit_tails': self.lost_tails[node],
+                                    'unobserved_counter_intervals': self.unknown_intervals[node]}
                               for node, value in self.cpu_usec.items()}}

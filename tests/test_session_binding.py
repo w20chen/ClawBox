@@ -170,10 +170,44 @@ def test_vm_cpu_accounting_changes_domain_at_paused_boundary(tmp_path):
     stat.write_text('usage_usec 900\n')
     cpu.register('session', 'runtime', group, 'n1')
     measured = cpu.sample()['nodes']
-    assert measured['n0']['observed_cpu_seconds'] == .0004
+    assert measured['n0']['observed_cpu_seconds'] == .0003
     assert measured['n1']['observed_cpu_seconds'] == .0005
     stat.unlink()
-    with pytest.raises(FileNotFoundError):
-        cpu.sample()
+    assert cpu.sample()['nodes']['n1']['unobserved_counter_intervals'] == 1
     group.rmdir()
-    assert cpu.sample()['nodes']['n1']['unobserved_exit_tails'] == 1
+    assert cpu.sample()['nodes']['n1']['unobserved_exit_tails'] == 0
+
+
+def test_vm_cpu_reused_pool_counter_excludes_prior_run_usage(tmp_path):
+    from clawbox.experiments.session_binding import PeerCpuAccounting
+    group = tmp_path/'persistent-pool-leaf'
+    group.mkdir()
+    stat = group/'cpu.stat'
+    stat.write_text('usage_usec 714000000\n')
+    cpu = PeerCpuAccounting(('n0',))
+    cpu.register('new-run-session', 'tool', group, 'n0')
+    assert cpu.sample()['nodes']['n0']['observed_cpu_seconds'] == 0
+    stat.write_text('usage_usec 716500000\n')
+    assert cpu.sample()['nodes']['n0']['observed_cpu_seconds'] == 2.5
+
+
+def test_vm_cpu_counter_reset_and_failed_baseline_remain_unknown(tmp_path):
+    from clawbox.experiments.session_binding import PeerCpuAccounting
+    group = tmp_path/'vm'
+    group.mkdir()
+    stat = group/'cpu.stat'
+    cpu = PeerCpuAccounting(('n0',))
+    cpu.register('session', 'runtime', group, 'n0')
+    assert cpu.sample()['nodes']['n0']['unobserved_counter_intervals'] == 1
+    stat.write_text('usage_usec 9000000\n')
+    cpu.register('session', 'runtime', group, 'n0')
+    stat.write_text('usage_usec 11000000\n')
+    assert cpu.sample()['nodes']['n0']['observed_cpu_seconds'] == 2
+    stat.write_text('usage_usec 5000000\n')
+    sample = cpu.sample()['nodes']['n0']
+    assert sample['observed_cpu_seconds'] == 2
+    assert sample['unobserved_counter_intervals'] == 2
+    stat.write_text('usage_usec 7000000\n')
+    cpu.register('session', 'runtime', group, 'n0')
+    stat.write_text('usage_usec 8000000\n')
+    assert cpu.sample()['nodes']['n0']['observed_cpu_seconds'] == 3

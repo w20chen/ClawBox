@@ -825,6 +825,11 @@ a full-window throughput result.
 The peer report counts agent-tool SSH operations, including command execution
 and filesystem operations; backend-maintenance is excluded. Do not interpret
 that rate as LLM tool calls or completed traces per second.
+VM CPU samples count increments after the first verified cgroup observation;
+pooled counters can contain earlier usage. Missing or reset counter intervals
+are unknown, recorded as `unobserved_counter_intervals`, rather than zero CPU.
+Audit older per-node CPU results before comparison if their recorder did not
+establish this baseline.
 
 After aborting or finishing a run, stop its worker and wait for VM cleanup.
 Use that run's ID as `RUN_ID`, then preview and apply replica cleanup before
