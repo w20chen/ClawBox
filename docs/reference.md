@@ -178,6 +178,9 @@ because some sessions remain unfinished. For the peer comparison, require
 `peer-summary.json`'s `fixed_window_observed: true`, plus verified VM cleanup.
 An earlier failure is not a completed observation window. Use the peer report's
 completed/failed/unfinished counts and fixed-window rates for this comparison.
+The peer report's agent-tool SSH operations include `exec` and filesystem bridge
+operations, excluding backend-maintenance. This count is not the number of
+LLM tool calls; one model-level call can perform several bridge operations.
 
 The host plan uses `schema_version: 2`, `topology: peer-local-ssd`, `state_root`,
 `receipt`, and exactly two `nodes`. Each node explicitly supplies `numa_node`,

@@ -355,6 +355,7 @@ def summarize_peer(result, path):
         'failed_sessions': statuses['failed'] if has_events else None,
         'unfinished_sessions': statuses['unfinished'], 'not_offered_sessions': statuses['not_offered'],
         'tool_completions': tools if has_events else None,
+        'tool_completion_unit': 'completed agent-tool SSH bridge operations, including exec and filesystem operations; not LLM tool calls; excludes backend-maintenance',
         'traces_per_second_fixed_window': statuses['completed']/horizon if valid_window and horizon else None,
         'tools_per_second_fixed_window': tools/horizon if valid_window and horizon else None,
         **{key: counts[key] if has_events else None for key in ('decisions', 'move_decisions', 'home_decisions',
@@ -405,14 +406,16 @@ def render_peer_lines(run_root, results, event_path):
         'These rates use the frozen offered-arrival horizon, including unfinished sessions. '
         'The general Agents/min table below retains its historical completed-workload denominator and is not this comparison. '
         'A fixed window marked unobserved has no throughput estimate.', '',
-        '| Arm | Resume policy | Horizon / observed s | Window observed | Completed / failed / unfinished / planned | Tools/s | Traces/s | Move decisions / committed / failed / rejected |',
+        '| Arm | Resume policy | Horizon / observed s | Window observed | Completed / failed / unfinished / planned | Agent-tool SSH ops/s | Traces/s | Move decisions / committed / failed / rejected |',
         '|---|---|---:|---|---:|---:|---:|---:|']
     for row in summaries:
         lines.append(f"| {row['arm_id']} | {row['policy']} | {number(row['measurement_window_seconds'])}/{number(row['actual_observed_seconds'])} | "
             f"{row['fixed_window_observed']} | {row['completed_sessions']}/{row['failed_sessions']}/{row['unfinished_sessions']}/{row['planned_sessions']} | "
             f"{number(row['tools_per_second_fixed_window'])} | {number(row['traces_per_second_fixed_window'])} | "
             f"{row['move_decisions']}/{row['migrations']}/{row['migration_failures']}/{row['migration_rejections']} |")
-    lines += ['', '| Arm | Original bases | Observed VM creations | Actual WARM base hits / misses | Local SSD template hits | Sampled resident pairs peak / mean | Occupancy sample interval s |',
+    lines += ['', 'Agent-tool SSH operations include command execution and filesystem bridge operations. '
+              'They exclude backend-maintenance and are not a count of LLM tool calls.', '',
+              '| Arm | Original bases | Observed VM creations | Actual WARM base hits / misses | Local SSD template hits | Sampled resident pairs peak / mean | Occupancy sample interval s |',
               '|---|---:|---:|---:|---:|---:|---:|']
     for row in summaries:
         occupancy = row['actual_resident_concurrency']['resident_pairs']

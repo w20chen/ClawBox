@@ -811,6 +811,9 @@ check that the measurement window closed at its cutoff, the peer report marks
 `fixed_window_observed: true`, and VM cleanup is verified. Keep unfinished
 sessions in the denominator; an early infrastructure failure is not usable as
 a full-window throughput result.
+The peer report counts agent-tool SSH operations, including command execution
+and filesystem operations; backend-maintenance is excluded. Do not interpret
+that rate as LLM tool calls or completed traces per second.
 
 After aborting or finishing a run, stop its worker and wait for VM cleanup.
 Use that run's ID as `RUN_ID`, then preview and apply replica cleanup before
