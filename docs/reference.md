@@ -172,6 +172,12 @@ uses this full denominator and retains unfinished sessions. Early completion
 does not shorten it. `arm_timeout_seconds` remains the overall execution bound;
 allow setup time beyond the measurement horizon. Resource averages use the
 actual observation interval rather than assuming idle samples after early exit.
+At the configured cutoff, the general runner can retain `failed`/`TimeoutError`
+because some sessions remain unfinished. For the peer comparison, require
+`measurement_window_closed.reason: cutoff`, `cutoff_reached: true`, and
+`peer-summary.json`'s `fixed_window_observed: true`, plus verified VM cleanup.
+An earlier failure is not a completed observation window. Use the peer report's
+completed/failed/unfinished counts and fixed-window rates for this comparison.
 
 The host plan uses `schema_version: 2`, `topology: peer-local-ssd`, `state_root`,
 `receipt`, and exactly two `nodes`. Each node explicitly supplies `numa_node`,

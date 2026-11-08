@@ -804,6 +804,14 @@ pressure and migration opportunities; the short qualification replay does not
 establish those conditions. Freeze replica inventory and costs before running
 the policy comparison.
 
+For a bounded comparison, set `execution.measurement_window_seconds` identically
+in every arm and inspect `peer-summary.json` after `collect` and `report`.
+A planned cutoff can leave the general run status `failed`/`TimeoutError`;
+check that the measurement window closed at its cutoff, the peer report marks
+`fixed_window_observed: true`, and VM cleanup is verified. Keep unfinished
+sessions in the denominator; an early infrastructure failure is not usable as
+a full-window throughput result.
+
 After aborting or finishing a run, stop its worker and wait for VM cleanup.
 Use that run's ID as `RUN_ID`, then preview and apply replica cleanup before
 the next comparison. This requires an idle VM host and no active peer transfers:
