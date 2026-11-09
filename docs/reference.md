@@ -595,7 +595,7 @@ because it is fixed for every arm in one run:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `snapshot_compression` | `zstd-page` | The standard encoding omits all-zero 1 MiB sparse chunks and stores every remaining chunk as an independent Zstd level 1 frame; `none` explicitly selects an uncompressed baseline |
+| `snapshot_compression` | `zstd-page` | Skips 1 MiB chunks reported entirely as holes by the filesystem and stores every remaining chunk as an independent Zstd level 1 frame, including allocated all-zero data; `none` explicitly selects an uncompressed baseline |
 | `snapshot_compression_binary` | `/usr/local/bin/clawbox-zstd-page-snapshot` | Absolute path of the native helper installed by the host setup instructions |
 
 Build the standard helper once per installed ClawBox native-helper revision on
@@ -609,6 +609,8 @@ WARM and COLD use the same format and parameters. ClawBox restores Cube's native
 sparse files before resume or relocation, and does not compress external template
 layers or an inode with references outside the snapshot. Compression changes need
 a new run ID and fresh qualification, but no VM image rebuild or KB retraining.
+Allocated all-zero chunks count as `zstd_chunks`; `hole_chunks` counts skipped
+filesystem holes. Decompression still omits zero-page writes to retain sparsity.
 WARM allocated-byte savings are released tmpfs DRAM while parked;
 COLD allocated-byte savings are disk savings only. Pool admission remains charged
 at the conservative native allocation because restore temporarily recreates it.

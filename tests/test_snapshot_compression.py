@@ -93,6 +93,47 @@ def test_incompressible_chunk_stays_in_zstd_format(tmp_path: Path):
     assert _digest(snapshot) == original_digest
 
 
+def test_allocated_zeros_and_holes_roundtrip_without_losing_zero_updates(tmp_path: Path):
+    binary = _build_helper(tmp_path)
+    snapshot = tmp_path / "delta.mem"
+    chunk = 1024 * 1024
+    with snapshot.open("wb") as stream:
+        stream.write(b"\0" * chunk)
+        stream.seek(2 * chunk)
+        stream.write(b"changed tail")
+    # The new layer owns the zero range even though its older base is nonzero.
+    base = tmp_path / "base.mem"
+    base.write_bytes(b"A" * snapshot.stat().st_size)
+    lineage = Path(str(snapshot) + ".lineage.json")
+    lineage.write_text(json.dumps({"layers": [
+        {"name": "base", "external_path": str(base),
+         "ranges": [{"offset": chunk, "length": chunk}]},
+        {"name": "delta", "ranges": [
+            {"offset": 0, "length": chunk},
+            {"offset": 2 * chunk, "length": len(b"changed tail")},
+        ]},
+    ]}))
+    original_lineage = lineage.read_bytes()
+    original_digest = _digest(snapshot)
+
+    compressed = compress_snapshot(snapshot, binary=str(binary))
+
+    assert compressed["chunk_count"] == 3
+    assert compressed["zstd_chunks"] == 2  # allocated zeros and the partial tail
+    assert compressed["hole_chunks"] == 1  # only the actual file hole
+    assert decompress_snapshot(snapshot, binary=str(binary)) is not None
+    assert _digest(snapshot) == original_digest
+    assert lineage.read_bytes() == original_lineage
+    assert base.read_bytes() == b"A" * snapshot.stat().st_size
+    # Apply the recorded layer ownership: zero updates must override old A bytes.
+    restored = bytearray(base.read_bytes())
+    delta = snapshot.read_bytes()
+    for owned in json.loads(lineage.read_text())["layers"][1]["ranges"]:
+        start, length = owned["offset"], owned["length"]
+        restored[start:start + length] = delta[start:start + length]
+    assert restored == b"\0" * chunk + b"A" * chunk + b"changed tail"
+
+
 def test_external_hardlink_prevents_unintended_copy(tmp_path: Path):
     binary = _build_helper(tmp_path)
     snapshot = tmp_path / "vm.mem"

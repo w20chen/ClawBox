@@ -158,8 +158,12 @@ sudo bash scripts/build-zstd-page-snapshot.sh /usr/local/bin/clawbox-zstd-page-s
 Generated specifications therefore use `snapshot_compression: zstd-page` and
 `/usr/local/bin/clawbox-zstd-page-snapshot`. Set `snapshot_compression: none`
 explicitly only for an uncompressed comparison, with a different run ID.
-Run `experiment qualify` or ordinary `launch` after changing the encoding. No
-VM image rebuild or retraining is required. Results report compression inside
+Compression skips filesystem holes; allocated data, including all-zero blocks,
+goes directly to Zstd without a separate zero-content scan. Decompression still
+omits zero-page writes to reconstruct sparse files.
+After updating the helper or changing the encoding, use a new run ID and run
+`experiment qualify` or ordinary `launch`. No VM image rebuild or retraining is
+required. Results report compression inside
 checkpoint snapshot metrics and decompression inside restore metrics. Interpret
 WARM savings as parked tmpfs DRAM released after raw files are removed; interpret
 COLD savings as disk space, not DRAM.

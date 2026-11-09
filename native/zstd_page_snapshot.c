@@ -156,7 +156,6 @@ static int compress_file(const char *input_path, const char *output_path) {
         memset(page, 0, (size_t)chunk_size);
         if (read_full(in, page, valid, position) < 0) { perror("read chunk"); goto done; }
         uint64_t index = (uint64_t)position / h.chunk_size;
-        if (all_zero(page, valid)) continue;
         size_t encoded = ZSTD_compress(compressed, ZSTD_compressBound(valid), page, valid, 1);
         if (ZSTD_isError(encoded)) { fprintf(stderr, "zstd: %s\n", ZSTD_getErrorName(encoded)); goto done; }
         off_t target = (off_t)(h.data_offset + payload);
