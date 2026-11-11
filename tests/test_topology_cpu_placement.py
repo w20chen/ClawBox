@@ -155,6 +155,7 @@ def c2_domain(monkeypatch, tmp_path):
     domain = PriorityDomain(
         tmp_path, concurrency=1, repetition=0, legacy=False,
         topology_mode='c2', topology_min_duration_seconds=0,
+        topology_include_smt=False,
         placements={0: ('0-15', 0)}, emit=events.append,
     )
     leaf = tmp_path/'tool'

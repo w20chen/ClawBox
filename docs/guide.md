@@ -209,8 +209,16 @@ comparison:
     - name: full-pool
       override: {placement.tool_call_cpu_policy: c0}
     - name: one-cache-cluster
-      override: {placement.tool_call_cpu_policy: c2}
+      override: {placement.tool_call_cpu_policy: c2, placement.tool_call_cpu_include_smt: true}
 ```
+
+When selecting `c2`, `placement.tool_call_cpu_include_smt` defaults to `true`:
+the selected LLC cluster mask includes all allowed SMT siblings. Set it to
+`false` explicitly for the one-logical-CPU-per-physical-core ablation. This
+changes affinity, not exclusive ownership of cores. Use a new run ID and
+qualification after changing it; unchanged CPU pools need no host apply,
+image rebuild, or retraining. Existing configurations that explicitly set
+`false` keep that value.
 
 Use `configure --set GROUP.FIELD=VALUE` to edit common mechanisms, or edit the
 YAML directly. Environment, workload, and evidence stay common across arms.

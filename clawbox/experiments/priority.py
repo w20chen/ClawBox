@@ -168,7 +168,7 @@ class PriorityDomain:
                  topology_pressure_samples: int = 2,
                  topology_group_max_active: int = 2,
                  topology_min_duration_seconds: float = 1.0,
-                 topology_include_smt: bool = False,
+                 topology_include_smt: bool = True,
                  qos_classes: dict[int, str] | None = None,
                  cpu_qos_policy: str = 'off',
                  cpu_qos_group_idle: bool = False,

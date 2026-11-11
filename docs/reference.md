@@ -418,11 +418,14 @@ Fields are under `mechanisms.placement`:
 | `tool_call_cpu_group_max_active` | 2 | Maximum narrowed VMs per group; not exclusive core ownership |
 | `tool_call_cpu_pressure_ratio` | 0.10 | CPU PSI threshold for expansion |
 | `tool_call_cpu_pressure_samples` | 2 | Consecutive pressure samples before expansion |
-| `tool_call_cpu_include_smt` | `false` | Include allowed SMT siblings in the selected cluster |
+| `tool_call_cpu_include_smt` | `true` | Include all allowed SMT siblings in the selected cluster; `false` selects one permitted logical CPU per physical core. This is an affinity mask, not exclusive core ownership. |
 
 `c2` requires readable Linux topology and at least two eligible LLC clusters.
 Calls begin on the full mask and return to it on pressure, completion, or failure.
 Filesystem, maintenance, and short calls retain full-pool placement.
+Selecting `c2` defaults to SMT enabled. Explicit `false` remains available for
+ablation. Changing this setting requires a new run ID and qualification, but
+no host apply, image rebuild, or retraining when the allowed CPU pools stay the same.
 
 ### LS/BE CPU QoS
 

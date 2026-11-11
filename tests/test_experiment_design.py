@@ -213,20 +213,23 @@ def test_small_tool_admission_bypass_is_an_editable_admission_field(configured, 
     assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
 
-def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement():
+@pytest.mark.parametrize('include_smt', [None, True, False])
+def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_smt):
     raw = base()
     raw['mechanisms']['placement'].update(
         tool_call_cpu_policy='c2', tool_call_cpu_pressure_ratio=.2,
         tool_call_cpu_pressure_samples=3, tool_call_cpu_group_max_active=3,
-        tool_call_cpu_min_duration_seconds=1.5, tool_call_cpu_include_smt=True,
+        tool_call_cpu_min_duration_seconds=1.5,
     )
+    if include_smt is not None:
+        raw['mechanisms']['placement']['tool_call_cpu_include_smt'] = include_smt
     spec = ExperimentSpec.model_validate(raw)
     arm = expand_matrix(spec)[0]
     assert arm.execution.tool_call_cpu_policy == 'c2'
     assert arm.execution.tool_call_cpu_pressure_ratio == .2
     assert arm.execution.tool_call_cpu_group_max_active == 3
     assert arm.execution.tool_call_cpu_min_duration_seconds == 1.5
-    assert arm.execution.tool_call_cpu_include_smt is True
+    assert arm.execution.tool_call_cpu_include_smt is (True if include_smt is None else include_smt)
     assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
     raw['mechanisms']['placement']['policy'] = 'os_default'
