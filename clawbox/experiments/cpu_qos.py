@@ -345,7 +345,9 @@ def apply_group_idle(cgroup: Path, *, qos_class: str) -> dict:
             f'Cannot apply VM group CPU QoS at {cgroup}; enable the cgroup v2 '
             'CPU controller with cpu.idle support and run with host privileges'
         ) from exc
-    if observed != desired or (desired and weight != 0):
+    # cpu.idle is the policy readback. The displayed weight is kernel-dependent
+    # (official openEuler 145 reports 1 for an idle group); retain it as evidence.
+    if observed != desired:
         raise RuntimeError(f'VM group CPU QoS verification failed: cpu.idle={observed}, cpu.weight={weight}')
     return {'path': str(cgroup), 'requested_idle': desired, 'effective_idle': observed,
             'effective_weight': weight, 'scope': 'vm_cgroup_including_helpers'}

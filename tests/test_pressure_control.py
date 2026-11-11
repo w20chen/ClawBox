@@ -217,11 +217,12 @@ def test_cpu_requires_measured_release_cpu_pressure_and_local_blocking(tmp_path,
     c.close()
 
 
-def test_explicit_idle_group_keeps_memory_control_without_cpu_boost(tmp_path, monkeypatch):
+@pytest.mark.parametrize('idle_weight', ['0', '1'])
+def test_explicit_idle_group_keeps_memory_control_without_cpu_boost(tmp_path, monkeypatch, idle_weight):
     c, d = control(tmp_path)
     leaf = tmp_path/'tool'
     (leaf/'cpu.idle').write_text('1')
-    (leaf/'cpu.weight').write_text('0')
+    (leaf/'cpu.weight').write_text(idle_weight)
     with pytest.raises(RuntimeError, match='nondefault controls'):
         c.register('s', 'tool', leaf, 0, d)
     c.register('s', 'tool', leaf, 0, d, cpu_idle=True)
@@ -235,13 +236,13 @@ def test_explicit_idle_group_keeps_memory_control_without_cpu_boost(tmp_path, mo
     advance(c, tmp_path, monkeypatch, 0)
     advance(c, tmp_path, monkeypatch, 1)
     assert int((leaf/'memory.low').read_text()) == 128*MIB
-    assert (leaf/'cpu.weight').read_text() == '0'
+    assert (leaf/'cpu.weight').read_text() == idle_weight
     assert c.stats['cpu_boosts'] == 0
     c.event('s', 'complete', 'new')
     c.close()
     assert (leaf/'memory.low').read_text() == '0'
     assert (leaf/'cpu.idle').read_text() == '1'
-    assert (leaf/'cpu.weight').read_text() == '0'
+    assert (leaf/'cpu.weight').read_text() == idle_weight
 
 
 def test_missing_release_evidence_does_not_boost(tmp_path, monkeypatch):

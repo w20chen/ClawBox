@@ -191,7 +191,8 @@ class PressureControl:
                 vm.saved[name] = (vm.group / name).read_text().strip()
             if cpu_idle and (vm.group/'cpu.idle').read_text().strip() != '1':
                 raise RuntimeError(f'Expected idle CPU group at {vm.group}')
-            if vm.saved != {'cpu.weight': '0' if cpu_idle else '100', 'memory.low': '0', 'memory.high': 'max'}:
+            expected_weight = vm.saved['cpu.weight'] if cpu_idle else '100'
+            if vm.saved != {'cpu.weight': expected_weight, 'memory.low': '0', 'memory.high': 'max'}:
                 raise RuntimeError(f'adaptive VM leaf has nondefault controls: {vm.group}')
             if previous is not None:
                 previous.group = vm.group

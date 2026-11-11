@@ -138,11 +138,26 @@ def test_native_verification_reapplies_qos_to_restored_runtime_and_tool_tids(
         assert (leaf/'cpu.weight').read_text() == '100'
 
 
-def test_group_idle_missing_control_and_bad_readback_fail(tmp_path):
+@pytest.mark.parametrize('weight', [0, 1])
+def test_group_idle_accepts_kernel_weight_representation(tmp_path, weight):
+    (tmp_path/'cpu.idle').write_text('1')
+    (tmp_path/'cpu.weight').write_text(str(weight))
+    result = cpu_qos.apply_group_idle(tmp_path, qos_class='be')
+    assert result['effective_idle'] == 1
+    assert result['effective_weight'] == weight
+
+
+def test_group_idle_missing_control_and_bad_readback_fail(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match='CPU controller'):
         cpu_qos.apply_group_idle(tmp_path, qos_class='be')
-    (tmp_path/'cpu.idle').write_text('1')
+    (tmp_path/'cpu.idle').write_text('0')
     (tmp_path/'cpu.weight').write_text('100')
+    original_write = Path.write_text
+    def ignore_policy_write(path, text, *args, **kwargs):
+        if path.name == 'cpu.idle':
+            return len(text)
+        return original_write(path, text, *args, **kwargs)
+    monkeypatch.setattr(Path, 'write_text', ignore_policy_write)
     with pytest.raises(RuntimeError, match='verification failed'):
         cpu_qos.apply_group_idle(tmp_path, qos_class='be')
     with pytest.raises(ValueError, match='explicit'):

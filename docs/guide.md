@@ -434,6 +434,8 @@ is `false`; keep this setting fixed across the arms of a comparison, or label
 its change as a separate ablation. Use a new run ID and qualification; no
 host apply, image rebuild, or retraining is needed if the CPU controller is
 already enabled. Cleanup restores the original group settings.
+Policy verification reads `cpu.idle`; the reported `cpu.weight` is diagnostic
+and can differ between kernels (for example, 0 or 1 for an idle group).
 The runtime memory controller retains memory protection for these groups,
 but does not apply CPU release boosts to idle BE groups.
 
