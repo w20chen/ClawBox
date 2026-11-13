@@ -360,6 +360,7 @@ class ExecutionSpec(StrictFrozenModel):
     tool_call_cpu_pressure_duration_seconds: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     tool_call_cpu_group_max_active: int = Field(default=2, ge=1)
     tool_call_cpu_min_duration_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    tool_call_cpu_duration_source: Literal["tool", "lattice"] = "tool"
     tool_call_cpu_max_utilization: float | None = Field(default=None, gt=0, le=1, allow_inf_nan=False)
     tool_call_cpu_poll_interval_seconds: float = Field(default=0.25, gt=0, allow_inf_nan=False)
     tool_call_cpu_include_smt: bool = True

@@ -2759,6 +2759,7 @@ class ExperimentWorker:
                 topology_pressure_duration_seconds=arm.execution.tool_call_cpu_pressure_duration_seconds,
                 topology_group_max_active=arm.execution.tool_call_cpu_group_max_active,
                 topology_min_duration_seconds=arm.execution.tool_call_cpu_min_duration_seconds,
+                topology_duration_source=arm.execution.tool_call_cpu_duration_source,
                 topology_max_utilization=arm.execution.tool_call_cpu_max_utilization,
                 topology_poll_interval_seconds=arm.execution.llc_poll_interval_seconds,
                 topology_include_smt=arm.execution.tool_call_cpu_include_smt,

@@ -420,6 +420,7 @@ neutralize the Full context.
 | `tool_call_cpu_policy` | `b` for Full; `c0` for generic neutral designs | `c0`: full selected-NUMA mask; `c2`: original elapsed-time baseline; `b`: prediction-triggered placement. Arm names do not select behavior. |
 | `session_cpu_slots` | `[]` | List of `{node_id, cpus}` slots; `cpus` is a Linux logical CPU list. Each slot serves one complete Runtime/Tool pair at a time. Both VMs' vCPU threads stay in that mask; reuse occurs after session cleanup. Requires managed resident C0 `round_robin` placement, compute nodes and a managed cgroup. Masks must be within their node and must not share physical cores, including SMT siblings. Effective concurrency is also capped by slot count. CPU-cluster masks may still share outer L3 cache. Requires a new run ID and qualification; host apply only if the allowed node/CPU pools change, no image rebuild or retraining. |
 | `tool_call_cpu_min_duration_seconds` | 1 | Seconds; for B, a valid pre-call ClawTune Tool duration p50 must be strictly greater than this value to request binding. B has no elapsed-time delay or duration-based retry. C2 instead waits at least this elapsed time before binding. |
+| `tool_call_cpu_duration_source` | `tool` | B only. `tool`: use ToolKB only. `lattice`: prefer LatticeKB, falling back to ToolKB only if its duration target is missing/unavailable. Missing predictions skip binding. No units. Change via `--set placement.tool_call_cpu_duration_source=lattice` or YAML; requires a new run ID and qualification, no host apply, image rebuild or retraining. Inactive for C0/C2. |
 | `tool_call_cpu_max_utilization` | null | B only. Optional fraction in `(0,1]`; when set, a cluster must have measured busy CPU utilization strictly below this limit. YAML `null` disables this utilization veto; fresh load measurements, binding-slot limits and PSI expansion still apply. Includes all tasks running on the cluster. Existing explicit limits remain in effect. |
 | `tool_call_cpu_poll_interval_seconds` | 0.25 | B only. Seconds between shared CPU-load and bound-VM PSI samples, independent of memory sampling. Admission uses the latest sample only when at most twice this interval old. |
 | `tool_call_cpu_group_max_active` | 2 | Maximum slots per group: B counts currently narrowed VMs; C2 retains the slot after expansion until the last active call completes. No exclusive core ownership or execution-concurrency limit |
@@ -444,7 +445,14 @@ Its sampler follows `measurement.memory_sample_interval_seconds`, which is
 Slots are held through expansion until the last active call completes.
 
 B binds before execution, after resource admission and VM restore, using the
-verified pre-call ClawTune prediction without a second query. Missing estimates,
+verified pre-call ClawTune prediction without a second query. By default it selects
+the `duration_ms` p50 from `models.tool`, without falling back to LatticeKB.
+With `tool_call_cpu_duration_source: lattice`, it selects `models.lattice`, falling back to `models.tool` only when
+the LatticeKB duration target is absent or unavailable. A valid short or zero
+prediction does not trigger fallback. Selection is independent of the memory
+target and its admission fallback; TrieKB and tool-class predictions are not
+duration fallbacks. A single supplied `call_prediction` is used only when the
+canonical model collection is absent. Missing estimates,
 missing/stale CPU samples, full slots, or the optional utilization veto skip
 binding without waiting for a slot. Invalid available predictions and
 prediction-service failures are errors. Without a prediction provider, B cannot
@@ -457,6 +465,11 @@ but cannot retain it after the final eligible long call finishes. Expansion
 returns to the full selected-NUMA pool; expanded VMs still contribute to real
 CPU utilization.
 
+Decision events record `duration_prediction_model`, `duration_prediction_backend`
+and `duration_prediction_unavailable_models`. B's summary records
+`duration_prediction_source` and `duration_prediction_policy: [tool]` by default,
+or `[lattice, tool]` for the LatticeKB option. These identify the duration source
+without reinterpreting memory-admission metadata.
 Results record mode, trigger, slot accounting and effective polling interval in
 `performance.tool_call_cpu_policy`. New replays of earlier prediction-based
 trials must use `b`; `c2` now selects the original baseline. Changing any policy

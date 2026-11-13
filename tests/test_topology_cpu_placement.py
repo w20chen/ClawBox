@@ -665,8 +665,74 @@ def test_invalid_available_duration_is_an_error(value):
         tool_duration_prediction(long_prediction(value))
 
 
-def test_duration_uses_canonical_tool_prediction_not_memory_fallback():
+def test_duration_uses_canonical_models_not_selected_memory_or_display_prediction():
     from clawbox.experiments.priority import tool_duration_prediction
     prediction = long_prediction(9000)
     prediction['models'] = {'tool': long_prediction(500)['call_prediction']}
     assert tool_duration_prediction(prediction)['predicted_duration_seconds'] == .5
+
+
+@pytest.mark.parametrize('lattice_ms,tool_ms,action', [(500, 5000, 'bypass_full_numa'),
+                                                     (5000, 500, 'assign')])
+@pytest.mark.parametrize('source', ['tool', 'lattice'])
+def test_b_binding_uses_lattice_duration_when_models_disagree(monkeypatch, tmp_path,
+                                                            lattice_ms, tool_ms, action, source):
+    domain, _, _, applied = b_domain(monkeypatch, tmp_path)
+    assert domain.topology_duration_source == 'tool'
+    domain.topology_duration_source = source
+    selected_ms = lattice_ms if source == 'lattice' else tool_ms
+    action = 'assign' if selected_ms > 1000 else 'bypass_full_numa'
+    domain.topology_min_duration_seconds = 1.
+    prediction = {'models': {
+        'lattice': long_prediction(lattice_ms)['call_prediction'],
+        'tool': long_prediction(tool_ms)['call_prediction']},
+        'fallback_level': 'tool'}  # Memory's model choice must not select duration.
+    event = domain.acquire_tool_call(0, 'exec', vcpus=2, prediction=prediction)
+    assert event['action'] == action
+    assert event['duration_prediction_model'] == source
+    assert event['predicted_duration_seconds'] == selected_ms / 1000
+    assert domain.topology_summary()['duration_prediction_policy'] == (
+        ['lattice', 'tool'] if source == 'lattice' else ['tool'])
+    assert event['duration_prediction_unavailable_models'] == {}
+    assert bool(applied) is (action == 'assign')
+    domain.release_tool_call('exec')
+
+
+@pytest.mark.parametrize('lattice', [None, {}, {'targets': {}},
+    {'targets': {'duration_ms': {'status': 'unavailable'}}}])
+def test_duration_falls_back_to_tool_only_when_lattice_duration_unavailable(lattice):
+    from clawbox.experiments.priority import tool_duration_prediction
+    result = tool_duration_prediction({'models': {
+        'lattice': lattice, 'tool': long_prediction(2500)['call_prediction']}}, source='lattice')
+    assert result['predicted_duration_seconds'] == 2.5
+    assert result['duration_prediction_model'] == 'tool'
+    assert result['duration_prediction_unavailable_models'] == {'lattice': 'unavailable'}
+
+
+def test_duration_does_not_fall_back_to_other_models_or_observed_time():
+    from clawbox.experiments.priority import tool_duration_prediction
+    result = tool_duration_prediction({'models': {'lattice': {}, 'tool': {},
+        'trie': long_prediction(5000)['call_prediction']},
+        'call_prediction': long_prediction(5000)['call_prediction'], 'duration_p50_ms': 5000}, source='lattice')
+    assert result['predicted_duration_seconds'] is None
+    assert result['duration_prediction_model'] is None
+    assert set(result['duration_prediction_unavailable_models']) == {'lattice', 'tool'}
+
+
+@pytest.mark.parametrize('changes', [{'p50': None}, {'p50': True}, {'p50': -1},
+    {'p50': float('nan')}, {'p50': float('inf')}, {'unit': 's'}, {'metric_definition': 'wrong'}])
+def test_invalid_available_lattice_duration_is_not_hidden_by_tool_fallback(changes):
+    from clawbox.experiments.priority import tool_duration_prediction
+    lattice = long_prediction(5000)['call_prediction']
+    lattice['targets']['duration_ms'].update(changes)
+    with pytest.raises(ValueError, match='lattice.*duration_ms'):
+        tool_duration_prediction({'models': {'lattice': lattice,
+            'tool': long_prediction(5000)['call_prediction']}}, source='lattice')
+
+
+def test_default_tool_duration_does_not_fall_back_to_lattice():
+    from clawbox.experiments.priority import tool_duration_prediction
+    result = tool_duration_prediction({'models': {
+        'lattice': long_prediction(5000)['call_prediction'], 'tool': {}}})
+    assert result['predicted_duration_seconds'] is None
+    assert result['duration_prediction_unavailable_models'] == {'tool': 'unavailable'}

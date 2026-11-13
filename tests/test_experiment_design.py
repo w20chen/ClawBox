@@ -215,7 +215,8 @@ def test_small_tool_admission_bypass_is_an_editable_admission_field(configured, 
 
 @pytest.mark.parametrize('mode', ['c2', 'b'])
 @pytest.mark.parametrize('include_smt', [None, True, False])
-def test_llc_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_smt, mode):
+@pytest.mark.parametrize('source', [None, 'tool', 'lattice'])
+def test_llc_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_smt, mode, source):
     raw = base()
     raw['mechanisms']['placement'].update(
         tool_call_cpu_policy=mode, tool_call_cpu_pressure_ratio=.2,
@@ -224,12 +225,15 @@ def test_llc_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_sm
     )
     if include_smt is not None:
         raw['mechanisms']['placement']['tool_call_cpu_include_smt'] = include_smt
+    if source is not None:
+        raw['mechanisms']['placement']['tool_call_cpu_duration_source'] = source
     spec = ExperimentSpec.model_validate(raw)
     arm = expand_matrix(spec)[0]
     assert arm.execution.tool_call_cpu_policy == mode
     assert arm.execution.tool_call_cpu_pressure_ratio == .2
     assert arm.execution.tool_call_cpu_group_max_active == 3
     assert arm.execution.tool_call_cpu_min_duration_seconds == 1.5
+    assert arm.execution.tool_call_cpu_duration_source == (source or 'tool')
     assert arm.execution.tool_call_cpu_include_smt is (True if include_smt is None else include_smt)
     assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
@@ -242,6 +246,13 @@ def test_removed_c2_cooldown_field_is_rejected():
     raw = base()
     raw['mechanisms']['placement']['tool_call_cpu_cooldown_seconds'] = 3
     with pytest.raises(ValueError, match='Extra inputs are not permitted'):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_invalid_b_duration_source_is_rejected():
+    raw = base()
+    raw['mechanisms']['placement']['tool_call_cpu_duration_source'] = 'trie'
+    with pytest.raises(ValueError, match='tool_call_cpu_duration_source'):
         ExperimentSpec.model_validate(raw)
 
 
@@ -1007,6 +1018,7 @@ def test_full_llc_recipes_only_change_llc_axis(tmp_path, recipe):
     for a in arms:
         x = a.execution
         assert x.tool_call_cpu_include_smt is True
+        assert x.tool_call_cpu_duration_source == 'tool'
         assert x.tool_call_cpu_group_max_active == 2
         assert x.tool_call_cpu_pressure_duration_seconds == 2
         assert x.tool_call_cpu_group_order == 'preferred'

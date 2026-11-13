@@ -250,6 +250,12 @@ C2 retains the original baseline's load accounting and selection behavior.
 B corrects guest CPU double counting and requires a CPU-load sample no older
 than twice its polling interval. Admission and VM restore finish before B binds;
 it uses the existing ClawTune prediction, never the replay's actual duration.
+For `duration_ms`, B defaults to ToolKB (`tool_call_cpu_duration_source: tool`).
+Set `--set placement.tool_call_cpu_duration_source=lattice` on the configure
+command to prefer LatticeKB and fall back to ToolKB only when that
+target is missing or unavailable. A valid short LatticeKB prediction is final;
+it is not replaced by a longer ToolKB prediction. Available but invalid values
+are errors. The duration choice is independent of memory admission's fallback.
 Missing predictions, unavailable load or full slots skip binding without queuing
 for an LLC slot. Prediction-service failures still fail the operation. B requires
 a prediction-enabled configuration to initiate binding.
@@ -273,7 +279,11 @@ prerequisites. `tool_call_cpu_group_order=utilization` changes initial cluster
 selection, and `tool_call_cpu_observe_wait=true` enables optional host vCPU
 schedstat diagnostics. Both are off the selected B defaults. Inspect
 `performance.tool_call_cpu_policy` for the actual mode, trigger, sampling cadence,
-slot accounting and placement events. Use the existing qualification, launch,
+slot accounting and placement events. Each duration decision records
+`duration_prediction_model`, backend and unavailable models; the summary records
+`duration_prediction_source` and `duration_prediction_policy` (`[tool]` by default,
+`[lattice, tool]` for the LatticeKB option). The `tool` option does not fall back
+to LatticeKB. Use the existing qualification, launch,
 collection and cleanup commands below for these generated configurations.
 
 ### Predicted memory admission

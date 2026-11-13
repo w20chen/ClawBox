@@ -52,6 +52,7 @@ PLACEMENT_FIELDS = (
     'tool_call_cpu_min_duration_seconds', 'tool_call_cpu_include_smt',
     'tool_call_cpu_max_utilization', 'tool_call_cpu_poll_interval_seconds',
     'tool_call_cpu_group_order', 'tool_call_cpu_observe_wait',
+    'tool_call_cpu_duration_source',
 )
 MEASUREMENT_FIELDS = ('memory_sample_interval_seconds', 'stabilization_seconds')
 

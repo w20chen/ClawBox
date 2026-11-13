@@ -152,24 +152,34 @@ def _cpu_times(path: Path) -> dict[int, tuple[int, int]]:
     return result
 
 
-def tool_duration_prediction(prediction: dict | None) -> dict:
-    """Read canonical pre-call ToolKB duration; never substitute observed time."""
+def tool_duration_prediction(prediction: dict | None, *, source: str = 'tool') -> dict:
+    """Use ToolKB, or prefer LatticeKB with unavailable-target ToolKB fallback."""
+    if source not in {'tool', 'lattice'}:
+        raise ValueError(f'unknown B duration source: {source}')
     prediction = prediction or {}
     models = prediction.get('models') or {}
-    call = models.get('tool') or prediction.get('call_prediction') or {}
-    target = (call.get('targets') or {}).get('duration_ms') or {}
+    names = ['lattice', 'tool'] if source == 'lattice' else ['tool']
+    candidates = ([(name, models.get(name)) for name in names]
+                  if models else [('call_prediction', prediction.get('call_prediction'))])
     result = {'predicted_duration_seconds': None, 'prediction_quantile': .5,
-              'duration_prediction_status': target.get('status', 'unavailable'),
-              'duration_prediction_backend': target.get('backend'),
-              'duration_prediction_samples': target.get('sample_count')}
-    if target.get('status') != 'available':
-        return result
-    value = target.get('p50')
-    if (target.get('unit') != 'ms' or target.get('metric_definition') != 'retained_workload_elapsed'
-            or isinstance(value, bool) or not isinstance(value, (int, float))
-            or not math.isfinite(value) or value < 0):
-        raise ValueError('B requires a valid pre-call duration_ms p50 (ms, retained_workload_elapsed)')
-    result['predicted_duration_seconds'] = value / 1000.
+              'duration_prediction_status': 'unavailable',
+              'duration_prediction_model': None, 'duration_prediction_backend': None,
+              'duration_prediction_samples': None, 'duration_prediction_unavailable_models': {}}
+    for name, call in candidates:
+        target = ((call or {}).get('targets') or {}).get('duration_ms') or {}
+        if target.get('status') != 'available':
+            result['duration_prediction_unavailable_models'][name] = target.get('status', 'unavailable')
+            continue
+        value = target.get('p50')
+        if (target.get('unit') != 'ms' or target.get('metric_definition') != 'retained_workload_elapsed'
+                or isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise ValueError(f'B requires a valid {name} pre-call duration_ms p50 (ms, retained_workload_elapsed)')
+        result.update(predicted_duration_seconds=value / 1000.,
+                      duration_prediction_status='available', duration_prediction_model=name,
+                      duration_prediction_backend=target.get('backend'),
+                      duration_prediction_samples=target.get('sample_count'))
+        break
     return result
 
 
@@ -193,6 +203,7 @@ class PriorityDomain:
                  topology_pressure_duration_seconds: float = 2.0,
                  topology_group_max_active: int = 2,
                  topology_min_duration_seconds: float = 1.0,
+                 topology_duration_source: str = 'tool',
                  topology_max_utilization: float | None = None,
                  topology_poll_interval_seconds: float = .25,
                  topology_include_smt: bool = True,
@@ -240,6 +251,9 @@ class PriorityDomain:
         self.topology_pressure_duration_seconds = topology_pressure_duration_seconds
         self.topology_group_max_active = topology_group_max_active
         self.topology_min_duration_seconds = topology_min_duration_seconds
+        if topology_duration_source not in {'tool', 'lattice'}:
+            raise ValueError(f'unknown B duration source: {topology_duration_source}')
+        self.topology_duration_source = topology_duration_source
         self.topology_max_utilization = topology_max_utilization
         self.topology_poll_interval_seconds = topology_poll_interval_seconds
         self.topology_include_smt = topology_include_smt
@@ -426,7 +440,7 @@ class PriorityDomain:
         if self.topology_mode == 'c2':
             with timed_lock(self._topology_sessions[index], 'cpu.session'):
                 return C2Placement._acquire_tool_call(self, index, execution_id, vcpus=vcpus)
-        duration = tool_duration_prediction(prediction)
+        duration = tool_duration_prediction(prediction, source=self.topology_duration_source)
         with timed_lock(self._topology_sessions[index], 'cpu.session'):
             return self._acquire_tool_call(index, execution_id, vcpus=vcpus, duration=duration)
 
@@ -909,6 +923,9 @@ class PriorityDomain:
             'group_max_active': self.topology_group_max_active,
             'minimum_duration_seconds': self.topology_min_duration_seconds,
             'trigger': 'predicted_p50_before_exec' if self.topology_mode == 'b' else 'disabled',
+            'duration_prediction_source': self.topology_duration_source if self.topology_mode == 'b' else None,
+            'duration_prediction_policy': (['lattice', 'tool'] if self.topology_duration_source == 'lattice'
+                                           else ['tool']) if self.topology_mode == 'b' else None,
             'slot_accounting': 'currently_bound',
             'cpu_accounting': 'guest_excluded_from_total',
             'max_utilization': self.topology_max_utilization,

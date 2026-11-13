@@ -29,6 +29,24 @@ def prediction_payload(session='a'):
         memory_measurement='cgroup_v2_environment_union_v1', command_context={}, raw_params={'command': 'sleep 1'})
 
 
+@pytest.mark.parametrize('source', ['tool', 'lattice'])
+def test_llc_duration_uses_selected_canonical_host_prediction_receipt(tmp_path, clawtune_shell_parser, source):
+    from clawbox.experiments.priority import tool_duration_prediction
+    manager = setup_manager(tmp_path)()
+    manager.reserve('a', 'repo')
+    request = prediction_payload()
+    predicted = manager.predict('a', request)
+    canonical = manager.claim('a', dict(execution_id='exec',
+        prediction_receipt=predicted['prediction_receipt'],
+        command=request['command'], command_sha256=request['command_sha256']))
+    target = canonical['models'][source]['targets']['duration_ms']
+    assert target['status'] == 'available'
+    duration = tool_duration_prediction(canonical, source=source)
+    assert duration['duration_prediction_model'] == source
+    assert duration['duration_prediction_backend'] == target['backend']
+    assert duration['predicted_duration_seconds'] == target['p50'] / 1000
+
+
 def test_durable_learning_lost_ack_and_isolation(tmp_path):
     make = setup_manager(tmp_path)
     manager = make()
