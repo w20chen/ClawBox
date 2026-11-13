@@ -345,15 +345,26 @@ class ExecutionSpec(StrictFrozenModel):
     resume_policy: Literal["home", "load-aware", "cost-aware"] = "home"
     migration_threshold_seconds: float = Field(default=0.25, ge=0, allow_inf_nan=False)
     # C0 is the pre-extension behavior: full selected-NUMA CPU masks and Linux
-    # scheduling. C2 changes Tool vCPU affinity only for active agent-tool execs.
-    tool_call_cpu_policy: Literal["c0", "c2"] = "c0"
+    # scheduling. C2 is the elapsed-time baseline; B uses pre-call predictions.
+    @property
+    def llc_poll_interval_seconds(self) -> float:
+        # C2's frozen sampler follows memory cadence; B has its own cadence.
+        return (self.memory_sample_interval_seconds if self.tool_call_cpu_policy == 'c2'
+                else self.tool_call_cpu_poll_interval_seconds)
+
+    tool_call_cpu_policy: Literal["c0", "c2", "b"] = "c0"
     cpu_qos_policy: Literal["off", "idle", "idle_core"] = "off"
     cpu_qos_group_idle: bool = False
     tool_call_cpu_pressure_ratio: float = Field(default=0.10, gt=0, le=1, allow_inf_nan=False)
     tool_call_cpu_pressure_samples: int = Field(default=2, ge=1)
+    tool_call_cpu_pressure_duration_seconds: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     tool_call_cpu_group_max_active: int = Field(default=2, ge=1)
     tool_call_cpu_min_duration_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    tool_call_cpu_max_utilization: float | None = Field(default=None, gt=0, le=1, allow_inf_nan=False)
+    tool_call_cpu_poll_interval_seconds: float = Field(default=0.25, gt=0, allow_inf_nan=False)
     tool_call_cpu_include_smt: bool = True
+    tool_call_cpu_group_order: Literal["preferred", "utilization"] = "preferred"
+    tool_call_cpu_observe_wait: bool = False
     session_compute_nodes: tuple[str, ...] = ()
     session_cpu_slots: tuple[SessionCpuSlot, ...] = ()
     concurrency_levels: tuple[int, ...] = (1,)
@@ -886,14 +897,14 @@ class ExperimentSpec(StrictFrozenModel):
         if (any(p.runtime_control.adaptive for p in self.policies)
                 and not self.resources.local_memory_cgroup):
             raise ValueError('pressure control requires resources.local_memory_cgroup and verified preallocation VM routing')
-        if self.execution.tool_call_cpu_policy == 'c2':
+        if self.execution.tool_call_cpu_policy != 'c0':
             if not self.resources.compute_nodes or not self.resources.local_memory_cgroup:
                 raise ValueError(
-                    'C2 Tool-call CPU placement requires compute_nodes and '
+                    'LLC Tool-call CPU placement requires compute_nodes and '
                     'resources.local_memory_cgroup'
                 )
             if self.execution.placement_policy == 'os_default':
-                raise ValueError('C2 Tool-call CPU placement requires managed NUMA placement')
+                raise ValueError('LLC Tool-call CPU placement requires managed NUMA placement')
         if self.resources.lifecycle_admission == "os-managed" and any(
             policy.reclamation is not ReclamationPolicy.RESIDENT for policy in self.policies
         ):

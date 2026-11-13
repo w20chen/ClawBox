@@ -199,30 +199,82 @@ families cover admission, runtime control, memory reclaim, placement, idle
 reclaim, shared memory, coordination, checkpointing, integrated policies, and
 resident capacity. `custom` keeps an editable design.
 
-Each arm's `comparison.arms[].override` takes precedence over common mechanism
-values. For example:
+### Full and LLC placement ablation
 
-```yaml
-comparison:
-  recipe: custom
-  arms:
-    - name: full-pool
-      override: {placement.tool_call_cpu_policy: c0}
-    - name: one-cache-cluster
-      override: {placement.tool_call_cpu_policy: c2, placement.tool_call_cpu_include_smt: true}
+Generate a new Full configuration from your verified Full reference with
+`--recipe full`. This selects **B** for LLC placement and reuses the reference's
+other mechanisms, resource budgets, templates, workload, arrivals and replayed
+LLM times. It does not turn a neutral smoke configuration into a Full experiment.
+An explicit host profile is applied before the recipe. Use the same profile
+for every configuration command so the CLI does not select templates from a
+different default profile. On kunpeng, use the saved creation-standard reference
+and profile:
+
+```bash
+mkdir -p "$HOME/clawbox-specs"
+bash scripts/clawbox experiment configure \
+  "$HOME/.config/clawbox/standards/creation-145-20261108/experiment.reference.yaml" \
+  "$HOME/clawbox-specs/full-b.yaml" \
+  --profile "$HOME/.config/clawbox/standards/creation-145-20261108/host.profile.json" \
+  --recipe full --experiment-id full-b
+bash scripts/clawbox experiment describe "$HOME/clawbox-specs/full-b.yaml"
 ```
 
-When selecting `c2`, `placement.tool_call_cpu_include_smt` defaults to `true`:
-the selected LLC cluster mask includes all allowed SMT siblings. Set it to
-`false` explicitly for the one-logical-CPU-per-physical-core ablation. This
-changes affinity, not exclusive ownership of cores. Use a new run ID and
-qualification after changing it; unchanged CPU pools need no host apply,
-image rebuild, or retraining. Existing configurations that explicitly set
-`false` keep that value.
+Use `--recipe llc` instead of `--recipe full` to generate three arms, `c0`, `c2`
+and `b`, differing only in `placement.tool_call_cpu_policy`. Both recipes reset
+LLC tuning to SMT enabled, two slots per cluster, a one-second duration
+threshold, preferred-cluster ordering, no utilization veto and no wait diagnostics.
+B uses 0.25-second polling and two-second pressure confirmation. Explicit
+`--set` values override these defaults. The generic neutral configuration still
+uses `c0`; loading an existing YAML never silently changes its saved settings.
 
-Use `configure --set GROUP.FIELD=VALUE` to edit common mechanisms, or edit the
-YAML directly. Environment, workload, and evidence stay common across arms.
-Run `describe` and `plan` to inspect the resolved comparison.
+For one Full arm with a different LLC strategy, append
+`--set placement.tool_call_cpu_policy=c0` or `=c2` to the configure command.
+To generate the complete comparison:
+
+```bash
+bash scripts/clawbox experiment configure \
+  "$HOME/clawbox-specs/full-b.yaml" "$HOME/clawbox-specs/full-llc.yaml" \
+  --profile "$HOME/.config/clawbox/standards/creation-145-20261108/host.profile.json" \
+  --recipe llc --experiment-id full-llc
+bash scripts/clawbox experiment describe "$HOME/clawbox-specs/full-llc.yaml"
+```
+
+| Strategy | Binding trigger | Pressure expansion | Slot release |
+| --- | --- | --- | --- |
+| `c0` | No LLC narrowing; full selected-NUMA mask | None | No binding slots |
+| `c2` | Still active after one second; checked on the memory sampling cadence (one second in the Full reference) | Two consecutive PSI samples at or above 0.10 | Last active call finishes, including after expansion |
+| `b` (Full default) | Predicted Tool duration p50 strictly above one second, before execution | PSI at or above 0.10 for at least two seconds and two samples | Immediately on expansion, or when the last eligible call finishes |
+
+C2 retains the original baseline's load accounting and selection behavior.
+B corrects guest CPU double counting and requires a CPU-load sample no older
+than twice its polling interval. Admission and VM restore finish before B binds;
+it uses the existing ClawTune prediction, never the replay's actual duration.
+Missing predictions, unavailable load or full slots skip binding without queuing
+for an LLC slot. Prediction-service failures still fail the operation. B requires
+a prediction-enabled configuration to initiate binding.
+
+Two slots means two currently bound Tool VMs per cluster in B, not two executing
+calls or exclusive core ownership. Expanded VMs continue running on the full
+NUMA pool and contribute to measured CPU load. Concurrent calls share VM affinity;
+a short call can inherit an existing binding. C2 and B both default to SMT `true`;
+`tool_call_cpu_include_smt: false` remains an explicit ablation.
+
+Each arm's `comparison.arms[].override` takes precedence over common settings.
+Inspect the generated YAML and `describe` output before qualification. Changes
+require a new run ID and qualification, with no host apply, image rebuild or
+retraining when the allowed CPU pools and templates stay unchanged. Keep frozen
+experiments intact. New replays of earlier B trials must explicitly select `b`;
+the label `c2` now identifies the original elapsed-time baseline.
+
+B tuning remains editable through `configure --set GROUP.FIELD=VALUE` or YAML;
+see the [option reference](reference.md#tool-call-cpu-placement) for units and
+prerequisites. `tool_call_cpu_group_order=utilization` changes initial cluster
+selection, and `tool_call_cpu_observe_wait=true` enables optional host vCPU
+schedstat diagnostics. Both are off the selected B defaults. Inspect
+`performance.tool_call_cpu_policy` for the actual mode, trigger, sampling cadence,
+slot accounting and placement events. Use the existing qualification, launch,
+collection and cleanup commands below for these generated configurations.
 
 ### Predicted memory admission
 

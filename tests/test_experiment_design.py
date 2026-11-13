@@ -213,11 +213,12 @@ def test_small_tool_admission_bypass_is_an_editable_admission_field(configured, 
     assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
 
+@pytest.mark.parametrize('mode', ['c2', 'b'])
 @pytest.mark.parametrize('include_smt', [None, True, False])
-def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_smt):
+def test_llc_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_smt, mode):
     raw = base()
     raw['mechanisms']['placement'].update(
-        tool_call_cpu_policy='c2', tool_call_cpu_pressure_ratio=.2,
+        tool_call_cpu_policy=mode, tool_call_cpu_pressure_ratio=.2,
         tool_call_cpu_pressure_samples=3, tool_call_cpu_group_max_active=3,
         tool_call_cpu_min_duration_seconds=1.5,
     )
@@ -225,7 +226,7 @@ def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_smt
         raw['mechanisms']['placement']['tool_call_cpu_include_smt'] = include_smt
     spec = ExperimentSpec.model_validate(raw)
     arm = expand_matrix(spec)[0]
-    assert arm.execution.tool_call_cpu_policy == 'c2'
+    assert arm.execution.tool_call_cpu_policy == mode
     assert arm.execution.tool_call_cpu_pressure_ratio == .2
     assert arm.execution.tool_call_cpu_group_max_active == 3
     assert arm.execution.tool_call_cpu_min_duration_seconds == 1.5
@@ -233,7 +234,7 @@ def test_c2_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_smt
     assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
     raw['mechanisms']['placement']['policy'] = 'os_default'
-    with pytest.raises(ValueError, match='C2 Tool-call CPU placement'):
+    with pytest.raises(ValueError, match='LLC Tool-call CPU placement'):
         ExperimentSpec.model_validate(raw)
 
 
@@ -946,7 +947,7 @@ def test_all_recipes_replace_inherited_cpu_slot_multiplier():
         for axis in (('encoding', 'storage', 'residency') if recipe == 'checkpoint' else (None,)):
             for arm in recipe_arms(recipe, checkpoint_axis=axis):
                 resolved = override_mechanisms(common, arm['override'])
-                assert resolved['placement']['placement_cpu_overcommit'] == 1024
+                assert resolved['placement']['placement_cpu_overcommit'] == (1 if recipe in {'full', 'llc'} else 1024)
 
 
 def test_role_specific_default_memory_roundtrips_and_charges_three_gib():
@@ -986,3 +987,51 @@ def test_pure_ledger_host_check_uses_common_physical_profile(monkeypatch):
     assert profiles[0]['shared_memory_borrow_limit_mib'] == raw['environment']['resources']['shared_memory_borrow_limit_mib']
     node = spec.resources.compute_nodes[0]
     assert qualification._node_spec(spec, node).resources.pool_memory_budget_mib == node.memory_capacity_mib
+
+
+@pytest.mark.parametrize('recipe', ['full', 'llc'])
+def test_full_llc_recipes_only_change_llc_axis(tmp_path, recipe):
+    raw = base()
+    raw['mechanisms']['placement'].update(
+        placement_cpu_overcommit=7, tool_call_cpu_policy='c2',
+        tool_call_cpu_include_smt=False, tool_call_cpu_group_max_active=4,
+        tool_call_cpu_pressure_duration_seconds=4, tool_call_cpu_group_order='utilization',
+        tool_call_cpu_observe_wait=True, tool_call_cpu_max_utilization=.9)
+    raw['measurement'] = dict(memory_sample_interval_seconds=1)
+    source = tmp_path/'reference.yaml'
+    source.write_text(yaml.safe_dump(raw), encoding='utf-8')
+    spec = configure_experiment(source, recipe=recipe)
+    arms = [effective_spec(spec, p) for p in spec.policies]
+    assert [a.execution.tool_call_cpu_policy for a in arms] == (
+        ['b'] if recipe == 'full' else ['c0', 'c2', 'b'])
+    for a in arms:
+        x = a.execution
+        assert x.tool_call_cpu_include_smt is True
+        assert x.tool_call_cpu_group_max_active == 2
+        assert x.tool_call_cpu_pressure_duration_seconds == 2
+        assert x.tool_call_cpu_group_order == 'preferred'
+        assert x.tool_call_cpu_observe_wait is False
+        assert x.tool_call_cpu_max_utilization is None
+        assert x.llc_poll_interval_seconds == (1 if x.tool_call_cpu_policy == 'c2' else .25)
+        assert x.placement_cpu_overcommit == 7
+        assert a.workload == spec.workload
+        assert a.inference == spec.inference
+    for p in spec.policies:
+        for group, fields in raw['mechanisms'].items():
+            for key, value in fields.items():
+                if not key.startswith('tool_call_cpu_'):
+                    assert p.mechanisms[group][key] == value
+    assert all(a.resources == arms[0].resources for a in arms)
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    # Loading the original is not a migration or a change to frozen inputs.
+    original = ExperimentSpec.model_validate(yaml.safe_load(source.read_text(encoding='utf-8')))
+    assert effective_spec(original, original.policies[0]).execution.tool_call_cpu_include_smt is False
+
+
+def test_full_explicit_llc_choice_overrides_default(tmp_path):
+    source = tmp_path/'base.yaml'
+    source.write_text(yaml.safe_dump(base()), encoding='utf-8')
+    for mode in ('c0', 'c2', 'b'):
+        spec = configure_experiment(source, recipe='full', mechanism_settings=[
+            f'placement.tool_call_cpu_policy={mode}'])
+        assert effective_spec(spec, spec.policies[0]).execution.tool_call_cpu_policy == mode

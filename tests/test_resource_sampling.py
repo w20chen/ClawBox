@@ -204,23 +204,26 @@ def test_periodic_queue_snapshot_marks_busy_domains_without_waiting():
 
 
 @pytest.mark.parametrize('count', [1280, 2560])
-def test_c2_tick_uses_one_cpu_read_for_all_pending_vms(count, tmp_path, monkeypatch):
+def test_b_admissions_share_one_cpu_sample(count, tmp_path, monkeypatch):
     reads = []
     def cpu_times(path):
         reads.append(True)
         return {cpu: (10 * len(reads), 20 * len(reads)) for cpu in range(16)}
     monkeypatch.setattr('clawbox.experiments.priority._cpu_times', cpu_times)
     domain = PriorityDomain(tmp_path, concurrency=count, repetition=0, legacy=False,
-        topology_mode='c2', topology_min_duration_seconds=.001,
-        topology_group_max_active=1, placements={i: ('0-15', 0) for i in range(count)})
-    groups = ('0,2,4,6', '8,10,12,14')
-    domain._groups_by_pool['0-15', 2, False] = groups
+        topology_mode='b', topology_group_max_active=1,
+        placements={i: ('0-15', 0) for i in range(count)})
+    groups = ('0-7', '8-15')
+    domain._groups_by_pool['0-15', 2, True] = groups
+    domain._candidate_groups.update(groups)
     domain._group_load = {g: 1 for g in groups}
-    for i in range(count):
-        domain.acquire_tool_call(i, str(i), vcpus=2)
-        domain._pending_started[i, 'tool'] = 0
+    prediction = {'call_prediction': {'targets': {'duration_ms': {'status': 'available',
+        'unit': 'ms', 'metric_definition': 'retained_workload_elapsed', 'p50': 5000}}}}
+    domain.sample_topology_placement()
     reads.clear()
-    changes = domain.sample_topology_placement()
+    for i in range(count):
+        event = domain.acquire_tool_call(i, str(i), vcpus=2, prediction=prediction)
+        assert event['reason'] == 'group_capacity'
+    assert not reads
+    assert domain.sample_topology_placement() == []
     assert len(reads) == 1
-    assert len(changes) == count
-    assert all(e['action'] == 'bypass_full_numa' for e in changes)

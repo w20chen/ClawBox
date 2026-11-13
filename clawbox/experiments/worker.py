@@ -64,7 +64,7 @@ from .congestion import locate_cgroup
 from .control_timing import monitor_gc, span, timed_lock, trace_callback, trace_scope, operation, timing_details, worker_cyclic_gc
 from .pressure import PressureControl
 from .prediction_records import PredictionRecordBuffer
-from .priority import PriorityDomain, c2_applies
+from .priority import PriorityDomain, tool_call_cpu_applies
 from .spec_types import RuntimeControl
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
 from .topology import place_session
@@ -2756,9 +2756,14 @@ class ExperimentWorker:
                 topology_mode=arm.execution.tool_call_cpu_policy,
                 topology_pressure_ratio=arm.execution.tool_call_cpu_pressure_ratio,
                 topology_pressure_samples=arm.execution.tool_call_cpu_pressure_samples,
+                topology_pressure_duration_seconds=arm.execution.tool_call_cpu_pressure_duration_seconds,
                 topology_group_max_active=arm.execution.tool_call_cpu_group_max_active,
                 topology_min_duration_seconds=arm.execution.tool_call_cpu_min_duration_seconds,
+                topology_max_utilization=arm.execution.tool_call_cpu_max_utilization,
+                topology_poll_interval_seconds=arm.execution.llc_poll_interval_seconds,
                 topology_include_smt=arm.execution.tool_call_cpu_include_smt,
+                topology_group_order=arm.execution.tool_call_cpu_group_order,
+                topology_observe_wait=arm.execution.tool_call_cpu_observe_wait,
                 emit=events.write,
                 placements={i: (session_domain(i).cpus,
                                 session_domain(i).arm.resources.local_numa_node)
@@ -2789,9 +2794,9 @@ class ExperimentWorker:
                 raise
         topology_sampler = (
             PeriodicCallback(self._priority_domain.sample_topology_placement,
-                             interval_s=arm.execution.memory_sample_interval_seconds,
+                             interval_s=arm.execution.llc_poll_interval_seconds,
                              name='tool-cpu-placement-sampler')
-            if self._priority_domain is not None and arm.execution.tool_call_cpu_policy == 'c2'
+            if self._priority_domain is not None and arm.execution.tool_call_cpu_policy != 'c0'
             else None
         )
         if memory_sample_reporter is not None:
@@ -3134,7 +3139,7 @@ class ExperimentWorker:
             )
             if active_tool_call_ids:
                 cleanup_error = cleanup_error or RuntimeError(
-                    'C2 Tool-call CPU assignments remained after session finalization: '
+                    'LLC Tool-call CPU assignments remained after session finalization: '
                     f'{list(active_tool_call_ids)}'
                 )
             if cleanup_error is None:
@@ -4813,10 +4818,11 @@ class ExperimentWorker:
                                 boundary_study.before(request)
                             memory_baseline_timing = coordinator.bind_tool_memory(session_id)
                             control_marks["memory_baseline"] = time.monotonic()
-                            if (arm.execution.tool_call_cpu_policy == 'c2'
-                                    and c2_applies(execution_scope, request.get('operation'))):
+                            if (arm.execution.tool_call_cpu_policy != 'c0'
+                                    and tool_call_cpu_applies(execution_scope, request.get('operation'))):
                                 placement_event = priority_domain.acquire_tool_call(
                                     index, execution_id, vcpus=tool_sandbox.vcpu,
+                                    prediction=prediction,
                                 )
                                 cpu_placement_acquired = bool(
                                     placement_event

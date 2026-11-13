@@ -19,7 +19,7 @@ from .spec import (StrictFrozenModel, ResourcesSpec, ExecutionSpec, SandboxSpec,
 DIMENSIONS = ('admission', 'runtime', 'placement', 'idle_reclaim', 'shared_memory', 'checkpoint')
 GROUPS = DIMENSIONS + ('deployment', 'coordination')
 RECIPES = ('admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim', 'shared-memory', 'coordination',
-           'checkpoint', 'integrated', 'resident-capacity', 'custom')
+           'checkpoint', 'integrated', 'resident-capacity', 'full', 'llc', 'custom')
 
 # Every existing parameter has one public owner. Physical limits stay in the
 # environment; decision parameters can vary by arm. No arbitrary resource patch
@@ -48,7 +48,10 @@ PLACEMENT_FIELDS = (
     'placement_cpu_overcommit', 'template_balance_slack', 'session_compute_nodes', 'session_cpu_slots',
     'tool_call_cpu_policy', 'cpu_qos_policy', 'cpu_qos_group_idle', 'tool_call_cpu_pressure_ratio',
     'tool_call_cpu_pressure_samples', 'tool_call_cpu_group_max_active',
+    'tool_call_cpu_pressure_duration_seconds',
     'tool_call_cpu_min_duration_seconds', 'tool_call_cpu_include_smt',
+    'tool_call_cpu_max_utilization', 'tool_call_cpu_poll_interval_seconds',
+    'tool_call_cpu_group_order', 'tool_call_cpu_observe_wait',
 )
 MEASUREMENT_FIELDS = ('memory_sample_interval_seconds', 'stabilization_seconds')
 
@@ -131,7 +134,7 @@ class DesignArm(StrictFrozenModel):
 
 
 class Comparison(StrictFrozenModel):
-    recipe: Literal['admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim', 'shared-memory', 'coordination', 'checkpoint', 'integrated', 'resident-capacity', 'custom'] = 'custom'
+    recipe: Literal['admission', 'runtime', 'memory-reclaim', 'placement', 'idle-reclaim', 'shared-memory', 'coordination', 'checkpoint', 'integrated', 'resident-capacity', 'full', 'llc', 'custom'] = 'custom'
     arms: tuple[DesignArm, ...] = Field(min_length=1)
 
 
@@ -190,14 +193,14 @@ def lower_arm(design, name, m):
         raise ValueError(
             f'{name}: CPU QoS requires managed placement and the verified local_memory_cgroup path'
         )
-    if pl['tool_call_cpu_policy'] == 'c2':
+    if pl['tool_call_cpu_policy'] != 'c0':
         if not r['compute_nodes'] or not r['local_memory_cgroup']:
             raise ValueError(
-                f'{name}: C2 Tool-call CPU placement requires compute_nodes and '
+                f'{name}: LLC Tool-call CPU placement requires compute_nodes and '
                 'the verified local_memory_cgroup path'
             )
         if pl['policy'] == 'os_default':
-            raise ValueError(f'{name}: C2 Tool-call CPU placement requires managed NUMA placement')
+            raise ValueError(f'{name}: LLC Tool-call CPU placement requires managed NUMA placement')
     if os_deployment and (pl['policy'] != 'os_default' or a['tool'] != 'off'
             or snapshots or shared['borrow'] != 'off' or pl['template_affinity']
             or rt['memory_protection'] or rt['cpu_release_boost'] or rt['proactive_memory_reclaim']):
@@ -340,6 +343,12 @@ def recipe_arms(recipe, *, checkpoint_axis=None):
         fields.setdefault('placement__placement_cpu_overcommit',
                           ExecutionSpec.model_fields['placement_cpu_overcommit'].default)
         return dict(name=name, override={key.replace('__', '.'): value for key, value in fields.items()})
+    if recipe == 'full':
+        # Full's other mechanisms come from the caller's qualified reference.
+        return [dict(name='full', override={})]
+    if recipe == 'llc':
+        return [dict(name=mode, override={'placement.tool_call_cpu_policy': mode})
+                for mode in ('c0', 'c2', 'b')]
     if recipe == 'resident-capacity':
         neutral = dict(admission__tool='off', admission__startup_headroom_mib=0,
                        runtime__memory_protection=False, runtime__cpu_release_boost=False,
@@ -401,8 +410,8 @@ def recipe_arms(recipe, *, checkpoint_axis=None):
 
 def fixed_recipe_arms(recipe, *, common, checkpoint_axis=None):
     """Materialize controlled studies; retain common tuning, reset policy switches."""
-    if recipe in {'custom', 'integrated'}:
-        raise ValueError('--fixed-methods requires a single-family recipe; custom/integrated inherit user choices')
+    if recipe in {'custom', 'integrated', 'full', 'llc'}:
+        raise ValueError('--fixed-methods requires a single-family recipe; custom/integrated/full/llc inherit the reference mechanisms')
     switches = {
         'deployment.mode': 'managed', 'deployment.resident_capacity_accounting': False,
         'deployment.lifecycle_reservation_scale': 1.0, 'coordination.action_selection': 'reclaim_first',
@@ -654,6 +663,13 @@ def configure_design(raw, options):
         if not repo:
             raise ValueError('fixed auto allowance requires one repository')
         m['admission']['static_tool_memory_mib'] = calibrated_static_tool_memory(Path(evidence['prediction_artifact']), repo)
+    if recipe in {'full', 'llc'}:
+        # Reset only this axis when generating NEW arms, never while loading
+        # frozen configurations. Explicit --set values still take precedence.
+        for field in PLACEMENT_FIELDS:
+            if field.startswith('tool_call_cpu_'):
+                m['placement'][field] = deepcopy(ExecutionSpec.model_fields[field].default)
+        m['placement']['tool_call_cpu_policy'] = 'b'
     raw['mechanisms'] = override_mechanisms(m, changes)
     if options.get('fixed_methods') and not recipe:
         raise ValueError('--fixed-methods requires --recipe')
