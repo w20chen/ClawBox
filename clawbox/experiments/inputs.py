@@ -11,6 +11,7 @@ from .spec import ExperimentSpec, load_workload_cases, resolve_case_sandbox
 from .spec_types import AdmissionPolicy, AgentDriver, InferenceBackend
 from .prediction import prediction_input_paths, prediction_provider_type
 from clawbox.replay.trace import load_trace
+from .serving_sim_inputs import serving_sim_input_identity, serving_sim_case_binding
 
 
 def inspect_trace(path: Path) -> dict:
@@ -135,6 +136,7 @@ def validate_launch_inputs(spec: ExperimentSpec) -> dict:
 
         results = [validate_launch_inputs(effective_spec(spec, p)) for p in spec.policies]
         return {
+            **serving_sim_input_identity(spec),
             "traces": results[0]["traces"],
             "prediction_files": sorted({
                 path for result in results for path in result["prediction_files"]
@@ -145,12 +147,12 @@ def validate_launch_inputs(spec: ExperimentSpec) -> dict:
         return branching
     limit = spec.inference.configuration.get("max_model_steps")
     if limit is not None and (
-        spec.inference.backend is not InferenceBackend.REPLAY
+        spec.inference.backend not in {InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}
         or type(limit) is not int
         or limit < 1
     ):
         raise ValueError(
-            "inference.configuration.max_model_steps requires replay and a positive integer"
+            "inference.configuration.max_model_steps requires replay or serving_sim and a positive integer"
         )
     cases = load_workload_cases(spec.workload)
     if not cases:
@@ -173,13 +175,17 @@ def validate_launch_inputs(spec: ExperimentSpec) -> dict:
     for case in cases:
         if spec.agent.driver is AgentDriver.OPENCLAW and not case.prompt.strip():
             raise ValueError(f"{case.case_id}: OpenClaw requires a nonempty task prompt")
-        if spec.inference.backend is not InferenceBackend.REPLAY:
+        if spec.inference.backend not in {InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}:
             continue
-        path = Path(case.replay_trace_reference or case.source_reference)
-        info = _saved_trace_info(case, path) or inspect_trace(path)
+        if spec.inference.backend is InferenceBackend.SERVING_SIM:
+            info = serving_sim_case_binding(spec.inference.configuration, case.case_id)['input_validation']
+        else:
+            path = Path(case.replay_trace_reference or case.source_reference)
+            info = _saved_trace_info(case, path) or inspect_trace(path)
         if spec.agent.driver is AgentDriver.OPENCLAW:
             _validate_openclaw_trace_summary(spec, case, info, limit)
-        traces.append({"case_id": case.case_id, **info})
+        if spec.inference.backend is InferenceBackend.REPLAY:
+            traces.append({"case_id": case.case_id, **info})
 
     files = []
     admissions = {policy.admission for policy in spec.policies}
@@ -204,24 +210,24 @@ def validate_launch_inputs(spec: ExperimentSpec) -> dict:
         files.extend(str(value) for value in prediction_input_paths(
             path, spec.resources.prediction_mode,
         ))
-    return {"traces": traces, "prediction_files": files}
+    return {**serving_sim_input_identity(spec), "traces": traces, "prediction_files": files}
 
 
 def validate_inputs(spec: ExperimentSpec) -> dict:
     if spec.schema_version == 4:
         from .spec import effective_spec
         results = [validate_inputs(effective_spec(spec, p)) for p in spec.policies]
-        return {'traces': results[0]['traces'],
+        return {**serving_sim_input_identity(spec), 'traces': results[0]['traces'],
                 'prediction_files': sorted({path for result in results for path in result['prediction_files']})}
     branching = _validate_snapshot_branching_input(spec)
     if branching is not None:
         return branching
     limit = spec.inference.configuration.get("max_model_steps")
     if limit is not None and (
-        spec.inference.backend is not InferenceBackend.REPLAY
+        spec.inference.backend not in {InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}
         or type(limit) is not int or limit < 1
     ):
-        raise ValueError("inference.configuration.max_model_steps requires replay and a positive integer")
+        raise ValueError("inference.configuration.max_model_steps requires replay or serving_sim and a positive integer")
     traces = []
     cases = load_workload_cases(spec.workload)
     if not cases:
@@ -243,12 +249,16 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
     for case in cases:
         if spec.agent.driver is AgentDriver.OPENCLAW and not case.prompt.strip():
             raise ValueError(f"{case.case_id}: OpenClaw requires a nonempty task prompt")
-        if spec.inference.backend is InferenceBackend.REPLAY:
-            path = Path(case.replay_trace_reference or case.source_reference)
-            info = inspect_trace(path)
+        if spec.inference.backend in {InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}:
+            if spec.inference.backend is InferenceBackend.SERVING_SIM:
+                info = serving_sim_case_binding(spec.inference.configuration, case.case_id)['input_validation']
+            else:
+                path = Path(case.replay_trace_reference or case.source_reference)
+                info = inspect_trace(path)
             if spec.agent.driver is AgentDriver.OPENCLAW:
                 _validate_openclaw_trace_summary(spec, case, info, limit)
-            traces.append({"case_id": case.case_id, **info})
+            if spec.inference.backend is InferenceBackend.REPLAY:
+                traces.append({"case_id": case.case_id, **info})
     files = []
     admissions = {policy.admission for policy in spec.policies}
     if spec.resources.prediction_artifact and (AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions or spec.resources.prediction_mode == 'host-live'):
@@ -275,4 +285,4 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
         files.extend(str(value) for value in prediction_input_paths(
             path, spec.resources.prediction_mode,
         ))
-    return {"traces": traces, "prediction_files": files}
+    return {**serving_sim_input_identity(spec), "traces": traces, "prediction_files": files}

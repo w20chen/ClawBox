@@ -177,6 +177,7 @@ def configure_experiment(
     time_scale: float | None = None,
     openclaw_exec_yield_ms: int | None = None,
     inference_backend: str | None = None,
+    serving_sim_catalog_manifest: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
     api_key_env: str | None = None,

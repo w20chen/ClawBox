@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .control_timing import timed_lock, operation, span
 
+import math
 import time
 from collections import Counter, deque
 from collections.abc import Callable
@@ -40,6 +41,11 @@ class SessionState:
     wait_started_monotonic_s: float | None = None
     response_ready: bool = False
     migration_in_progress: bool = False
+    gpu_phase: str | None = None
+    gpu_prefill_estimate_s: float | None = None
+    gpu_prefill_observed_monotonic_s: float | None = None
+    gpu_prewarm_requested: bool = False
+    gpu_signal_sequences: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +276,102 @@ class PolicyCoordinator:
             state.response_ready = False
             state.eviction_eligible = True
             state.last_used = now
+            state.gpu_phase = None
+            state.gpu_prefill_estimate_s = None
+            state.gpu_prefill_observed_monotonic_s = None
+            state.gpu_prewarm_requested = False
+            state.gpu_signal_sequences.clear()
             self._condition.notify_all()
+
+    def observe_gpu_signal(self, session_id: str, wait_id: str, event: dict) -> dict:
+        """Use online prefill observations; never infer remaining decode length.
+
+        The caller consumes the signal stream independently of Runtime residency.
+        ``signal_age_seconds`` may include transport lag measured by that caller;
+        queued_since additionally accounts for the simulator's delayed queue event.
+        These estimates are heuristic scheduling inputs, not completion deadlines.
+        """
+        result = {"accepted": False, "should_prewarm": False}
+        if self.policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE:
+            return {**result, "reason": "gpu_policy_disabled"}
+        with self.demand.progress_lock:
+            state = self._sessions.get(session_id)
+            if state is None or state.wait_id != wait_id or state.response_ready:
+                return {**result, "reason": "request_not_waiting"}
+            if (event.get("session_id", session_id) != session_id
+                    or event.get("request_id", wait_id) != wait_id):
+                return {**result, "reason": "request_identity_mismatch"}
+            phase, role = event.get("event"), event.get("role")
+            if role not in {"A", "P", "D"}:
+                return {**result, "reason": "unknown_engine_role"}
+            # The transport supplies the feed sequence when available. A replayed
+            # event must not renew an old estimate or repeat a prewarm action.
+            engine = str(event.get("engine_id", role))
+            sequence = event.get("signal_sequence")
+            if sequence is not None:
+                if type(sequence) is not int or sequence < 0:
+                    raise ValueError("GPU signal_sequence must be a nonnegative integer")
+                if sequence <= state.gpu_signal_sequences.get(engine, -1):
+                    return {**result, "reason": "duplicate_or_stale_signal"}
+                state.gpu_signal_sequences[engine] = sequence
+            now = time.monotonic()
+            state.gpu_phase = str(phase)
+            if phase == "queued":
+                estimate = event.get("est_wait_s")
+                if (isinstance(estimate, bool) or not isinstance(estimate, (int, float))
+                        or not math.isfinite(estimate) or estimate < 0
+                        or role == "D" or event.get("layer") == "kv_transfer"):
+                    state.gpu_prefill_estimate_s = None
+                    state.gpu_prefill_observed_monotonic_s = None
+                else:
+                    age = event.get("signal_age_seconds", 0.0)
+                    if (isinstance(age, bool) or not isinstance(age, (int, float))
+                            or not math.isfinite(age) or age < 0):
+                        raise ValueError("GPU signal_age_seconds must be finite and nonnegative")
+                    published, queued = event.get("t"), event.get("queued_since")
+                    if (type(published) in (int, float) and type(queued) in (int, float)
+                            and math.isfinite(published) and math.isfinite(queued)):
+                        age += max(0.0, published - queued)
+                    state.gpu_prefill_estimate_s = float(estimate)
+                    state.gpu_prefill_observed_monotonic_s = now - age
+            elif phase in {"first_token", "think_start", "think_end", "finish"}:
+                state.gpu_prefill_estimate_s = None
+                state.gpu_prefill_observed_monotonic_s = None
+            if phase == "think_end" and role in {"A", "D"}:
+                result["should_prewarm"] = not state.gpu_prewarm_requested
+                state.gpu_prewarm_requested = True
+                state.eviction_eligible = False
+            # P-leg finish only completes prefill, not the logical model request.
+            if phase == "finish" and role in {"A", "D"}:
+                state.eviction_eligible = False
+            self._condition.notify_all()
+            return {**result, "accepted": True, "phase": phase,
+                    "estimated_prefill_remaining_seconds": self._gpu_prefill_remaining(state, now),
+                    "prewarm_requested": state.gpu_prewarm_requested}
+
+    def wait_for_gpu_prewarm(self, session_id: str, wait_id: str) -> bool:
+        """Wait for a claimed checkpoint before VM-pair prewarm, outside wait_lock.
+
+        Completion/new requests/session cleanup invalidate this work. No lifecycle
+        operation is performed here; the worker retains normal restore admission.
+        """
+        with self.demand.progress_lock:
+            while True:
+                state = self._sessions.get(session_id)
+                if (state is None or state.wait_id != wait_id or state.response_ready
+                        or not state.gpu_prewarm_requested or state.tool_active):
+                    return False
+                if not state.eviction_in_progress and not state.migration_in_progress:
+                    return True
+                self._condition.wait()
+
+    def _gpu_prefill_remaining(self, state: SessionState, now: float) -> float | None:
+        if state.gpu_prefill_estimate_s is None or state.gpu_prefill_observed_monotonic_s is None:
+            return None
+        age = max(0.0, now - state.gpu_prefill_observed_monotonic_s)
+        if age > self.policy.gpu_signal_max_age_seconds:
+            return None
+        return max(0.0, state.gpu_prefill_estimate_s - age)
 
     def complete_model_wait(self, session_id: str, wait_id: str) -> None:
         with self.demand.progress_lock:
@@ -1633,11 +1734,21 @@ class PolicyCoordinator:
                       and not state.eviction_in_progress and not state.migration_in_progress
                       and not state.tool_active
                       and state.lifecycle.resident]
-        if self.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
+        if self.policy.eviction in {
+                EvictionPolicy.WAIT_AWARE_PRESSURE, EvictionPolicy.GPU_AWARE_PRESSURE}:
             # Model duration is unknown online. A request remains idle until
             # its response is generated. No predicted or trace duration is consulted.
             candidates = [state for state in candidates
                           if state.wait_id is not None and not state.response_ready]
+        if self.policy.eviction is EvictionPolicy.GPU_AWARE_PRESSURE:
+            now = time.monotonic()
+            estimates = [(self._gpu_prefill_remaining(state, now), state)
+                         for state in candidates if not state.gpu_prewarm_requested]
+            eligible = [(remaining, state) for remaining, state in estimates
+                        if remaining is not None and remaining > 0
+                        and remaining >= self.policy.gpu_reclaim_min_remaining_seconds]
+            return max(eligible, key=lambda item: (item[0], -item[1].last_used),
+                       default=(None, None))[1]
         return min(candidates, key=lambda state: state.last_used, default=None)
 
     def _claim_victim_locked(self, *, exclude: str) -> SessionState | None:

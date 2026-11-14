@@ -34,6 +34,40 @@ def base():
                 comparison=dict(recipe='custom', arms=[dict(name='custom')]))
 
 
+def test_gpu_reclaim_requires_simulator_and_pair_scope():
+    raw = base()
+    raw['mechanisms']['idle_reclaim'].update(policy='gpu', scope='agent_and_tool',
+        gpu_reclaim_min_remaining_seconds=2.5, gpu_signal_max_age_seconds=4)
+    with pytest.raises(ValueError, match='backend=serving_sim'):
+        ExperimentSpec.model_validate(raw)
+    raw['inference']['backend'] = 'serving_sim'
+    spec = ExperimentSpec.model_validate(raw)
+    policy = spec.policies[0]
+    assert policy.eviction.value == 'gpu_aware_pressure'
+    assert policy.gpu_reclaim_min_remaining_seconds == 2.5
+    assert policy.gpu_signal_max_age_seconds == 4
+    assert policy.restore.value == 'reactive'
+    raw['mechanisms']['idle_reclaim']['scope'] = 'tool'
+    with pytest.raises(ValueError, match='agent_and_tool'):
+        ExperimentSpec.model_validate(raw)
+
+
+def test_configure_gpu_provider_and_bundle_option(tmp_path):
+    from clawbox.cli import main
+    source = tmp_path / 'base.yaml'
+    output = tmp_path / 'joint.yaml'
+    source.write_text(yaml.safe_dump(base()), encoding='utf-8')
+    assert main(['experiment', 'configure', str(source), str(output), '--recipe', 'custom',
+                 '--inference-backend', 'serving_sim', '--model', 'qwen36-r2',
+                 '--base-url', 'http://localhost:8000',
+                 '--serving-sim-catalog-manifest', str(tmp_path / 'manifest.json'),
+                 '--set', 'idle_reclaim.policy=gpu', '--set', 'idle_reclaim.scope=agent_and_tool']) == 0
+    spec = ExperimentSpec.model_validate(yaml.safe_load(output.read_text()))
+    assert spec.inference.backend.value == 'serving_sim'
+    assert spec.inference.configuration['serving_sim_catalog_manifest'] == str(tmp_path / 'manifest.json')
+    assert main(['experiment', 'validate', str(output)]) == 0
+
+
 def test_peer_resume_policies_roundtrip_without_branching_or_global_cold_root():
     raw = base()
     resources = raw['environment']['resources']
@@ -360,7 +394,7 @@ def test_wait_checkpoint_does_not_require_llm_duration_evidence():
     assert spec.inference.configuration.get('model_wait_prediction_seconds') is None
 
     raw['mechanisms']['idle_reclaim'].update(policy='release_cost', scope='tool')
-    with pytest.raises(ValueError, match="Input should be 'off' or 'wait'"):
+    with pytest.raises(ValueError, match="Input should be 'off', 'wait' or 'gpu'"):
         ExperimentSpec.model_validate(raw)
 
 
@@ -606,7 +640,7 @@ def test_disk_snapshots_keep_live_borrow_pool_but_target_cold():
 @pytest.mark.parametrize('patch,match', [
     ({'runtime.backend':'agentcgroup', 'runtime.cpu_release_boost': True}, 'unknown mechanism'),
     ({'placement.template_affinity':True}, 'load_aware'),
-    ({'idle_reclaim.policy':'release_cost', 'idle_reclaim.scope':'agent_and_tool'}, "Input should be 'off' or 'wait'"),
+    ({'idle_reclaim.policy':'release_cost', 'idle_reclaim.scope':'agent_and_tool'}, "Input should be 'off', 'wait' or 'gpu'"),
     ({'coordination.action_selection':'measured_cost'}, 'measured-cost'),
     ({'idle_reclaim.policy':'wait', 'checkpoint.residency':'value'}, 'value residency'),
     ({'checkpoint.lazy_restore':False}, 'unknown mechanism'),

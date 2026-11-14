@@ -731,6 +731,8 @@ class PolicySpec(StrictFrozenModel):
     cpu_release_boost: bool = False
     idle_release_ranking: bool = False
     runtime_snapshot: bool = True
+    gpu_reclaim_min_remaining_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    gpu_signal_max_age_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     resource_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_overrides: dict[str, Any] = Field(default_factory=dict)
     mechanisms: dict[str, Any] = Field(default_factory=dict)
@@ -752,8 +754,10 @@ class PolicySpec(StrictFrozenModel):
             or self.template_aware_placement or self.snapshot_aware_residency
         ):
             raise ValueError("os-default deployment requires resident VMs with admission and runtime control off")
-        if self.eviction not in {EvictionPolicy.NONE, EvictionPolicy.WAIT_AWARE_PRESSURE}:
-            raise ValueError("supported eviction policies: none, wait_aware_pressure")
+        if self.eviction not in {EvictionPolicy.NONE, EvictionPolicy.WAIT_AWARE_PRESSURE, EvictionPolicy.GPU_AWARE_PRESSURE}:
+            raise ValueError("supported eviction policies: none, wait_aware_pressure, gpu_aware_pressure")
+        if self.eviction is EvictionPolicy.GPU_AWARE_PRESSURE and not self.runtime_snapshot:
+            raise ValueError("gpu_aware_pressure requires runtime_snapshot (agent_and_tool scope)")
         if self.restore not in {RestorePolicy.NONE, RestorePolicy.REACTIVE}:
             raise ValueError("supported restore policies: none, reactive")
         if self.reclamation is ReclamationPolicy.RESIDENT:
@@ -808,6 +812,9 @@ class ExperimentSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def validate_v2(self) -> "ExperimentSpec":
+        if any(p.eviction is EvictionPolicy.GPU_AWARE_PRESSURE for p in self.policies):
+            if self.inference.backend is not InferenceBackend.SERVING_SIM:
+                raise ValueError("GPU idle reclaim requires inference.backend=serving_sim")
         if self.schema_version == 4:
             if not self.design or self.suite is not None:
                 raise ValueError('schema 4 requires a six-dimension design, not a legacy suite')
@@ -1071,8 +1078,8 @@ class ExperimentSpec(StrictFrozenModel):
                     + " of every eligible compute node"
                 )
         if self.agent.driver is AgentDriver.OPENCLAW:
-            if self.inference.backend not in {InferenceBackend.API, InferenceBackend.REPLAY}:
-                raise ValueError("agent.driver=openclaw requires inference.backend=api or replay")
+            if self.inference.backend not in {InferenceBackend.API, InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}:
+                raise ValueError("agent.driver=openclaw requires inference.backend=api, replay or serving_sim")
             if "api_key" in self.inference.configuration:
                 raise ValueError("model credentials must be injected from an environment variable")
         names = [policy.name for policy in self.policies]

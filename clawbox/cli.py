@@ -357,6 +357,10 @@ def parser() -> argparse.ArgumentParser:
     importer.add_argument("source", type=Path)
     importer.add_argument("--output", required=True, type=Path)
     importer.add_argument("--python", default="python3")
+    sim_inputs = sub.add_parser("prepare-serving-sim", help="prepare GPU replay inputs and a trace-free CPU workload/manifest")
+    sim_inputs.add_argument("spec", type=Path)
+    sim_inputs.add_argument("--output", required=True, type=Path)
+    sim_inputs.add_argument("--source-map", type=Path, help="JSON object mapping case IDs to original format-5 files; relative paths use this file's directory")
     importer.add_argument(
         "--source-workspace", default="/testbed",
         help="absolute workspace path recorded by the source trace (default: /testbed)",
@@ -432,8 +436,8 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("output", type=Path, help="new experiment YAML")
     configure.add_argument(
         "--profile", type=Path,
-        default=Path.home() / ".config" / "clawbox" / "host.json",
-        help="host profile created by experiment setup; used when present",
+        default=None,
+        help="explicitly apply a host profile; default host.json fills missing template IDs without replacing BASE IDs",
     )
     configure.add_argument("--force", action="store_true", help="replace the output file")
     configure.add_argument("--experiment-id")
@@ -544,7 +548,8 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--arm-timeout-seconds", type=int)
     configure.add_argument("--command-timeout-seconds", type=int)
     configure.add_argument("--time-scale", type=float)
-    configure.add_argument("--inference-backend", choices=("replay", "api"))
+    configure.add_argument("--inference-backend", choices=("replay", "api", "serving_sim"))
+    configure.add_argument("--serving-sim-catalog-manifest", help="prepared CPU/GPU trace bundle manifest")
     configure.add_argument("--model")
     configure.add_argument("--base-url")
     configure.add_argument("--api-key-env")
@@ -683,6 +688,17 @@ def main(argv: list[str] | None = None) -> int:
                 source_workspace=args.source_workspace,
                 target_workspace=args.target_workspace,
             ))
+            return 0
+        if args.command == "prepare-serving-sim":
+            from clawbox.experiments.serving_sim_inputs import prepare_serving_sim
+
+            sources = None
+            if args.source_map:
+                sources = json.loads(args.source_map.read_text(encoding="utf-8"))
+                if not isinstance(sources, dict) or not all(isinstance(v, str) for v in sources.values()):
+                    raise ValueError("--source-map requires a JSON object of case ID to source file path")
+                sources = {key: str((args.source_map.resolve().parent / value).resolve()) for key, value in sources.items()}
+            emit(prepare_serving_sim(load_experiment(args.spec), args.output, source_map=sources))
             return 0
         if args.command == "import-corpus":
             from clawbox.replay.import_corpus import prepare_corpus
@@ -998,6 +1014,15 @@ def main(argv: list[str] | None = None) -> int:
                     f"output already exists: {args.output}; pass --force to replace it"
                 )
             profile: dict[str, Any] = {}
+            profile_explicit = args.profile is not None
+            args.profile = args.profile or Path.home() / '.config' / 'clawbox' / 'host.json'
+            import yaml
+            base_document = yaml.safe_load(args.base.read_text(encoding='utf-8'))
+            if not isinstance(base_document, dict):
+                raise ValueError('BASE must be a YAML mapping')
+            base_environment = base_document.get('environment', base_document)
+            base_runtime = base_environment.get('runtime') or {}
+            base_tool = base_environment.get('sandbox') or {}
             if args.profile.is_file():
                 try:
                     profile = json.loads(args.profile.read_text(encoding="utf-8"))
@@ -1009,8 +1034,10 @@ def main(argv: list[str] | None = None) -> int:
             tool_profile = profile.get("sandbox") or {}
             if not isinstance(runtime_profile, dict) or not isinstance(tool_profile, dict):
                 raise ValueError(f"host profile has invalid template records: {args.profile}")
-            use_runtime_profile = args.runtime_template_id is None and bool(runtime_profile)
-            use_tool_profile = args.tool_template_id is None and bool(tool_profile)
+            use_runtime_profile = (args.runtime_template_id is None and bool(runtime_profile)
+                                   and (profile_explicit or not base_runtime.get('template_id')))
+            use_tool_profile = (args.tool_template_id is None and bool(tool_profile)
+                                and (profile_explicit or not base_tool.get('template_id')))
             required_profile_fields = {
                 "template_id", "source_image_reference", "image_digest", "vcpu", "memory_mib",
             }
@@ -1023,19 +1050,21 @@ def main(argv: list[str] | None = None) -> int:
                         f"host profile {label} record is missing: {', '.join(missing)}"
                     )
 
-            runtime_profile_shape_changed = use_runtime_profile and (
+            runtime_shape = runtime_profile if use_runtime_profile else base_runtime
+            tool_shape = tool_profile if use_tool_profile else base_tool
+            runtime_profile_shape_changed = args.runtime_template_id is None and bool(runtime_shape.get('template_id')) and (
                 (args.runtime_vcpu is not None
-                 and args.runtime_vcpu != runtime_profile.get("vcpu"))
+                 and args.runtime_vcpu != runtime_shape.get("vcpu"))
                 or (args.runtime_memory_gib is not None
                     and gib_to_mib(args.runtime_memory_gib, name="runtime memory")
-                    != runtime_profile.get("memory_mib"))
+                    != runtime_shape.get("memory_mib"))
             )
-            tool_profile_shape_changed = use_tool_profile and (
+            tool_profile_shape_changed = args.tool_template_id is None and bool(tool_shape.get('template_id')) and (
                 (args.tool_vcpu is not None
-                 and args.tool_vcpu != tool_profile.get("vcpu"))
+                 and args.tool_vcpu != tool_shape.get("vcpu"))
                 or (args.tool_memory_gib is not None
                     and gib_to_mib(args.tool_memory_gib, name="tool memory")
-                    != tool_profile.get("memory_mib"))
+                    != tool_shape.get("memory_mib"))
             )
             if runtime_profile_shape_changed:
                 raise ValueError(
@@ -1180,6 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
                 command_timeout_seconds=args.command_timeout_seconds,
                 time_scale=args.time_scale,
                 inference_backend=args.inference_backend,
+                serving_sim_catalog_manifest=args.serving_sim_catalog_manifest,
                 model=args.model,
                 base_url=args.base_url,
                 api_key_env=args.api_key_env,

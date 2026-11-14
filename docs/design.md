@@ -116,7 +116,10 @@ bytes. This is a single-host NUMA experiment, not a simulated cross-host fabric.
 Checkpointing does not interrupt active Tool commands. During an outstanding
 model request, idle reclaim can checkpoint the Tool VM or both VMs. A pending
 replay response is held until Runtime is restored; Tool can remain checkpointed
-until its next command.
+until its next command. With GPU-aware reclaim, an observed `think_end` instead
+requests pre-restoration of Runtime followed by Tool, through the existing memory
+admission. Tool bridge readiness is checked, but command prediction, growth
+admission and SSH identity checks still occur at the actual command boundary.
 
 | Location | Contents |
 | --- | --- |

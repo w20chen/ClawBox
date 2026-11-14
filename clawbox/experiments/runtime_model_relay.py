@@ -31,6 +31,8 @@ class Pending:
     def __init__(self, body, content_type):
         self.body = body
         self.content_type = content_type
+        # Survives the Runtime snapshot and all host-facing reconnects.
+        self.logical_request_id = os.urandom(24).hex()
         self.condition = threading.Condition()
         self.response = None
         self.attempts = 0
@@ -46,6 +48,7 @@ class Pending:
         request = urllib.request.Request(
             UPSTREAM, data=self.body, method="POST",
             headers={"Authorization": "Bearer " + TOKEN,
+                     "X-ClawBox-Request-ID": self.logical_request_id,
                      "Content-Type": self.content_type},
         )
         try:

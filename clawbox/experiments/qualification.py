@@ -24,6 +24,7 @@ from clawbox.cube import (
 from clawbox.lab import apply_environment, doctor
 from .results import RunStatus
 from .inputs import _saved_trace_info, validate_inputs, validate_launch_inputs
+from .serving_sim_inputs import serving_sim_input_identity
 from .prediction import prediction_input_paths
 from .snapshot_pool import WarmSnapshotPool
 from .numa_borrow import SandboxNumaBorrower, read_numa_lru_bytes
@@ -32,12 +33,12 @@ from .spec import (
     ExperimentSpec, InferenceBackend, ReclamationPolicy, canonical_json,
     expand_matrix, load_workload_cases, resolve_case_sandbox, spec_digest,
 )
-from .spec_types import AdmissionPolicy, ArrivalSchedule, SnapshotTier
+from .spec_types import AdmissionPolicy, ArrivalSchedule, EvictionPolicy, SnapshotTier
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
 from .worker import atomic_json, session_case_for, session_worker_count
 
 
-QUALIFICATION_SCHEMA_VERSION = 22
+QUALIFICATION_SCHEMA_VERSION = 24
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
 
 
@@ -119,6 +120,7 @@ def qualification_input_manifest(
     from .base_cache import qualification_input
     sharing_artifact = spec.resources.template_base_sharing_artifact
     return {
+        **serving_sim_input_identity(spec),
         **_peer_qualification_inputs(spec),
         **qualification_input(spec.resources),
         "traces": [
@@ -206,6 +208,7 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
     sharing_artifact = spec.resources.template_base_sharing_artifact
     from .base_cache import qualification_input
     return {
+        **serving_sim_input_identity(spec),
         **_peer_qualification_inputs(spec),
         **qualification_input(spec.resources),
         "traces": traces,
@@ -675,7 +678,13 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 raise RuntimeError("Runtime snapshot probe could not start PID witness")
             if _peer_nodes:
                 runtime_ram_digest = runtime.sandbox.files.read('/tmp/clawbox-ram-witness').strip()
-            coordinator = PolicyCoordinator(pair_policy,
+            # This isolated capability probe has no model request or GPU feed.
+            # Select its known idle pair without inventing a GPU observation;
+            # keep the configured snapshot scope/mechanism and pair reservation.
+            probe_policy = pair_policy.model_copy(update={
+                "eviction": EvictionPolicy.WAIT_AWARE_PRESSURE,
+            }) if pair_policy.eviction is EvictionPolicy.GPU_AWARE_PRESSURE else pair_policy
+            coordinator = PolicyCoordinator(probe_policy,
                 budget_mib=spec.resources.pool_memory_budget_mib,
                 emergency_free_mib=0, operation_headroom_mib=0)
             coordinator.register(probe_id, lifecycle)
@@ -892,6 +901,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "peer_bidirectional_restore_verified": bool(peer_transitions and len(peer_transitions) == 2 and primary_error is None),
         "timings": lifecycle.timings,
         "pair_checkpoint_verified": bool(runtime is not None and primary_error is None),
+        "pair_probe_eligibility": "known_idle_pair" if runtime is not None else None,
         "runtime_pid": runtime_pid,
         "runtime_timings": runtime.timings if runtime is not None else [],
         "placements": lifecycle.numa_borrower.placements if lifecycle.numa_borrower else [],
@@ -928,6 +938,7 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
         "peer_bidirectional_restore_verified": bool(peer_transitions and len(peer_transitions) == 2),
         "timings": lifecycle.timings,
         "pair_checkpoint_verified": bool(runtime is not None and primary_error is None),
+        "pair_probe_eligibility": "known_idle_pair" if runtime is not None else None,
         "runtime_pid": runtime_pid,
         "runtime_timings": runtime.timings if runtime is not None else [],
         "placements": lifecycle.numa_borrower.placements if lifecycle.numa_borrower else [],
@@ -1154,8 +1165,8 @@ def live_borrow_roundtrip_test(
 
 
 def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) -> ExperimentSpec:
-    if spec.inference.backend is not InferenceBackend.REPLAY:
-        raise ValueError("qualification requires inference.backend=replay")
+    if spec.inference.backend not in {InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}:
+        raise ValueError("qualification requires inference.backend=replay or serving_sim")
     cases = load_workload_cases(spec.workload)
     level = (
         concurrency
@@ -1176,7 +1187,7 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
             # delay before that call adds hours for a heterogeneous corpus but
             # does not strengthen the capability proof.  Formal runs retain
             # the configured time scale from the source spec.
-            "time_scale": 0.0,
+            **({"time_scale": 0.0} if spec.inference.backend is InferenceBackend.REPLAY else {}),
             "max_model_steps": 1,
             "qualification_max_parallel_sessions": level,
         },

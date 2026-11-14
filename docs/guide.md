@@ -189,9 +189,11 @@ dependencies. For multiple tasks, use `--workload-manifest /absolute/path/worklo
 this selects unique case assignment and the manifest's per-task environments.
 See [workload preparation](workloads.md) for trace import and task-image builds.
 
-Use `inference.backend: replay` for this workflow. The CLI also accepts `api`
-provider settings, but current qualification requires replay, so live API
-inference does not have a complete supported launch path.
+Use `inference.backend: replay` for recorded model timing, or follow
+[the GPU simulator walkthrough](#connect-the-gpu-serving-simulator) for
+`serving_sim`. Qualification supports both backends. The CLI also accepts `api`
+provider settings, but live API inference does not have a complete supported
+launch path.
 
 Recipes generate explicit comparison arms. Use `--fixed-methods --recipe FAMILY`
 to compare one policy family while fixing unrelated mechanisms. Available
@@ -1025,3 +1027,126 @@ process's limit without restarting it. It does not start an inactive service.
 the host's `fs.nr_open`. No image rebuild, retraining, or `host apply` is needed.
 If an experiment already failed, keep its evidence and use a new run ID when
 rerunning it. See the [option reference](reference.md#cubeapi-open-file-limit).
+
+## Connect the GPU serving simulator
+
+Start from a working schema-4 CPU experiment and its verified host profile and
+per-case templates. Keep the kunpeng creation baseline. The simulator runs on
+ordinary CPUs; its native environment must independently pass the adapter's `check` on
+the chosen host architecture before a joint run. A service that starts without
+passing the simulator's native checks is not ready for this experiment.
+
+The configure command below preserves template IDs already saved in `cpu.yaml`.
+Use `--profile /absolute/verified-host-profile.json` only when deliberately
+selecting that profile's templates; an unrelated default host profile must not
+replace a saved experiment baseline when switching inference backends.
+
+Prepare the bundle offline on a host with the selected traces and prediction artifacts.
+Both the existing workload's schema-6 CPU replay and
+the original format-5 source are needed: schema 6 alone has no reliable recorded
+completion/reasoning token counts. Explicit saved `source_trace` metadata or the
+workload's separate `source_reference` supplies the original path. Otherwise
+create `sources.json` with `{ "CASE_ID": "/absolute/original.trace.jsonl" }`.
+
+```bash
+clawbox experiment prepare-serving-sim cpu.yaml --source-map sources.json --output /absolute/gpu-bundle
+clawbox experiment configure cpu.yaml joint.yaml --recipe custom \
+  --workload-manifest /absolute/gpu-bundle/workload.json \
+  --inference-backend serving_sim --model qwen36-r2 --base-url http://127.0.0.1:8000 \
+  --api-key-env CLAWBOX_SIM_API_KEY \
+  --serving-sim-catalog-manifest /absolute/gpu-bundle/manifest.json \
+  --set idle_reclaim.policy=gpu --set idle_reclaim.scope=agent_and_tool
+clawbox experiment validate joint.yaml --inputs
+```
+
+Leave `CLAWBOX_SIM_API_KEY` unset for a local simulator without authentication,
+or set it to the simulator's configured key. Remove any provider-specific
+`inference.configuration.clawtune_config` from this spec, since that field
+overrides direct model and endpoint settings.
+
+If you select a different set of cases, its reusable template-sharing proof must
+match that exact Tool template set. Set `evidence.template_base_sharing_artifact`
+to `null` to let qualification verify the selected templates with real VMs.
+
+The CPU runtime needs only `workload.json` and `manifest.json`; these can be copied
+to its host without either input trace or the GPU catalog. The GPU service needs
+`catalog.json` and `traces/`. `gpu-provenance.json` records offline source identities.
+The CPU manifest contains task bindings, total call counts, background-execution
+settings, arrival-reference durations and prediction-validation identities, but no
+recorded conversations or per-call model durations. Preparation validates recorded
+Tool command coverage against the selected prediction artifacts; changing those
+artifacts or a task requires a new bundle. Runtime validation verifies the CPU
+manifest, and the connected service must report its matching GPU catalog digest.
+
+The bundle keeps the CPU replay's adapted tools and workspace paths, original
+output lengths and finish reasons, and the action-ID mapping. It never replaces
+unknown reasoning counts with zero. Recorded source-model outputs evaluated with
+a different simulated model are a workload prediction, not model accuracy or
+original-model performance evidence. Use a new bundle directory for changed
+inputs; repeat preparation with an existing output fails without overwriting it.
+
+Keep the GPU repository unmodified. Run the ClawBox-owned launcher from the
+ClawBox checkout (or use the installed `clawbox-serving-sim` command). It imports
+the original simulator application, adds ClawBox management routes, and attaches
+current-request process-identity metadata to chat responses. Native token timing,
+model outputs and per-session signals remain owned by the simulator. ARM dependency selection,
+tokenizer-cache reuse and `GLOO_SOCKET_IFNAME=lo` belong to this launcher;
+an explicit interface setting is preserved. No upstream source patch is applied.
+Reserve its actual CPU budget separately from experiment VM CPUs.
+`--cores` bounds real simulator CPUs; `--topology` selects simulated GPUs.
+
+```bash
+export SIM_VENV=/absolute/simulator-venv
+python3 -m clawbox.integrations.serving_sim setup --sim-root /absolute/agent-sched-bench-gpu --cores 4
+python3 -m clawbox.integrations.serving_sim check --sim-root /absolute/agent-sched-bench-gpu --cores 4
+python3 -m clawbox.integrations.serving_sim smoke --sim-root /absolute/agent-sched-bench-gpu --cores 4 --out /absolute/native-smoke
+python3 -m clawbox.integrations.serving_sim serve --sim-root /absolute/agent-sched-bench-gpu \
+  --cores 4 --topology 8A --trace-catalog /absolute/gpu-bundle/catalog.json \
+  --k 1 --port 8000 --out /absolute/gpu-qualification
+```
+
+In another shell, qualify the joint experiment:
+
+For a matched topology comparison, read `/v1/clawbox/simulator/info` and copy its
+`topology_digest` into `inference.configuration.serving_sim_topology_digest`
+before qualification. Without this optional field, the actual topology is
+recorded but not compared against an expected value. Freeze the simulator
+revision, tokenizer and cost-model assets separately; the topology digest
+does not cover those files.
+
+```bash
+clawbox experiment qualify joint.yaml --concurrency 1 --receipt /absolute/joint-qualification.json
+```
+
+Stop that simulator with Ctrl-C. Start a fresh service with the same settings and
+`--out /absolute/gpu-formal-01`, then run the single configured arm:
+
+```bash
+clawbox --output-root /absolute/results experiment run joint.yaml \
+  --run-id joint-01 --qualification /absolute/joint-qualification.json
+```
+
+Use another fresh simulator process and output directory for each comparison
+arm. Stop the service after the arm so it saves its realized inputs and validity
+report. For large runs, add `--persistence final` to both qualification and formal
+simulator launches to avoid rewriting all accumulated requests after every call.
+The default `native` retains those intermediate reports. With `final`, use Ctrl-C
+or SIGTERM after the CPU arm exits, wait for shutdown, and check that
+`clawbox-persistence.json` has `finalized: true`; abrupt termination loses deferred
+GPU reports. This changes reporting only, with no host apply, image rebuild or
+retraining. Keep both GPU output and the CPU run directory. The CPU records actual
+Tool work, VM lifecycle and transport observations; the simulator records its
+predicted GPU timeline. Inspect wall-clock delivery lag before interpreting a
+large-concurrency result. Missing reasoning observations may leave reactive
+restore as the only restoration trigger for a real trace; use a separately
+labelled synthetic protocol check to test `think_end` handling when needed.
+
+With the GPU policy, `think_end` starts pre-restoring both VMs: Runtime first
+(including its model connection), then Tool and its telemetry bridge. Restoration
+may wait for memory admission or an in-progress checkpoint. This overlaps with
+the remaining model generation; it does not execute a Tool command early. Already
+resident VMs need no restore. Without `think_end`, Runtime restores for the full
+response and Tool restores when its actual command reaches admission.
+
+See the [inference and GPU policy options](reference.md) for defaults and which
+changes require a new run, qualification, image build or retraining.

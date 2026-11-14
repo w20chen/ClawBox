@@ -39,7 +39,9 @@ def replay_uses_background_execution(model_gateway: Any | None) -> bool:
     Live models retain the normal process tool and can choose when to poll.
     """
     gateway = getattr(model_gateway, "gateway", None)
-    if gateway is None or gateway.mode != "replay" or not gateway.actions:
+    if gateway is not None and gateway.mode == "serving_sim":
+        return gateway.serving_sim_allow_background
+    if gateway is None or gateway.mode not in {"replay", "serving_sim"} or not gateway.actions:
         return True
     for action in gateway.actions:
         for call in action.output.get("tool_calls") or []:
@@ -469,7 +471,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     agent_stderr_file = f"{home}/logs/agent.stderr"
     agent_exit_file = f"{home}/completion/agent.exit"
     policy_audit_file = f"{home}/logs/policy-ssh.jsonl"
-    replay_mode = getattr(getattr(model_gateway, "gateway", None), "mode", None) == "replay"
+    replay_mode = getattr(getattr(model_gateway, "gateway", None), "mode", None) in {"replay", "serving_sim"}
     tool_home = str(configuration.get("openclaw_tool_home", "/root"))
     if not tool_home.startswith("/") or "\x00" in tool_home:
         raise ValueError("openclaw_tool_home must be an absolute Tool VM path")

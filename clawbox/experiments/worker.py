@@ -48,6 +48,8 @@ from .memory import (
 )
 from .clawtune_trace import ClawTuneTraceWriter
 from .model_gateway import ManagedModelGateway, SessionGatewayState
+from .serving_sim_client import ServingSimClient
+from .serving_sim_inputs import serving_sim_case_binding
 from .native_artifacts import collect_and_validate_native_tool_artifacts
 from .numa_borrow import (
     NumaBorrowUnavailable, NumaRebindIncomplete, SandboxNumaBorrower,
@@ -386,6 +388,8 @@ def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
     durations = []
     for case in selected:
         recorded = case.metadata.get("recorded_duration_seconds")
+        if arm.inference.backend.value == 'serving_sim':
+            recorded = serving_sim_case_binding(arm.inference.configuration, case.case_id)['recorded_duration_seconds']
         if recorded is None:
             actions = load_trace(Path(
                 case.replay_trace_reference or case.source_reference
@@ -2252,8 +2256,16 @@ class ExperimentWorker:
                     self.results.append(ResultEnvelope.model_validate_json(result_path.read_text()))
                     continue
                 try:
-                    self.results.append(self._run_arm(arm, result_path, marker_path))
+                    simulator_context = nullcontext(None)
+                    if arm.inference.backend.value == "serving_sim":
+                        configuration, credential = resolve_llm_configuration(arm.inference.configuration, live=False)
+                        simulator_context = ServingSimClient(configuration, credential,
+                            self.output_root / "serving-sim" / arm.arm_id)
+                    with simulator_context as simulator:
+                        self.serving_sim = simulator
+                        self.results.append(self._run_arm(arm, result_path, marker_path))
                 finally:
+                    self.serving_sim = None
                     knowledge = getattr(self, 'host_knowledge', None)
                     if knowledge is not None and hasattr(knowledge, 'close'):
                         knowledge.close()
@@ -2872,6 +2884,8 @@ class ExperimentWorker:
                 if topology_sampler is not None:
                     topology_sampler.check()
                 policy_events.check()
+                if getattr(self, "serving_sim", None) is not None:
+                    self.serving_sim.check()
                 if self._runtime_memory is not None:
                     self._runtime_memory.check()
                 for domain in domains.values():
@@ -3089,6 +3103,8 @@ class ExperimentWorker:
             policy_events.close(wait=not interrupted)
             try:
                 policy_events.check()
+                if getattr(self, "serving_sim", None) is not None:
+                    self.serving_sim.check()
             except Exception as exc:
                 infrastructure_error = infrastructure_error or exc
                 failure = failure or exc
@@ -4029,8 +4045,8 @@ class ExperimentWorker:
             # Native OpenClaw can keep its long-lived Agent process in a VM
             # snapshot.  During a model wait, snapshot both VMs for a
             # snapshot_pause policy; Runtime is restored before the gateway
-            # response is released, while Tool may stay swapped until the
-            # next SSH admission.
+            # response is released. GPU think_end can prewarm both VMs before
+            # that response; otherwise Tool resumes at its next SSH admission.
             runtime_snapshot_enabled = (
                 arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
                 and arm.policy.runtime_snapshot
@@ -4132,7 +4148,7 @@ class ExperimentWorker:
                     wait_state.clear()
                     wait_state.update(request_id=request_id,
                                       request_started_at=event.get("request_started_at"))
-                    if arm.policy.eviction is EvictionPolicy.WAIT_AWARE_PRESSURE:
+                    if arm.policy.eviction in {EvictionPolicy.WAIT_AWARE_PRESSURE, EvictionPolicy.GPU_AWARE_PRESSURE}:
                         coordinator.begin_model_wait(session_id, request_id)
                 events.write({
                     "event": "model_wait_started",
@@ -4147,6 +4163,51 @@ class ExperimentWorker:
                         (coordinator, "memory-pressure"),
                         pause_for_model_wait, event,
                     )
+
+            def prewarm_pair_from_gpu(event: dict[str, Any]) -> None:
+                request_id = str(event["request_id"])
+                # Do not hold wait_lock while an already-claimed checkpoint finishes.
+                if not coordinator.wait_for_gpu_prewarm(session_id, request_id):
+                    return
+                with wait_lock:
+                    with generated_model_requests_lock:
+                        if (wait_state.get("request_id") != request_id
+                                or request_id in generated_model_requests
+                                or request_id in completed_model_requests):
+                            return
+                    events.write({"event": "gpu_pair_prewarm_started", "session_id": session_id,
+                                  "request_id": request_id, "source": event.get("source"),
+                                  "gpu_virtual_time": event.get("t")})
+                    # Runtime chooses the pair's resume placement first when
+                    # peer placement is enabled. Tool then uses that domain.
+                    restore_runtime_for_model_wait_locked(event, phase="gpu_think_end")
+                    if not lifecycle.resident:
+                        started = time.time()
+                        self._restore_with_one_victim(
+                            arm, session_id, lifecycle, coordinator, events, role="tool",
+                        )
+                        prepare_restored_tool(request_id=request_id)
+                        finished = time.time()
+                        wait_state.update(restore_request_id=request_id,
+                                          restore_started_at=started, restore_completed_at=finished)
+                        _record_time_span(timeline, "model.tool_prewarm", started, finished,
+                                          role="tool", operation="gpu_think_end",
+                                          execution_id=request_id)
+                    events.write({"event": "gpu_pair_prewarm_ready", "session_id": session_id,
+                                  "request_id": request_id, "source": event.get("source"),
+                                  "gpu_virtual_time": event.get("t")})
+
+            def on_model_signal(event: dict[str, Any]) -> None:
+                if arm.policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE:
+                    return
+                decision = coordinator.observe_gpu_signal(session_id, str(event["request_id"]), event)
+                events.write({"event": "gpu_policy_observation", "session_id": session_id,
+                              "request_id": event["request_id"], "signal": event["event"],
+                              "signal_sequence": event.get("signal_sequence"), "decision": decision})
+                if decision.get("should_prewarm") and runtime_snapshot_enabled:
+                    policy_events.submit_coalesced((session_id, "gpu_prewarm"), prewarm_pair_from_gpu, event)
+                elif event.get("event") in {"queued", "prefill_start"}:
+                    policy_events.submit_coalesced((session_id, "gpu_pressure"), pause_for_model_wait, event)
 
             def before_model_response_ready(step: int | None, message: dict[str, Any],
                                             event: dict[str, Any]) -> dict[str, Any]:
@@ -4166,8 +4227,8 @@ class ExperimentWorker:
                 })
                 # A paused Runtime cannot receive the pending HTTP response.
                 # Restore it synchronously in the gateway producer before the
-                # response becomes visible to OpenClaw. Tool restore remains
-                # admission-scoped and happens on the next SSH invocation.
+                # response becomes visible to OpenClaw. A Tool not already
+                # prewarmed by think_end resumes on the next SSH invocation.
                 with wait_lock:
                     # Claim completion before checking residency. Otherwise a
                     # queued eager pause can run between a resident check and
@@ -4240,6 +4301,8 @@ class ExperimentWorker:
                 if arm.inference.backend.value == "replay"
                 and arm.case.replay_trace_reference else None
             )
+            simulator_binding = (self.serving_sim.case_bindings[arm.case.case_id]
+                                 if arm.inference.backend.value == "serving_sim" else {})
             gateway_session = self.model_gateway.register(
                 session_id=session_id,
                 store_path=self.output_root / "model-gateway" / f"{session_id}.json",
@@ -4265,6 +4328,11 @@ class ExperimentWorker:
                 upstream_base_url=str(inference_configuration.get("base_url") or "") or None,
                 upstream_api_key=credential or None,
                 upstream_model=str(inference_configuration.get("model") or "") or None,
+                serving_sim=getattr(self, "serving_sim", None),
+                serving_sim_trace_id=simulator_binding.get("trace_id"),
+                serving_sim_model_calls=simulator_binding.get("model_calls"),
+                serving_sim_allow_background=simulator_binding.get("allow_background_execution", False),
+                on_model_signal=on_model_signal,
                 on_request_started=on_model_request_started,
                 before_response_ready=before_model_response_ready,
             )
@@ -4495,6 +4563,56 @@ class ExperimentWorker:
             admitted_route = setup_route
             admitted_route_requires_preflight = True
 
+            def prepare_restored_tool(*, execution_id: str | None = None,
+                                      request_id: str | None = None) -> None:
+                """Ready a restored Tool for either GPU prewarm or command admission."""
+                nonlocal admitted_route, admitted_route_requires_preflight
+                admitted_route = None
+                admitted_route_requires_preflight = True
+                bridge_ready_started = time.monotonic()
+                bridge_error: Exception | None = None
+                bridge_result = None
+                for bridge_attempt in range(1, 31):
+                    try:
+                        # A restored bridge normally resumes intact.
+                        # Probe first; restart only to recover a failed probe.
+                        candidate = executor.execute(
+                            native_tool_bridge_setup_command(
+                                knowledge_environment=kb_env,
+                                require_progress_events=arm.policy.runtime_control.adaptive,
+                                restart=bridge_attempt in (2, 10, 20),
+                                command_timeout_seconds=arm.execution.command_timeout_seconds,
+                                apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
+                                pypi_cache_index_url=arm.execution.pypi_cache_index_url,
+                                allow_internet_access=arm.sandbox.allow_internet_access,
+                            ),
+                            60,
+                        )
+                        if candidate.exit_code == 0:
+                            bridge_result = candidate
+                            break
+                        bridge_error = RuntimeError(
+                            "bridge setup exited "
+                            f"{candidate.exit_code}: {candidate.stderr[-1000:]}"
+                        )
+                    except Exception as exc:
+                        bridge_error = exc
+                    if bridge_attempt < 30:
+                        time.sleep(0.5)
+                if bridge_result is None:
+                    raise RuntimeError(
+                        "Tool telemetry bridge did not recover after restore "
+                        "within 30 readiness attempts; last error: "
+                        f"{type(bridge_error).__name__}: {bridge_error}"
+                    ) from bridge_error
+                events.write({
+                    "event": "tool_restore_ready", "session_id": session_id,
+                    **({"execution_id": execution_id} if execution_id is not None else {}),
+                    **({"request_id": request_id} if request_id is not None else {}),
+                    "attempts": bridge_attempt,
+                    "service_seconds": time.monotonic() - bridge_ready_started,
+                })
+
             exit_mismatches = 0
             model_steps = 0
             tool_latencies: list[float] = []
@@ -4675,54 +4793,6 @@ class ExperimentWorker:
                                 "dependency_install_gate": True,
                             })
                             raise
-                    def prepare_restored_tool() -> None:
-                        nonlocal admitted_route, admitted_route_requires_preflight
-                        admitted_route = None
-                        admitted_route_requires_preflight = True
-                        bridge_ready_started = time.monotonic()
-                        bridge_error: Exception | None = None
-                        bridge_result = None
-                        for bridge_attempt in range(1, 31):
-                            try:
-                                # A restored bridge normally resumes intact.
-                                # Probe first; restart only to recover a failed probe.
-                                candidate = executor.execute(
-                                    native_tool_bridge_setup_command(
-                                        knowledge_environment=kb_env,
-                                        require_progress_events=arm.policy.runtime_control.adaptive,
-                                        restart=bridge_attempt in (2, 10, 20),
-                                        command_timeout_seconds=arm.execution.command_timeout_seconds,
-                                        apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
-                                        pypi_cache_index_url=arm.execution.pypi_cache_index_url,
-                                        allow_internet_access=arm.sandbox.allow_internet_access,
-                                    ),
-                                    60,
-                                )
-                                if candidate.exit_code == 0:
-                                    bridge_result = candidate
-                                    break
-                                bridge_error = RuntimeError(
-                                    "bridge setup exited "
-                                    f"{candidate.exit_code}: {candidate.stderr[-1000:]}"
-                                )
-                            except Exception as exc:
-                                bridge_error = exc
-                            if bridge_attempt < 30:
-                                time.sleep(0.5)
-                        if bridge_result is None:
-                            raise RuntimeError(
-                                "Tool telemetry bridge did not recover after restore "
-                                "within 30 readiness attempts; last error: "
-                                f"{type(bridge_error).__name__}: {bridge_error}"
-                            ) from bridge_error
-                        events.write({
-                            "event": "tool_restore_ready",
-                            "session_id": session_id,
-                            "execution_id": execution_id,
-                            "attempts": bridge_attempt,
-                            "service_seconds": time.monotonic() - bridge_ready_started,
-                        })
-
                     with wait_lock:
                         control_marks["lifecycle_lock"] = time.monotonic()
                         try:
@@ -4743,7 +4813,7 @@ class ExperimentWorker:
                                         wait_lock, operation,
                                     )
                                 ),
-                                on_restored=prepare_restored_tool,
+                                on_restored=lambda: prepare_restored_tool(execution_id=execution_id),
                             )
                             reservation_acquired = True
                             control_marks["memory_prepare"] = time.monotonic()
@@ -5286,7 +5356,7 @@ class ExperimentWorker:
                             prediction_manifest=(prediction_provider.manifest
                                                  if prediction_provider is not None else None),
                             resident_poll=poll_resident_runtime,
-                            checkpoint_relay=runtime_snapshot_enabled,
+                            checkpoint_relay=(runtime_snapshot_enabled or arm.inference.backend.value == "serving_sim"),
                             diagnostic_artifacts=arm.execution.control_timing_details,
                             startup_begin=begin_tool_telemetry_warmup,
                             startup_wait=await_tool_telemetry_warmup,
@@ -5392,7 +5462,7 @@ class ExperimentWorker:
                                   "failures": request_failures})
                 agent_tool_failures = outcome.get("agent_tool_failures")
                 if agent_tool_failures is not None and agent_tool_failures > 0:
-                    if trace_path is None:
+                    if trace_path is None and arm.inference.backend.value != 'serving_sim':
                         raise RuntimeError(
                             f"OpenClaw reported {agent_tool_failures} failed Tool result(s); "
                             "inspect final-answer.json and agent.stderr.log"
@@ -5401,12 +5471,19 @@ class ExperimentWorker:
                     from .native_artifacts import _runtime_spans
                     harmless_failures: list[dict[str, Any]] = []
                     unexpected_failures: list[dict[str, Any]] = []
-                    matched_failures = match_recorded_tool_failures(
-                        trace_path, _runtime_spans(outcome["runtime_traces"]),
-                        session_id=session_id, reported_failures=agent_tool_failures,
-                        harmless_failures=harmless_failures,
-                        unexpected_failures=unexpected_failures,
-                    )
+                    if arm.inference.backend.value == 'serving_sim':
+                        audit = self.serving_sim.validate_tool_outcomes(session_id=session_id,
+                            trace_id=simulator_binding['trace_id'],
+                            spans=_runtime_spans(outcome['runtime_traces']), reported_failures=agent_tool_failures)
+                        matched_failures, harmless_failures, unexpected_failures = (
+                            audit['matched'], audit['harmless'], audit['unexpected'])
+                    else:
+                        matched_failures = match_recorded_tool_failures(
+                            trace_path, _runtime_spans(outcome["runtime_traces"]),
+                            session_id=session_id, reported_failures=agent_tool_failures,
+                            harmless_failures=harmless_failures,
+                            unexpected_failures=unexpected_failures,
+                        )
                     events.write({"event": "recorded_tool_failures_matched",
                                   "session_id": session_id, "matches": matched_failures})
                     if harmless_failures:
@@ -5526,7 +5603,8 @@ class ExperimentWorker:
                     "priority": priority_domain.priorities[index] if priority_domain else None,
                     "compute_node": numa_borrower.node_id if numa_borrower else None,
                     "trace_reference": (
-                        arm.case.replay_trace_reference or arm.case.source_reference
+                        'gpu:' + simulator_binding['trace_id'] if simulator_binding
+                        else arm.case.replay_trace_reference or arm.case.source_reference
                     ),
                     "valid": valid, "create_seconds": create_s,
                     "runtime_create_seconds": runtime_create_s,
@@ -5920,6 +5998,7 @@ class ExperimentWorker:
         if arm.agent.driver is AgentDriver.OPENCLAW:
             evidence_class = (
                 "real-llm" if arm.inference.backend.value == "api"
+                else "real-cpu-with-predicted-gpu-service" if arm.inference.backend.value == "serving_sim"
                 else "deterministic-managed-replay"
             )
         else:
@@ -5927,7 +6006,9 @@ class ExperimentWorker:
         cases = arm.session_cases or (arm.case,)
         configured_traces = []
         for case in cases:
-            trace_reference = case.replay_trace_reference or case.source_reference
+            trace_reference = ('gpu:' + serving_sim_case_binding(arm.inference.configuration, case.case_id)['trace_id']
+                               if arm.inference.backend.value == 'serving_sim'
+                               else case.replay_trace_reference or case.source_reference)
             configured_traces.append({
                 "case_id": case.case_id,
                 "reference": trace_reference,

@@ -38,6 +38,7 @@ dev = ["pytest>=8", "httpx2", "pyarrow>=15"]
 clawbox = "clawbox.cli:main"
 clawbox-p90-export = "clawbox.cell.p90:export_main"
 clawbox-experiment-worker = "clawbox.experiments.worker:main"
+clawbox-serving-sim = "clawbox.integrations.serving_sim:main"
 clawbox-tune-server = "clawbox.tuning.server:main"
 
 [tool.setuptools.packages.find]
@@ -45,6 +46,7 @@ where = ["."]
 include = ["clawbox*"]
 
 [tool.setuptools.package-data]
+"clawbox.integrations" = ["serving_sim_requirements_aarch64.lock"]
 "clawbox.experiments.knowledge" = ["contracts/*.schema.json", "LICENSE", "PROVENANCE.md"]
 "clawbox.experiments.vendor.agentcgroup" = ["LICENSE", "PROVENANCE.md"]
 

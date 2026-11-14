@@ -36,6 +36,11 @@ class SessionGatewayState:
                  replay_tool_timeout_multiplier: float = 1.0,
                  max_model_steps: int | None = None,
                  content_retention: str = "failures",
+                 serving_sim: Any | None = None,
+                 serving_sim_trace_id: str | None = None,
+                 serving_sim_model_calls: int | None = None,
+                 serving_sim_allow_background: bool = False,
+                 on_model_signal: Callable[[dict], None] | None = None,
                  on_request_started: Callable[..., None] | None = None,
                  before_response_ready: Callable[..., dict[str, Any]] | None = None,
                  flush_gate: threading.Semaphore | None = None) -> None:
@@ -53,6 +58,11 @@ class SessionGatewayState:
             max_model_steps=max_model_steps,
             request_namespace=session_id,
             content_retention=content_retention,
+            serving_sim=serving_sim,
+            serving_sim_trace_id=serving_sim_trace_id,
+            serving_sim_model_calls=serving_sim_model_calls,
+            serving_sim_allow_background=serving_sim_allow_background,
+            on_model_signal=on_model_signal,
             on_request_started=on_request_started,
             before_response_ready=before_response_ready,
         )
@@ -133,8 +143,8 @@ class SessionGatewayState:
         with self._flush_gate:
             self.gateway.flush()
 
-    def complete_http(self, payload: dict[str, Any]) -> tuple[int, str, bytes, str]:
-        return self.gateway.complete_http(payload)
+    def complete_http(self, payload: dict[str, Any], *, logical_request_id: str | None = None) -> tuple[int, str, bytes, str]:
+        return self.gateway.complete_http(payload, logical_request_id=logical_request_id)
 
     def mark_delivery(self, request_id: str, *, delivered: bool) -> None:
         self.gateway.mark_delivery(request_id, delivered=delivered)
@@ -196,7 +206,8 @@ class ManagedModelGateway:
                     payload = json.loads(self.rfile.read(length))
                     if not isinstance(payload, dict):
                         raise ValueError("request body must be an object")
-                    status, content_type, body, request_id = state.complete_http(payload)
+                    status, content_type, body, request_id = state.complete_http(
+                        payload, logical_request_id=self.headers.get("X-ClawBox-Request-ID"))
                     if not state.may_deliver(delivery_generation):
                         # Runtime checkpoint destroys the live transport path.
                         # Do not write a response to that pre-checkpoint TCP
@@ -339,6 +350,11 @@ class ManagedModelGateway:
                  tool_transport_timeout_s: float | None = None,
                  replay_tool_timeout_multiplier: float = 1.0,
                  content_retention: str = "failures",
+                 serving_sim: Any | None = None,
+                 serving_sim_trace_id: str | None = None,
+                 serving_sim_model_calls: int | None = None,
+                 serving_sim_allow_background: bool = False,
+                 on_model_signal: Callable[[dict], None] | None = None,
                  upstream_base_url: str | None = None,
                  upstream_api_key: str | None = None,
                  upstream_model: str | None = None,
@@ -361,6 +377,11 @@ class ManagedModelGateway:
             tool_transport_timeout_s=tool_transport_timeout_s,
             replay_tool_timeout_multiplier=replay_tool_timeout_multiplier,
             content_retention=content_retention,
+            serving_sim=serving_sim,
+            serving_sim_trace_id=serving_sim_trace_id,
+            serving_sim_model_calls=serving_sim_model_calls,
+            serving_sim_allow_background=serving_sim_allow_background,
+            on_model_signal=on_model_signal,
             on_request_started=on_request_started,
             before_response_ready=before_response_ready,
             flush_gate=self._flush_gate,

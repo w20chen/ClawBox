@@ -646,17 +646,19 @@ def test_schema4_qualification_clears_frozen_arrivals_but_keeps_qos():
     assert expand_matrix(restored)[0].execution.cpu_qos_policy == 'idle_core'
 
 
-@pytest.mark.parametrize('pair', [False, True])
+@pytest.mark.parametrize('pair,eviction', [(False, 'wait_aware_pressure'),
+    (True, 'wait_aware_pressure'), (True, 'gpu_aware_pressure')])
 @pytest.mark.parametrize('storage,scheduling,fail_spill', [('warm-only', 'static', False), ('tiered', 'snapshot_only', False), ('tiered', 'joint', False), ('tiered', 'joint', True)])
 def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
-    tmp_path: Path, monkeypatch, storage, scheduling, fail_spill, pair,
+    tmp_path: Path, monkeypatch, storage, scheduling, fail_spill, pair, eviction,
 ) -> None:
     import clawbox.experiments.qualification as module
+    from clawbox.experiments.spec_types import EvictionPolicy
 
     spec = load_experiment(EXAMPLE)
     spec = spec.model_copy(update={
         "policies": (BASELINES["predicted-wait-snapshot"].as_policy().model_copy(
-            update={"runtime_snapshot": pair}),),
+            update={"runtime_snapshot": pair, "eviction": EvictionPolicy(eviction)}),),
         "resources": spec.resources.model_copy(update={
             "prediction_artifact": "/data/p50.json",
             "snapshot_storage": storage,
@@ -775,6 +777,8 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
     assert result["passed"] is True
     assert result["incremental_delta_verified"] is True
     assert result['pair_checkpoint_verified'] is pair
+    assert spec.policies[0].eviction is EvictionPolicy(eviction)
+    assert result['pair_probe_eligibility'] == ('known_idle_pair' if pair else None)
     if pair:
         assert calls.count('checkpoint') == 4
         assert calls.count('restore') == 4

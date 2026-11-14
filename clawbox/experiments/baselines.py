@@ -59,7 +59,8 @@ def resolve_baseline(name):
 def ensure_supported_experiment(spec):
     """Validate mechanisms independently of user-chosen labels."""
     for p in spec.policies:
-        if p.eviction not in {EvictionPolicy.NONE, EvictionPolicy.WAIT_AWARE_PRESSURE}:
-            raise ValueError('supported eviction policies: none, wait_aware_pressure')
+        if p.eviction not in {EvictionPolicy.NONE, EvictionPolicy.WAIT_AWARE_PRESSURE,
+                              EvictionPolicy.GPU_AWARE_PRESSURE}:
+            raise ValueError('supported eviction policies: none, wait_aware_pressure, gpu_aware_pressure')
         if p.restore not in {RestorePolicy.NONE, RestorePolicy.REACTIVE}:
             raise ValueError('supported restore policies: none, reactive')

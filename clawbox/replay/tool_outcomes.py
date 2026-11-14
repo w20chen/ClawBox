@@ -274,6 +274,16 @@ def match_recorded_tool_failures(
     harmless_failures: list[dict] | None = None,
     unexpected_failures: list[dict] | None = None,
 ) -> list[dict]:
+    return match_tool_failures(load_trace(trace), spans, session_id=session_id,
+        reported_failures=reported_failures, harmless_failures=harmless_failures,
+        unexpected_failures=unexpected_failures)
+
+
+def match_tool_failures(
+    actions, spans: list[dict], *, session_id: str, reported_failures: int,
+    harmless_failures: list[dict] | None = None,
+    unexpected_failures: list[dict] | None = None,
+) -> list[dict]:
     """Classify failures by call identity, command, exit code, and error text.
 
     Audit callers remain strict when ``unexpected_failures`` is omitted. The
@@ -282,7 +292,6 @@ def match_recorded_tool_failures(
     authoritative for benchmark correctness.
     """
     ignored = harmless_failures if harmless_failures is not None else []
-    actions = load_trace(trace)
     expected = {}
     recorded_commands = {}
     for action, following in zip(actions, actions[1:]):

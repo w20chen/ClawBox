@@ -76,7 +76,9 @@ Placement = subset('Placement', ExecutionSpec, PLACEMENT_FIELDS,
                    ], 'round_robin'),
                    template_affinity=(bool, False))
 IdleReclaim = subset('IdleReclaim', ResourcesSpec, RESOURCE_FIELDS['idle_reclaim'],
-                     policy=(Literal['off', 'wait'], 'off'),
+                     policy=(Literal['off', 'wait', 'gpu'], 'off'),
+                     gpu_reclaim_min_remaining_seconds=(float, Field(default=1.0, ge=0, allow_inf_nan=False)),
+                     gpu_signal_max_age_seconds=(float, Field(default=5.0, gt=0, allow_inf_nan=False)),
                      scope=(Literal['tool', 'agent_and_tool'], 'tool'))
 SharedMemory = subset('SharedMemory', ResourcesSpec, RESOURCE_FIELDS['shared_memory'],
                       borrow=(Literal['off', 'hard', 'pressure'], 'off'))
@@ -279,7 +281,10 @@ def lower_arm(design, name, m):
              memory_protection=rt['memory_protection'], cpu_release_boost=rt['cpu_release_boost'],
              idle_release_ranking=False, runtime_snapshot=idle['scope'] == 'agent_and_tool',
              reclamation='snapshot_pause' if snapshots else 'resident',
-             eviction='wait_aware_pressure' if snapshots else 'none', restore='reactive' if snapshots else 'none',
+             eviction='gpu_aware_pressure' if idle['policy'] == 'gpu' else 'wait_aware_pressure' if snapshots else 'none',
+             restore='reactive' if snapshots else 'none',
+             gpu_reclaim_min_remaining_seconds=idle['gpu_reclaim_min_remaining_seconds'],
+             gpu_signal_max_age_seconds=idle['gpu_signal_max_age_seconds'],
              template_aware_placement=pl['template_affinity'], snapshot_aware_residency=snapshots and ck['residency'] == 'value',
              mechanisms=m, resource_overrides=r,
              execution_overrides={key: x[key] for key in (*PLACEMENT_FIELDS, 'placement_policy')})
@@ -638,7 +643,7 @@ def configure_design(raw, options):
     inference = raw['inference']
     if options.get('inference_backend') is not None:
         inference['backend'] = options['inference_backend']
-    for key in ('model', 'base_url', 'api_key_env', 'time_scale', 'openclaw_exec_yield_ms'):
+    for key in ('model', 'base_url', 'api_key_env', 'time_scale', 'openclaw_exec_yield_ms', 'serving_sim_catalog_manifest'):
         if options.get(key) is not None:
             inference.setdefault('configuration', {})[key] = options[key]
     changes = {}

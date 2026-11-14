@@ -11,6 +11,7 @@ import zlib
 import sys
 import threading
 import time
+from concurrent.futures import Future
 from dataclasses import asdict, dataclass, field, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +33,7 @@ class GatewayRequest:
     replay_index: int | None
     request_namespace: str = "default"
     request_fingerprint: str = ""
+    logical_request_id: str = ""
     ready: bool = False
     status_code: int = 0
     content_type: str = "application/json"
@@ -92,26 +94,42 @@ class ModelGateway:
                  max_model_steps: int | None = None,
                  request_namespace: str = "default",
                  content_retention: str = "failures",
+                 serving_sim: Any | None = None,
+                 serving_sim_trace_id: str | None = None,
+                 serving_sim_model_calls: int | None = None,
+                 serving_sim_allow_background: bool = False,
+                 on_model_signal: Callable[[dict], None] | None = None,
                  on_request_started: Callable[[], None] | None = None,
                  before_response_ready: Callable[[int | None, dict[str, Any]], dict[str, Any]] | None = None) -> None:
-        if mode not in {"replay", "api"}:
-            raise ValueError("mode must be replay or api")
+        if mode not in {"replay", "api", "serving_sim"}:
+            raise ValueError("mode must be replay, api or serving_sim")
         if time_scale < 0:
             raise ValueError("time_scale must be non-negative")
         if mode == "replay" and trace is None:
-            raise ValueError("replay mode requires a trace")
+            raise ValueError("trajectory inference requires a trace")
+        if mode == "serving_sim" and (serving_sim is None or not serving_sim_trace_id):
+            raise ValueError("serving_sim requires its host client and catalog trace_id")
+        if mode == "serving_sim" and (type(serving_sim_model_calls) is not int or serving_sim_model_calls < 1):
+            raise ValueError("serving_sim requires a positive model_calls count from its CPU manifest")
         if mode == "api" and (not upstream_base_url or not upstream_api_key or not upstream_model):
             raise ValueError("api mode requires upstream URL, key, and model")
         if content_retention not in {"failures", "all"}:
             raise ValueError("content_retention must be failures or all")
         self.store_path = store_path
         self.mode = mode
+        self.trajectory = mode in {"replay", "serving_sim"}
+        self.serving_sim = serving_sim
+        self.serving_sim_trace_id = serving_sim_trace_id
+        self.on_model_signal = on_model_signal
         self.content_retention = content_retention
-        self.actions = [] if trace is None else load_trace(trace)
+        self.actions = load_trace(trace) if mode == "replay" else []
+        self.source_model_steps = (serving_sim_model_calls if mode == "serving_sim"
+                                   else len(self.actions) if self.trajectory else None)
+        self.serving_sim_allow_background = serving_sim_allow_background
         if max_model_steps is not None and (
-            mode != "replay" or type(max_model_steps) is not int or max_model_steps < 1
+            not self.trajectory or type(max_model_steps) is not int or max_model_steps < 1
         ):
-            raise ValueError("max_model_steps requires replay and a positive integer")
+            raise ValueError("max_model_steps requires a trajectory backend and a positive integer")
         self.max_model_steps = max_model_steps
         self._prefix_stop: dict[str, Any] | None = None
         self.time_scale = time_scale
@@ -218,6 +236,8 @@ class ModelGateway:
                 request.content_type = "application/json"
                 request.response_b64 = ""
                 request.error = "model gateway session closed before response completed"
+                if self.serving_sim is not None:
+                    self.serving_sim.cancel(request.request_id)
                 request.ready = True
                 request.response_released_unix_s = now
                 request.completed_unix_s = now
@@ -230,9 +250,9 @@ class ModelGateway:
         )
         return status, content_type, body
 
-    def complete_http(self, payload: dict[str, Any]) -> tuple[int, str, bytes, str]:
+    def complete_http(self, payload: dict[str, Any], *, logical_request_id: str | None = None) -> tuple[int, str, bytes, str]:
         """Complete an HTTP request and retain its request identity."""
-        return self._complete_with_identity(payload, http_attempt=True)
+        return self._complete_with_identity(payload, http_attempt=True, logical_request_id=logical_request_id)
 
     def _persist_replay_rejection(
         self, *, index: int, actual: Any, expected: Any, reason: str,
@@ -253,7 +273,7 @@ class ModelGateway:
         temporary.replace(rejection)
 
     def _complete_with_identity(
-        self, payload: dict[str, Any], *, http_attempt: bool,
+        self, payload: dict[str, Any], *, http_attempt: bool, logical_request_id: str | None = None,
     ) -> tuple[int, str, bytes, str]:
         if not isinstance(payload.get("messages"), list):
             raise ValueError("messages must be an array")
@@ -263,6 +283,10 @@ class ModelGateway:
             canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         )
         fingerprint = hashlib.sha256(canonical_json.encode()).hexdigest()
+        if logical_request_id is not None and (not isinstance(logical_request_id, str) or not logical_request_id.strip() or len(logical_request_id) > 256):
+            raise ValueError("invalid logical model request ID")
+        if self.mode == "serving_sim" and not logical_request_id:
+            raise ValueError("serving_sim requires the Runtime relay's X-ClawBox-Request-ID")
         started_event: dict[str, Any] | None = None
         with self._changed:
             if self._cancelled.is_set():
@@ -278,7 +302,12 @@ class ModelGateway:
             # An undelivered response may be retried after a broken connection.
             # Once delivered, an identical payload is a new logical model step.
             request = matching[-1] if matching and not matching[-1].delivered else None
-            if request is None and self.mode == "replay":
+            if logical_request_id:
+                request = next((item for item in self._requests.values()
+                                if item.logical_request_id == logical_request_id), None)
+                if request is not None and request.request_fingerprint != fingerprint:
+                    raise ValueError("logical model request ID reused with different payload")
+            if request is None and self.mode == "replay" and not logical_request_id:
                 undelivered = [
                     item for item in self._requests.values() if not item.delivered
                 ]
@@ -287,9 +316,9 @@ class ModelGateway:
                 ):
                     request = undelivered[-1]
             if request is None:
-                index = len(self._requests) if self.mode == "replay" else None
+                index = len(self._requests) if self.trajectory else None
                 if (index is not None and self.max_model_steps is not None
-                        and self.max_model_steps <= len(self.actions)
+                        and self.max_model_steps <= self.source_model_steps
                         and index >= self.max_model_steps):
                     # A harness control response ends OpenClaw only after it
                     # has executed the final selected round's tools. It is not
@@ -298,7 +327,7 @@ class ModelGateway:
                         self._prefix_stop = {
                             "kind": "experiment_prefix_stop", "synthetic": True,
                             "selected_model_steps": self.max_model_steps,
-                            "source_model_steps": len(self.actions),
+                            "source_model_steps": self.source_model_steps,
                             "request_payload": canonical, "delivered": False,
                         }
                     self._persist_prefix_stop()
@@ -307,14 +336,14 @@ class ModelGateway:
                         output={"content": "ClawBox experiment stopped at the configured replay round limit. This is not a task-completion result."})
                     return (*_replay_response(stop, bool(payload.get("stream"))),
                             "experiment-prefix-stop")
-                if index is not None and index >= len(self.actions):
+                if index is not None and index >= self.source_model_steps:
                     self._replay_failure = "trace_exhausted"
                     self._persist_replay_rejection(
                         index=index, actual=canonical, expected=None,
                         reason="trace_exhausted",
                     )
                     raise ValueError("OpenClaw made more model calls than the replay trace contains")
-                if index is not None:
+                if self.mode == "replay":
                     # Recorded model responses drive OpenClaw in order. Tool
                     # outputs remain actual guest outputs, not replay assertions.
                     try:
@@ -332,12 +361,14 @@ class ModelGateway:
                         raise
                 occurrence = len(matching)
                 request_id = hashlib.sha256(
-                    f"{self.request_namespace}\0{fingerprint}\0{occurrence}".encode()
+                    (f"{self.request_namespace}\0logical\0{logical_request_id}" if logical_request_id
+                     else f"{self.request_namespace}\0{fingerprint}\0{occurrence}").encode()
                 ).hexdigest()
                 request = GatewayRequest(
                     request_id, index, started_unix_s=time.time(),
                     request_namespace=self.request_namespace,
                     request_fingerprint=fingerprint,
+                    logical_request_id=logical_request_id or "",
                     request_payload_blob=zlib.compress(canonical_json.encode(), level=1),
                     replay_process_sessions=dict(self._process_sessions),
                 )
@@ -369,9 +400,12 @@ class ModelGateway:
         # lock. The callback must only enqueue work and return immediately.
         if started_event is not None:
             self._emit_request_started(started_event)
-            threading.Thread(
-                target=self._produce, args=(request_id, payload), daemon=True,
-            ).start()
+            if self.mode == 'serving_sim':
+                self._submit_serving_sim(request_id, payload)
+            else:
+                threading.Thread(
+                    target=self._produce, args=(request_id, payload), daemon=True,
+                ).start()
         with self._changed:
             request = self._requests[request_id]
             deadline = time.monotonic() + self.timeout_s
@@ -387,6 +421,8 @@ class ModelGateway:
                     request.content_type = "application/json"
                     request.response_b64 = ""
                     request.error = "model gateway request timed out"
+                    if self.serving_sim is not None:
+                        self.serving_sim.cancel(request_id)
                     request.ready = True
                     request.response_released_unix_s = now
                     request.completed_unix_s = now
@@ -411,15 +447,18 @@ class ModelGateway:
             else:
                 callback(dict(event))
         except Exception as exc:
-            # Do not turn a lifecycle observer failure into an inference
-            # failure. Preserve the error as non-sensitive provenance.
+            # Waiting registration is part of the scheduling policy. Never
+            # submit inference after it fails, or leave reconnecting waiters stuck.
             with self._changed:
                 request = self._requests.get(str(event["request_id"]))
                 if request is not None:
-                    request.admission["request_event_error"] = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                    request.error = f"model request policy failed: {type(exc).__name__}: {exc}"
+                    request.status_code = 500
+                    request.ready = True
+                    request.completed_unix_s = request.response_released_unix_s = time.time()
                     self._persist()
+                    self._changed.notify_all()
+            raise RuntimeError(f"model request policy failed: {exc}") from exc
 
     def mark_delivery(self, request_id: str, *, delivered: bool) -> None:
         """Record whether a host response write survived a guest disconnect."""
@@ -542,7 +581,7 @@ class ModelGateway:
     def replay_completeness(self, *, require_delivery: bool = True) -> dict[str, Any]:
         """Return a strict, auditable completion verdict for this session."""
         records = self.records(include_payload=False)
-        expected = len(self.actions) if self.mode == "replay" else None
+        expected = self.source_model_steps
         prefix = (
             expected is not None
             and self.max_model_steps is not None
@@ -558,11 +597,11 @@ class ModelGateway:
         consumed = (
             sorted(item["replay_index"] for item in records
                    if item.get("replay_index") is not None)
-            if self.mode == "replay" else []
+            if self.trajectory else []
         )
         expected_indices = list(range(expected or 0))
         complete = (
-            self.mode != "replay" or (
+            not self.trajectory or (
                 len(records) == expected
                 and consumed == expected_indices
                 and self._replay_failure is None
@@ -571,13 +610,13 @@ class ModelGateway:
         return {
             "mode": self.mode,
             "scope": "prefix" if prefix else "full",
-            "source_model_steps": len(self.actions) if self.mode == "replay" else None,
+            "source_model_steps": self.source_model_steps,
             "prefix_stop_delivered": bool(self._prefix_stop and self._prefix_stop["delivered"]),
             "observed_logical_model_steps": len(records),
             "expected_replay_model_steps": expected,
             "replay_indices": consumed,
             "replay_entries_consumed_exactly_once": (
-                self.mode != "replay" or consumed == expected_indices
+                not self.trajectory or consumed == expected_indices
             ),
             "tool_output_comparison": "not_performed",
             "replay_failure": self._replay_failure,
@@ -608,9 +647,32 @@ class ModelGateway:
                 if not item.ready
             ]
 
-    def _produce(self, request_id: str, payload: dict[str, Any]) -> None:
+    def _submit_serving_sim(self, request_id: str, payload: dict[str, Any]) -> None:
+        # The shared asyncio client owns all outstanding GPU streams. Allocate
+        # a lifecycle worker only when a response/error actually arrives, not
+        # one blocking producer thread for every waiting inference request.
         with self._changed:
-            self._requests[request_id].production_attempts += 1
+            request = self._requests[request_id]
+            if request.ready or self._cancelled.is_set():
+                return
+            request.production_attempts += 1
+            self._persist()
+        try:
+            future = self.serving_sim.submit(session_id=self.request_namespace, request_id=request_id,
+                trace_id=self.serving_sim_trace_id, call_id=request.replay_index,
+                payload=payload, on_signal=self.on_model_signal, timeout_s=self.timeout_s)
+        except Exception as exc:
+            future = Future()
+            future.set_exception(exc)
+        future.add_done_callback(lambda result: threading.Thread(target=self._produce,
+            args=(request_id, payload, result), name='model-response', daemon=True).start())
+
+    def _produce(self, request_id: str, payload: dict[str, Any], serving_result=None) -> None:
+        with self._changed:
+            if self._requests[request_id].ready or self._cancelled.is_set():
+                return
+            if serving_result is None:
+                self._requests[request_id].production_attempts += 1
             self._persist()
         try:
             if self.mode == "replay":
@@ -623,6 +685,9 @@ class ModelGateway:
                 if self._cancelled.wait(action.duration_s * self.time_scale):
                     return
                 status, content_type, body = _replay_response(action, bool(payload.get("stream")))
+            elif self.mode == "serving_sim":
+                self.serving_sim.check()
+                status, content_type, body = serving_result.result()
             else:
                 forwarded = dict(payload)
                 forwarded["model"] = self.upstream_model
@@ -675,7 +740,7 @@ class ModelGateway:
                         self._requests[request_id].replay_index, message,
                     )
         except Exception as exc:  # surfaced to the waiting guest request
-            status, content_type, body, error, admission = 500, "application/json", b"", str(exc), {}
+            status, content_type, body, error, admission = 500, "application/json", b"", str(exc) or type(exc).__name__, {}
         with self._changed:
             request = self._requests[request_id]
             # The waiter may have made this request terminal while an
@@ -889,6 +954,7 @@ def _response_message(content_type: str, body: bytes) -> dict[str, Any]:
             raise ValueError("model response message is not an object")
         return {key: value for key, value in message.items() if key != "role"}
     content: list[str] = []
+    reasoning: dict[str, list[str]] = {}
     tool_calls: dict[int, dict[str, Any]] = {}
     for raw_line in body.decode("utf-8").splitlines():
         if not raw_line.startswith("data:"):
@@ -896,10 +962,16 @@ def _response_message(content_type: str, body: bytes) -> dict[str, Any]:
         encoded = raw_line[5:].strip()
         if not encoded or encoded == "[DONE]":
             continue
-        for choice in json.loads(encoded).get("choices", []):
+        chunk = json.loads(encoded)
+        if chunk.get("error") is not None:
+            raise ValueError("model response contains an SSE error")
+        for choice in chunk.get("choices", []):
             delta = choice.get("delta") or {}
             if isinstance(delta.get("content"), str):
                 content.append(delta["content"])
+            for key in ("reasoning", "reasoning_content"):
+                if isinstance(delta.get(key), str):
+                    reasoning.setdefault(key, []).append(delta[key])
             for position, fragment in enumerate(delta.get("tool_calls") or []):
                 # Recorded non-streaming responses contain complete tool calls
                 # without the per-fragment ``index`` required by OpenAI's
@@ -919,6 +991,16 @@ def _response_message(content_type: str, body: bytes) -> dict[str, Any]:
                 target["function"]["name"] += str(function.get("name") or "")
                 target["function"]["arguments"] += str(function.get("arguments") or "")
     message: dict[str, Any] = {"content": "".join(content)}
+    message.update({key: "".join(parts) for key, parts in reasoning.items()})
     if tool_calls:
         message["tool_calls"] = [tool_calls[index] for index in sorted(tool_calls)]
     return message
+
+
+def _replace_stream_message(body: bytes, message: dict[str, Any]) -> bytes:
+    """Rebind process handles after generation; retain GPU identity, usage and termination."""
+    chunks = [json.loads(line[5:].strip()) for line in body.decode().splitlines()
+              if line.startswith("data:") and line[5:].strip() not in {"", "[DONE]"}]
+    terminal = chunks[-1]
+    terminal["choices"][0]["delta"] = message
+    return ("data: " + json.dumps(terminal, ensure_ascii=False) + "\n\ndata: [DONE]\n\n").encode()

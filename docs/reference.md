@@ -47,6 +47,7 @@ they rewrite result artifacts.
 | `configure BASE OUTPUT` | Generate an editable specification; `--profile`, `--recipe`, `--set`, `--force`, and the options below. |
 | `import-trace SOURCE --output FILE` | Convert a recording to replay schema 6; workspace mapping and `--python` are optional. |
 | `import-corpus SOURCE --output DIRECTORY` | Import unique tasks; optional `--count`, repeated `--prefer`, workspace mapping, and `--python`. |
+| `prepare-serving-sim SPEC --output DIRECTORY` | Prepare a new GPU catalog and CPU binding manifest from selected replay cases. Optional `--source-map FILE` maps case IDs to original format-5 paths; relative paths use that JSON file's directory. Existing output directories are rejected. |
 | `trace FILE` | Inspect a replay without creating VMs. |
 | `validate SPEC [--inputs]` | Validate the design; `--inputs` also parses and hashes workload/prediction inputs. |
 | `describe SPEC [--json]` | Show VM shapes, policies, budgets, and arm count. |
@@ -72,6 +73,12 @@ explicit mechanism overrides.
 `OUTPUT`. A file already present requires `--force`. Use YAML for fields without a
 dedicated CLI flag.
 
+The default `~/.config/clawbox/host.json` fills missing VM template IDs; it does
+not replace explicit IDs and their image/shape fields already in `BASE`.
+Passing `--profile PATH` explicitly selects that profile's templates, unless
+overridden by template flags. Changing only inference or workload settings
+therefore preserves the experiment's verified templates.
+
 | Group | Options |
 | --- | --- |
 | Design | `--experiment-id`, `--recipe`, `--fixed-methods`, `--checkpoint-axis encoding\|storage\|residency`, repeated `--set GROUP.FIELD=YAML_VALUE` |
@@ -84,7 +91,7 @@ dedicated CLI flag.
 | Snapshots/evidence | `--snapshot-mechanism full-copy\|incremental-cow`, `--snapshot-storage tiered\|warm-only`, `--template-base-sharing-artifact` |
 | Scheduling | `--concurrency` (comma-separated levels), `--arrival-schedule burst\|fixed_stagger\|poisson`, `--stagger-seconds`, `--poisson-arrival-window-fraction`, `--poisson-arrival-window-seconds`, `--random-seed` |
 | Deadlines | `--arm-timeout-seconds`, `--command-timeout-seconds` |
-| Inference | `--inference-backend replay\|api`, `--model`, `--base-url`, `--api-key-env`, `--time-scale` |
+| Inference | `--inference-backend replay\|api\|serving_sim`, `--model`, `--base-url`, `--api-key-env`, `--time-scale`, `--serving-sim-catalog-manifest` |
 | Launch immediately | `--launch`, with `--run-id`, `--qualification-concurrency`, `--force-qualify`, `--detach` |
 
 Schema-4 `--set` accepts mechanism groups and `conditions.FIELD`. Other fields
@@ -353,7 +360,7 @@ validation checks their dependencies.
 | `admission` | `tool: off` (`off`, `fixed`, `predicted`); `startup_headroom_mib: 256`; `admission_margin_mib: 256`; fixed/non-command budgets unset; `prediction_reservation_scale: 1.0`; `small_tool_admission_bypass_mib: 4` |
 | `runtime` | `memory_protection: false`; `cpu_release_boost: false`; `proactive_memory_reclaim: false`; `runtime_poll_interval_seconds: 0.5`; nested `pressure_control` below |
 | `placement` | `policy: round_robin` (`os_default`, `round_robin`, `explicit`, `load_aware`); `template_affinity: false`; `placement_cpu_overcommit: 1024.0`; `template_balance_slack: 0.10`; `session_compute_nodes: []`; Tool-call CPU fields below |
-| `idle_reclaim` | `policy: off` (`off`, `wait`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024` |
+| `idle_reclaim` | `policy: off` (`off`, `wait`, `gpu`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024`; `gpu_reclaim_min_remaining_seconds: 1.0`; `gpu_signal_max_age_seconds: 5.0`. GPU policy requires `serving_sim` and `agent_and_tool`; see the inference options below. |
 | `shared_memory` | `borrow: off` (`off`, `hard`, `pressure`); `borrow_cooldown_seconds: 5`; `return_cooldown_seconds: 5`; `shared_memory_resident_headroom_mib: null` |
 | `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`); transfer limits below |
 | `deployment` | `mode: managed` (`managed`, `os-default`); `resident_capacity_accounting: false`; `lifecycle_reservation_scale: 1.0` |
@@ -796,9 +803,10 @@ reserve, allowing for concurrent builds; verify reclaimed space with `df`
 because reflink copies can share physical blocks.
 
 `agent.driver` defaults to `openclaw`; `inference.backend` defaults to `replay`.
-Replay serves recorded model responses and executes Tools normally. The CLI and
-worker accept `api` provider settings, but current qualification requires replay;
-live API inference has no complete supported launch path. Fields below are in
+Replay serves recorded model responses and executes Tools normally. `serving_sim`
+uses live simulator scheduling and token timing for the adapted responses;
+Tools still execute in real VMs. Qualification accepts replay and serving_sim.
+Live API inference still has no complete supported qualification path. Fields below are in
 `inference.configuration`:
 
 | Field | Default | Meaning |
@@ -806,6 +814,8 @@ live API inference has no complete supported launch path. Fields below are in
 | `model`, `base_url` | Explicit configuration or saved environment | Provider model and endpoint |
 | `api_key_env` | `OPENCLAW_API_KEY` | Name of the host environment variable holding the credential |
 | `time_scale` | 1.0 | Nonnegative multiplier on replayed model delays |
+| `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; configure its `workload.json` with `--workload-manifest`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
+| `serving_sim_topology_digest` | Unset | Expected `topology_digest` returned by the ClawBox adapter's `/v1/clawbox/simulator/info`. Set this to reject a changed topology during matched comparisons; when unset, the actual digest is recorded without an equality requirement. |
 | `runtime_startup_timeout_seconds` | 60 | Integer 1–3600; Runtime setup and sidecar readiness deadline |
 | `runtime_completion_watch_seconds` | 10 | 1–60 seconds per completion notification wait; events wake it immediately |
 | `openclaw_bin` | `openclaw` | Guest executable |
@@ -817,6 +827,89 @@ Put credential values in the environment or selected credential configuration,
 not experiment YAML. A selected `clawtune_config` supplies the endpoint, model,
 and credential in preference to direct provider fields. Model-wait prediction/oracle settings are unsupported;
 checkpoint decisions use actual outstanding model requests.
+
+For `serving_sim`, `base_url` points to one fresh simulator service, with virtual
+clock speed `k=1`. `time_scale` must be absent or 1; recorded delays are not added
+to simulator latency. Use a dedicated `api_key_env` such as `CLAWBOX_SIM_API_KEY`;
+it may be unset when the simulator has no authentication. A provider-specific
+`clawtune_config` must be removed to use the explicit simulator endpoint.
+Launch it with `python3 -m clawbox.integrations.serving_sim` from the ClawBox checkout,
+or the installed `clawbox-serving-sim` command. This adapter imports the unmodified
+GPU application. Adapter protocol 2 adds current-request process-handle mappings
+to the existing chat stream without another per-request round trip. Its management
+paths are `/v1/clawbox/simulator/info` and `/request-signals/clawbox/events`.
+`/v1/clawbox/simulator/tool-outcomes` audits recorded versus actual Tool failures
+only at session finalization when needed. The GPU service retains the recordings;
+CPU sessions retain only actual requests, replies and live process identities.
+Native GPU scheduling and filtered signal APIs remain unchanged.
+
+`prepare-serving-sim` requires the original format-5 source, its adapted CPU trace,
+and the configured prediction artifacts offline. Its new output directory contains
+the GPU catalog/traces, CPU workload/manifest, and separate provenance. Existing
+version-1 bundles must be prepared again. Changed task inputs or prediction
+artifacts require preparation and qualification with a new run ID. These input
+changes do not require host apply, image rebuilding, or retraining by themselves.
+
+| Launcher option | Default / requirement |
+| --- | --- |
+| Command | `setup`, `check`, `smoke`, or `serve`; setup installs dependencies/builds native libraries, check only verifies them |
+| `--sim-root` | Required absolute path to the original GPU checkout; do not install ClawBox patches there |
+| `--venv` | `SIM_VENV`, otherwise `~/.cache/clawbox/serving-sim/venv`; use a dedicated Python environment |
+| `--cores` | 4 real logical CPUs selected from allowed affinity; prefix with `taskset -c CPU_LIST` on a shared host |
+| `--topology` | `8A`; simulated GPU topology, independent of real CPU count |
+| `--trace-catalog` | Required by serve; use the prepared bundle's catalog |
+| `--out` | Required new directory for serve/smoke; preserve completed outputs |
+| `--persistence` | `native`: preserve per-request cumulative reports. `final`: defer those reports until graceful shutdown, avoiding repeated serialization of the entire run; only affects serve. Stop with Ctrl-C/SIGTERM and verify `clawbox-persistence.json` reports `finalized: true`. Abrupt termination loses deferred reports. Record this choice and use a new run ID when changing it; no rebuild or retraining required. |
+| `--host`, `--port` | `127.0.0.1`, `8000` |
+| `--k`, `--v0` | Virtual clock speed 1 and initial virtual seconds 0; real CPU runs require k=1 |
+| `--api-key-env` | `CLAWBOX_SIM_API_KEY`; unset means no authentication |
+| `--tokenizer-dir` | Unset; use the simulator's validated pinned metadata cache |
+| `--ssl-keyfile`, `--ssl-certfile` | Unset; optional TLS file paths |
+
+Prerequisites are Linux x86-64 or ARM64 (ARM64 glibc >= 2.38), bootstrap Python 3.12+,
+uv, git, Cargo/Rust with edition-2024 support, a C/C++ compiler and working Docker.
+ClawBox supplies the ARM hash lock with the upstream package versions; x86-64 uses
+the upstream lock. Setup reuses complete pinned metadata (`HF_HOME` controls its cache).
+`GLOO_SOCKET_IFNAME` defaults to `lo` only in this launcher. Reuse these explicit
+environment/cache settings in fresh shells; existing verified environments need only check.
+The adapter does not rebuild VM images or retrain ClawTune. Native dependency changes
+require setup; changing service settings requires a fresh service and new run ID/qualification.
+
+Use a separate fresh service for qualification, then restart
+it before a formal arm so KV state cannot leak across arms. Qualification uses
+the first model call and real Tool execution per case. It does not establish
+target-concurrency capacity or validate GPU hardware.
+The separate snapshot probe checks the configured VM pair's checkpoint/restore
+capability using a known idle pair; it does not establish GPU-triggered reclaim
+or `think_end` restoration coverage.
+The topology digest covers expanded topology settings; it does not identify
+native source code, tokenizer files or cost-model assets. Freeze those inputs
+separately and retain the simulator's native configuration and validity outputs.
+
+`mechanisms.idle_reclaim.policy: gpu` requires `inference.backend: serving_sim`
+and `scope: agent_and_tool`. Its editable options are:
+
+| Field under `mechanisms.idle_reclaim` | Default | Meaning |
+| --- | --- | --- |
+| `gpu_reclaim_min_remaining_seconds` | 1.0 seconds | Minimum remaining queue/prefill estimate for pressure-driven checkpoint selection; nonnegative. This is not a decode-completion prediction. |
+| `gpu_signal_max_age_seconds` | 5.0 seconds | Maximum age of a usable GPU estimate; strictly positive. Missing, expired or unmodelled estimates cannot authorize GPU-aware reclaim. |
+
+The policy uses observed `queued.est_wait_s` for A/P workers, excluding remote KV
+transfer waits, and discounts elapsed time. `think_end` from the answer worker
+(A/D) requests pre-restore of both Runtime and Tool once, before the full response
+or a Tool command arrives. Runtime restores first, including its model relay;
+Tool then restores in the selected compute domain and its telemetry bridge is
+checked. Both restores use ordinary lifecycle memory admission; already resident
+VMs are skipped. Commands still require their normal prediction, growth admission
+and current SSH identity checks. Missing recorded reasoning counts remain unknown and cannot
+provide a trace-based `think_end`. Response completion restores Runtime when
+needed. Signal loss or epoch changes fail the arm without selecting another
+reclaim policy.
+
+Changing the bundle, simulator settings or GPU policy requires a new run ID and
+matching qualification. These settings alone require no VM image rebuild, host
+apply or ClawTune retraining. A changed Runtime/Tool environment follows the
+existing image and qualification rules. Keep original traces and prior runs.
 
 `measurement.memory_sample_interval_seconds` defaults to 0.2,
 `stabilization_seconds` to 1, and `observe_predictions` to `false`.

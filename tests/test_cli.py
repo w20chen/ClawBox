@@ -56,7 +56,7 @@ def test_public_cli_contains_only_experiment_group() -> None:
         "baselines", "configure", "describe", "validate", "plan", "run", "status",
         "setup", "doctor", "qualify", "resume", "abort", "destroy", "collect",
         "trace", "import-trace", "import-corpus", "train", "images", "report", "launch", "host", "recipes", "schema",
-        "prove-template-sharing", "snapshot-storage", "base-cache",
+        "prove-template-sharing", "snapshot-storage", "base-cache", "prepare-serving-sim",
     }
 
 
@@ -534,6 +534,35 @@ def test_configure_uses_the_setup_host_profile(tmp_path, capsys) -> None:
     assert configured["resources"]["local_memory_capacity_mib"] == 65536
     assert configured["resources"]["warm_memory_capacity_mib"] == 131072
     assert configured["resources"]["warm_snapshot_root"] == "/mnt/clawbox-warm"
+
+
+@pytest.mark.parametrize('recipe', [None, 'custom'])
+def test_configure_preserves_saved_templates_against_implicit_host_profile(tmp_path, monkeypatch, capsys, recipe):
+    base = yaml.safe_load(Path('examples/experiments/getting-started.yaml').read_text())
+    profile = dict(local_memory_capacity_mib=16384, cold_root='/data/clawbox/cold',
+                   local_memory_cgroup='/sys/fs/cgroup/cube_sandbox/sandbox', local_numa_node=0)
+    for role in ('runtime', 'sandbox'):
+        base[role].update(template_id=role + '-verified', template_alias=None,
+            source_image_reference='registry/' + role + ':verified', image_digest='sha256:' + 'a' * 64)
+        profile[role] = {**base[role], 'template_id': role + '-old-profile',
+                         'image_digest': 'sha256:' + 'b' * 64, 'memory_mib': 8192}
+    source = tmp_path / 'base.yaml'
+    source.write_text(yaml.safe_dump(base))
+    host_profile = tmp_path / '.config/clawbox/host.json'
+    host_profile.parent.mkdir(parents=True)
+    host_profile.write_text(json.dumps(profile))
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path))
+    output = tmp_path / 'configured.yaml'
+    options = ['--recipe', recipe] if recipe else []
+    assert cli.main(['experiment', 'configure', str(source), str(output), '--model', 'new-model', *options]) == 0
+    configured = yaml.safe_load(output.read_text())
+    configured = configured.get('environment', configured)
+    for role in ('runtime', 'sandbox'):
+        for key in ('template_id', 'image_digest', 'source_image_reference', 'memory_mib', 'vcpu'):
+            assert configured[role][key] == base[role][key]
+    assert cli.main(['experiment', 'configure', str(source), str(tmp_path / 'resized.yaml'),
+                     '--runtime-memory-gib', '8']) == 1
+    assert 'requires a new Runtime template' in capsys.readouterr().err
 
 
 def test_configure_wait_checkpoint_needs_no_llm_prediction_or_idle_costs(tmp_path, capsys):
