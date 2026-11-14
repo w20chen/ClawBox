@@ -49,7 +49,8 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
             if self.path == "/v1/clawbox/simulator/info":
                 body = json.dumps({"ready": True, "clock": {"k": 1},
                     "adapter_protocol": 2,
-                    "traces": {"trace": {"model_calls": 1, "missing_reasoning_calls": 1}},
+                    "traces": {"trace": {"model_calls": 1,
+                        "missing_reasoning_calls": int(state.mode == "no_reasoning")}},
                     "accepted_requests": 0, "catalog_digest": "catalog",
                     "service_id": "epoch", "server_wall_time": time.time() + clock_offset_s,
                     "signals": {"head": "epoch:0"}, **(info_override or {})}).encode()
@@ -95,8 +96,10 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
                 self.wfile.write(b'data: {"partial":')
                 self.wfile.flush()
                 return
+            signal_fields = (dict(event="first_token") if state.mode == "no_reasoning"
+                             else dict(event="think_end", source="trace"))
             state.signals.put(("signal", "epoch:1", dict(
-                event="think_end", role="A", engine_id="card-0", source="trace",
+                **signal_fields, role="A", engine_id="card-0",
                 session_id=body["session_id"], request_id=body["request_id"],
                 wall_t=time.time() + clock_offset_s, t=1.)))
             try:
@@ -133,11 +136,11 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
 
 @pytest.fixture
 def client_factory(monkeypatch, tmp_path):
-    monkeypatch.setattr("clawbox.experiments.serving_sim_inputs.load_serving_sim_manifest",
-                        lambda *_args, **_kwargs: {"catalog": {"catalog_digest": "catalog"},
-                            "cases": [dict(case_id='case', trace_id='trace', model_calls=1, missing_reasoning_calls=1)]})
-
     def make(server):
+        monkeypatch.setattr("clawbox.experiments.serving_sim_inputs.load_serving_sim_manifest",
+                            lambda *_args, **_kwargs: {"catalog": {"catalog_digest": "catalog"},
+                                "cases": [dict(case_id='case', trace_id='trace', model_calls=1,
+                                               missing_reasoning_calls=int(server.mode == "no_reasoning"))]})
         return ServingSimClient({"base_url": server.url, "model": "test-model",
             "serving_sim_catalog_manifest": str(tmp_path / "manifest.json")}, "", tmp_path / "client")
 
@@ -195,6 +198,28 @@ def test_host_observes_think_end_while_response_stream_is_still_running(client_f
             assert status == 200 and content_type == "text/event-stream"
             assert b"actual GPU output" in body
             assert body.endswith(b"data: [DONE]\n\n")
+
+
+def test_missing_reasoning_completes_without_think_end_or_cpu_trace(client_factory):
+    observed, records = Event(), []
+
+    def callback(record):
+        records.append(record)
+        observed.set()
+
+    with simulator("no_reasoning") as server, client_factory(server) as client:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(complete, client, callback)
+            try:
+                assert observed.wait(2)
+                assert [r["event"] for r in records] == ["first_token"]
+                assert not pending.done()
+            finally:
+                server.finish.set()
+            status, _, body = pending.result(timeout=2)
+            assert status == 200
+            assert b"actual GPU output" in body
+            assert len(server.posts) == 1
 
 
 @pytest.mark.parametrize("clock_offset_s", [-120., 120.])

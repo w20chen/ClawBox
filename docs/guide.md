@@ -1137,9 +1137,14 @@ GPU reports. This changes reporting only, with no host apply, image rebuild or
 retraining. Keep both GPU output and the CPU run directory. The CPU records actual
 Tool work, VM lifecycle and transport observations; the simulator records its
 predicted GPU timeline. Inspect wall-clock delivery lag before interpreting a
-large-concurrency result. Missing reasoning observations may leave reactive
-restore as the only restoration trigger for a real trace; use a separately
-labelled synthetic protocol check to test `think_end` handling when needed.
+large-concurrency result. When a call has no recorded reasoning-token count,
+the native simulator emits no `think_end`; ClawBox continues with reactive
+restore. It does not read the CPU trace, infer a boundary from the first output
+token, or treat missing counts as zero. For this simulator backend, only an
+online `think_end` marked `source: trace` can request prewarm; other sources are
+logged but ignored by the policy. Calls with valid boundaries in a mixed
+workload still prewarm normally. Use a separately labelled synthetic protocol
+check to test `think_end` handling when needed.
 
 With the GPU policy, `think_end` starts pre-restoring both VMs: Runtime first
 (including its model connection), then Tool and its telemetry bridge. Restoration

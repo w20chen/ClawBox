@@ -304,6 +304,13 @@ class PolicyCoordinator:
             phase, role = event.get("event"), event.get("role")
             if role not in {"A", "P", "D"}:
                 return {**result, "reason": "unknown_engine_role"}
+            # This policy uses serving_sim's online boundary event, never CPU
+            # trace lookups or catalog-wide reasoning counts. Its native engine
+            # emits source=trace only when a recorded reasoning boundary exists;
+            # missing counts produce no think_end. Ignore unsupported provenance
+            # without changing the current wait or its reclaim eligibility.
+            if phase == "think_end" and event.get("source") != "trace":
+                return {**result, "reason": "unobserved_reasoning_boundary"}
             # The transport supplies the feed sequence when available. A replayed
             # event must not renew an old estimate or repeat a prewarm action.
             engine = str(event.get("engine_id", role))

@@ -29,7 +29,7 @@ def waiting(c, sid="session", rid="request"):
 def signal(c, *, sid="session", rid="request", event="queued", role="A", **fields):
     return c.observe_gpu_signal(sid, rid, {
         "request_id": rid, "session_id": sid, "event": event,
-        "role": role, "engine_id": role, **fields,
+        "role": role, "engine_id": role, "source": "trace", **fields,
     })
 
 
@@ -100,6 +100,25 @@ def test_think_end_prewarms_only_once_and_never_the_prefill_leg():
     c.complete_model_wait("session", "request")
     assert not c.wait_for_gpu_prewarm("session", "request")
     assert not signal(c, event="think_end")["accepted"]
+
+
+@pytest.mark.parametrize("source", [None, "token", "unknown"])
+def test_unobserved_think_end_does_not_change_wait_or_block_later_valid_boundary(source):
+    c = coordinator()
+    waiting(c)
+    signal(c, est_wait_s=30, signal_sequence=1)
+    event = dict(session_id="session", request_id="request", event="think_end",
+                 role="A", engine_id="A", signal_sequence=2)
+    if source is not None:
+        event["source"] = source
+    decision = c.observe_gpu_signal("session", "request", event)
+    assert decision == dict(accepted=False, should_prewarm=False,
+                            reason="unobserved_reasoning_boundary")
+    assert not c.wait_for_gpu_prewarm("session", "request")
+    victim = c.victim_for_restore("other")
+    assert victim is not None
+    c.release_victim(victim)
+    assert signal(c, event="think_end", signal_sequence=3)["should_prewarm"]
 
 
 def test_new_model_wait_rejects_previous_signals_and_clears_prewarm():

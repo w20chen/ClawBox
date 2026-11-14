@@ -901,8 +901,14 @@ or a Tool command arrives. Runtime restores first, including its model relay;
 Tool then restores in the selected compute domain and its telemetry bridge is
 checked. Both restores use ordinary lifecycle memory admission; already resident
 VMs are skipped. Commands still require their normal prediction, growth admission
-and current SSH identity checks. Missing recorded reasoning counts remain unknown and cannot
-provide a trace-based `think_end`. Response completion restores Runtime when
+and current SSH identity checks. Missing recorded reasoning counts remain unknown:
+the native simulator emits no `think_end` for that call. ClawBox only uses online
+`think_end` events marked `source: trace` for this backend; absent or other source
+values are ignored with `unobserved_reasoning_boundary`. This event marker does
+not give the CPU access to traces or reasoning counts. No boundary is inferred
+from `first_token`, and missing counts do not disable valid events from other
+calls. This behavior is automatic under the existing `policy: gpu` setting.
+Response completion restores Runtime when
 needed. Signal loss or epoch changes fail the arm without selecting another
 reclaim policy.
 
