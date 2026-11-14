@@ -14,14 +14,21 @@ SUFFIX = ".zstd-pages.json"
 DIRECTORY_SUFFIX = ".zstd-pages"
 
 
-def _allocated(path: Path) -> int:
-    stat = path.stat()
+def _allocated(path: Path, stat: os.stat_result | None = None) -> int:
+    stat = stat or path.stat()
     return int(stat.st_blocks) * 512
 
 
 def _atomic_json(path: Path, value: Any) -> None:
     temporary = Path(str(path) + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    data = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    with temporary.open("w", encoding="utf-8") as output:
+        output.write(data)
+        output.flush()
+        # The manifest accounts for its own physical allocation. Delayed
+        # allocation can otherwise make st_blocks change while this function is
+        # still iterating, producing a false non-convergence failure.
+        os.fsync(output.fileno())
     os.replace(temporary, path)
 
 
@@ -46,13 +53,10 @@ def _run(binary: str, operation: str, source: Path, destination: Path) -> dict[s
 
 
 def _owned_groups(snapshot: Path) -> tuple[list[list[Path]], int]:
-    sidecar = Path(str(snapshot) + ".lineage.json")
     candidates: list[Path] = [snapshot]
-    if sidecar.exists():
-        lineage = json.loads(sidecar.read_text(encoding="utf-8"))
-        for layer in lineage.get("layers") or []:
-            if layer.get("external_path") is None:
-                candidates.append(Path(str(snapshot) + ".layers") / str(layer["name"]))
+    layers = Path(str(snapshot) + ".layers")
+    if layers.is_dir():
+        candidates.extend(sorted(layers.glob("*.mem")))
     groups: dict[tuple[int, int], list[Path]] = {}
     for path in candidates:
         if not path.exists():
@@ -72,6 +76,36 @@ def _owned_groups(snapshot: Path) -> tuple[list[list[Path]], int]:
     return safe, skipped
 
 
+def apply_compression_accounting(
+    native_snapshot_metrics: dict[str, Any] | None,
+    compression: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace raw owned-layer allocation with the compressed representation.
+
+    The native manifest allocation also contains lineage sidecars and any
+    shared/external files that compression intentionally skipped. Subtract only
+    the raw owned-layer baseline and add the compressed container+manifest.
+    """
+    metrics = dict(native_snapshot_metrics or {})
+    allocated = compression.get("raw_native_allocated_bytes")
+    if type(allocated) is not int:
+        allocated = metrics.get("allocated_bytes")
+    baseline = compression.get("baseline_allocated_bytes")
+    compressed = compression.get("compressed_allocated_bytes")
+    if type(allocated) is not int or type(baseline) is not int or type(compressed) is not int:
+        return metrics
+    adjusted = max(0, allocated - baseline + compressed)
+    metrics["raw_allocated_bytes"] = allocated
+    metrics["allocated_bytes"] = adjusted
+    private_delta = metrics.get("private_delta_bytes")
+    if type(private_delta) is not int:
+        private_delta = baseline
+    if type(private_delta) is int:
+        metrics["raw_private_delta_bytes"] = private_delta
+        metrics["private_delta_bytes"] = max(0, private_delta - baseline + compressed)
+    return metrics
+
+
 def compression_manifest(path: str | Path) -> Path:
     return Path(str(path) + SUFFIX)
 
@@ -86,8 +120,45 @@ def read_compressed_snapshot_metadata(path: str | Path) -> dict[str, Any] | None
         return None
     document = json.loads(manifest.read_text(encoding="utf-8"))
     native = dict(document.get("native_snapshot_metrics") or {})
-    native["compression"] = dict(document["metrics"])
+    compression = dict(document["metrics"])
+    if "compressed_container_allocated_bytes" in compression:
+        compression = _refresh_manifest_accounting(
+            compression, _allocated(manifest),
+        )
+    # The manifest records the representation it replaced. Older manifests may
+    # already contain adjusted fields and preserve the original values in the
+    # raw_* keys. Reconstruct the raw accounting before applying the current
+    # manifest allocation so a restart never trusts a stale self-reference.
+    if "raw_allocated_bytes" in native:
+        native["allocated_bytes"] = native["raw_allocated_bytes"]
+    if "raw_private_delta_bytes" in native:
+        native["private_delta_bytes"] = native["raw_private_delta_bytes"]
+    native = apply_compression_accounting(native, compression)
+    native["compression"] = compression
     return native
+
+
+def _refresh_manifest_accounting(
+    metrics: dict[str, Any], manifest_bytes: int,
+) -> dict[str, Any]:
+    refreshed = dict(metrics)
+    containers = int(
+        refreshed.get("compressed_container_allocated_bytes") or 0
+    )
+    baseline = int(refreshed.get("baseline_allocated_bytes") or 0)
+    compressed = containers + manifest_bytes
+    refreshed["compression_manifest_allocated_bytes"] = manifest_bytes
+    refreshed["compressed_allocated_bytes"] = compressed
+    refreshed["saved_allocated_bytes"] = baseline - compressed
+    refreshed["space_saving_fraction"] = (
+        refreshed["saved_allocated_bytes"] / baseline if baseline else 0.0
+    )
+    wall_seconds = float(refreshed.get("compress_wall_seconds") or 0.0)
+    logical_bytes = int(refreshed.get("logical_bytes") or 0)
+    refreshed["compress_logical_mib_per_second"] = (
+        logical_bytes / 1048576 / wall_seconds if wall_seconds else 0.0
+    )
+    return refreshed
 
 
 def compress_snapshot(path: str | Path, *, binary: str,
@@ -95,7 +166,10 @@ def compress_snapshot(path: str | Path, *, binary: str,
     snapshot = Path(path)
     manifest_path = compression_manifest(snapshot)
     if manifest_path.exists():
-        return json.loads(manifest_path.read_text(encoding="utf-8"))["metrics"]
+        metrics = json.loads(manifest_path.read_text(encoding="utf-8"))["metrics"]
+        if "compressed_container_allocated_bytes" in metrics:
+            return _refresh_manifest_accounting(metrics, _allocated(manifest_path))
+        return metrics
     groups, shared_skipped = _owned_groups(snapshot)
     if not groups:
         raise RuntimeError(f"snapshot has no exclusively owned RAM layer to compress: {snapshot}")
@@ -116,6 +190,19 @@ def compress_snapshot(path: str | Path, *, binary: str,
                 "container": str(container),
                 "metrics": metrics,
             })
+        raw_unique: dict[tuple[int, int], int] = {}
+        raw_candidates = [snapshot]
+        layers_dir = Path(str(snapshot) + ".layers")
+        if layers_dir.is_dir():
+            raw_candidates.extend(sorted(layers_dir.glob("*.mem")))
+        sidecar = Path(str(snapshot) + ".lineage.json")
+        if sidecar.exists():
+            raw_candidates.append(sidecar)
+        for path in raw_candidates:
+            if not path.exists():
+                continue
+            stat = path.stat()
+            raw_unique[(stat.st_dev, stat.st_ino)] = _allocated(path, stat)
         baseline = sum(int(item["metrics"]["input_allocated_bytes"]) for item in records)
         containers = sum(_allocated(Path(item["container"])) for item in records)
         aggregate = {
@@ -124,6 +211,7 @@ def compress_snapshot(path: str | Path, *, binary: str,
             "chunk_size": records[0]["metrics"]["chunk_size"],
             "group_count": len(records),
             "shared_allocated_bytes_skipped": shared_skipped,
+            "raw_native_allocated_bytes": sum(raw_unique.values()),
             "baseline_allocated_bytes": baseline,
             "compressed_container_allocated_bytes": containers,
             "hole_chunks": sum(int(item["metrics"]["hole_chunks"]) for item in records),
@@ -138,22 +226,37 @@ def compress_snapshot(path: str | Path, *, binary: str,
             "started_unix_s": started,
             "completed_unix_s": time.time(),
         }
-        document = {"schema_version": 1, "snapshot_path": str(snapshot), "groups": records,
-                    "metrics": aggregate,
-                    "native_snapshot_metrics": dict(native_snapshot_metrics or {})}
+        raw_native_metrics = dict(native_snapshot_metrics or {})
+        aggregate = _refresh_manifest_accounting(aggregate, 0)
+        document = {
+            "schema_version": 1,
+            "snapshot_path": str(snapshot),
+            "groups": records,
+            "metrics": aggregate,
+            "native_snapshot_metrics": apply_compression_accounting(
+                raw_native_metrics, aggregate,
+            ),
+        }
         _atomic_json(manifest_path, document)
-        aggregate["compression_manifest_allocated_bytes"] = _allocated(manifest_path)
-        aggregate["compressed_allocated_bytes"] = containers + aggregate["compression_manifest_allocated_bytes"]
-        aggregate["saved_allocated_bytes"] = baseline - aggregate["compressed_allocated_bytes"]
-        aggregate["space_saving_fraction"] = (
-            aggregate["saved_allocated_bytes"] / baseline if baseline else 0.0
+        aggregate = _refresh_manifest_accounting(
+            aggregate, _allocated(manifest_path),
         )
-        aggregate["compress_logical_mib_per_second"] = (
-            aggregate["logical_bytes"] / 1048576 / aggregate["compress_wall_seconds"]
-            if aggregate["compress_wall_seconds"] else 0.0
-        )
-        document["metrics"] = aggregate
+        document = {
+            "schema_version": 1,
+            "snapshot_path": str(snapshot),
+            "groups": records,
+            "metrics": aggregate,
+            "native_snapshot_metrics": apply_compression_accounting(
+                raw_native_metrics, aggregate,
+            ),
+        }
         _atomic_json(manifest_path, document)
+        # A filesystem can choose a different allocation for the final JSON
+        # representation. The returned accounting must describe that actual
+        # file; readers perform the same correction from the persisted stat.
+        aggregate = _refresh_manifest_accounting(
+            aggregate, _allocated(manifest_path),
+        )
         for record in records:
             for raw in record["paths"]:
                 Path(raw).unlink(missing_ok=True)

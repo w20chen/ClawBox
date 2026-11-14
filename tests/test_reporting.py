@@ -5,7 +5,7 @@ import json
 from types import SimpleNamespace
 
 from clawbox.experiments.reporting import render_run_report, write_run_report_artifacts
-from clawbox.experiments.reporting import _offered_capacity_text
+from clawbox.experiments.reporting import _offered_capacity_text, _warm_metrics
 from clawbox.experiments.spec import SandboxSpec, WorkloadCase, WorkloadSpec
 
 
@@ -93,6 +93,27 @@ def test_report_includes_policy_memory_prediction_and_warm_evidence(tmp_path) ->
     assert "frozen_clawbox_p50:20" in report
     assert "Cross-NUMA traffic bytes: unavailable" in report
     assert "not a traffic-byte measurement" in report
+
+
+def test_warm_metrics_counts_distinct_managed_dependencies_without_duplication(tmp_path) -> None:
+    events = tmp_path / "events.jsonl"
+    events.write_text(json.dumps({
+        "event": "sandbox_paused",
+        "lifecycle_timing": {"snapshot_metrics": {
+            "transferred_bytes": 4096,
+            "private_delta_bytes": 4096,
+            "external_layer_allocations": [
+                {"identity": "8:1", "allocated_bytes": 8192},
+                {"identity": "8:2", "allocated_bytes": 16384},
+            ],
+        }},
+    }) + "\n", encoding="utf-8")
+
+    metrics = _warm_metrics(str(events))
+
+    assert metrics["private_delta_bytes"] == 4096
+    assert metrics["base_reference_count"] == 2
+    assert metrics["unique_base_backing_bytes"] == 8192 + 16384
 
 
 def test_report_writes_plot_ready_memory_trace_and_repetition_summary(tmp_path) -> None:

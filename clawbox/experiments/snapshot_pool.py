@@ -48,6 +48,13 @@ class SnapshotManifest:
     dependency_count: int = 0
     expected_reuse_probability: float | None = None
     retention_value_seconds: float = 0.0
+    compressed_allocated_bytes: int = 0
+    raw_allocated_bytes: int = 0
+    expansion_allocated_bytes: int = 0
+    runtime_reserved_bytes: int = 0
+    owned_logical_bytes: int = 0
+    owned_allocated_bytes: int = 0
+    expanded: bool = True
 
 
 class WarmSnapshotPool:
@@ -120,6 +127,7 @@ class WarmSnapshotPool:
         self._changed = Condition(self._lock)
         self._admission_lock = Lock()
         self._reservations: dict[SnapshotKey, int] = {}
+        self._expansion_reservations: dict[SnapshotKey, int] = {}
         self._borrow_reservations: dict[str, int] = {}
         # A new rebind keeps its complete configured footprint charged until a
         # post-rebind parent-cgroup observation proves its physical residency.
@@ -176,6 +184,11 @@ class WarmSnapshotPool:
     def reserved_bytes(self) -> int:
         with self._lock:
             return sum(self._reservations.values())
+
+    @property
+    def expansion_reserved_bytes(self) -> int:
+        with self._lock:
+            return sum(self._expansion_reservations.values())
 
     @property
     def committed_bytes(self) -> int:
@@ -292,11 +305,25 @@ class WarmSnapshotPool:
                private_delta_bytes: int = 0,
                dependency_count: int = 0,
                expected_reuse_probability: float | None = None,
-               retention_value_seconds: float = 0.0) -> SnapshotManifest:
+               retention_value_seconds: float = 0.0,
+               compressed_allocated_bytes: int = 0,
+               raw_allocated_bytes: int | None = None,
+               expansion_allocated_bytes: int = 0,
+               owned_logical_bytes: int = 0,
+               owned_allocated_bytes: int = 0,
+               expanded: bool | None = None) -> SnapshotManifest:
         if logical_bytes < 0 or allocated_bytes < 0 or (
             transferred_bytes is not None and transferred_bytes < 0
         ):
             raise ValueError("snapshot byte counts must be non-negative")
+        if compressed_allocated_bytes < 0 or expansion_allocated_bytes < 0:
+            raise ValueError("compression byte counts must be non-negative")
+        if raw_allocated_bytes is None:
+            raw_allocated_bytes = allocated_bytes
+        if raw_allocated_bytes < 0:
+            raise ValueError("raw snapshot allocation must be non-negative")
+        if expanded is None:
+            expanded = compressed_allocated_bytes == 0
         with self._lock:
             predecessor = self._manifests.get(replaces) if replaces is not None else None
             if replaces is not None and (
@@ -327,6 +354,12 @@ class WarmSnapshotPool:
                 dependency_count=dependency_count,
                 expected_reuse_probability=expected_reuse_probability,
                 retention_value_seconds=retention_value_seconds,
+                compressed_allocated_bytes=compressed_allocated_bytes,
+                raw_allocated_bytes=raw_allocated_bytes,
+                expansion_allocated_bytes=expansion_allocated_bytes,
+                owned_logical_bytes=owned_logical_bytes,
+                owned_allocated_bytes=owned_allocated_bytes,
+                expanded=expanded,
             )
             self._manifests[key] = manifest
             if predecessor is not None:
@@ -337,6 +370,139 @@ class WarmSnapshotPool:
             self._assert_capacity_locked()
             self._changed.notify_all()
             return manifest
+
+    def reserve_expansion_for_restore(
+        self, key: SnapshotKey, upper_bound_bytes: int, *,
+        timeout_s: float = 120,
+    ) -> int:
+        """Reserve raw expansion space and spill unrelated snapshots if needed.
+
+        The compressed manifest remains charged while its raw files are being
+        materialized. The reservation covers the additional peak allocation.
+        Callers must pin ``key`` with ``consume_guard`` first so the target
+        cannot be selected as a spill victim.
+        """
+        if upper_bound_bytes <= 0:
+            return 0
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                item = self._manifests.get(key)
+                if item is None:
+                    raise RuntimeError(f"snapshot generation is not committed: {key}")
+                if item.pinned <= 0:
+                    raise RuntimeError(
+                        f"snapshot expansion requires a consumer pin: {key}"
+                    )
+                existing = self._expansion_reservations.get(key, 0)
+            additional = max(0, upper_bound_bytes - existing)
+            try:
+                with self._admission_lock:
+                    spill = self.spill_for_admission(additional, exclude={key})
+                    with self._lock:
+                        item = self._manifests.get(key)
+                        if item is None:
+                            raise RuntimeError(f"snapshot generation disappeared: {key}")
+                        existing = self._expansion_reservations.get(key, 0)
+                        additional = max(0, upper_bound_bytes - existing)
+                        if self._usage_locked() + additional > self.capacity_bytes:
+                            raise WarmCapacityError(
+                                "WARM expansion requires capacity that cannot be reclaimed"
+                            )
+                        self._expansion_reservations[key] = existing + additional
+                        self._assert_capacity_locked()
+                        self._changed.notify_all()
+                        return len(spill)
+            except WarmSnapshotTooLarge:
+                raise
+            except WarmCapacityError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                with self._changed:
+                    self._changed.wait(timeout=min(remaining, 0.2))
+
+    def reserve_selected_expansion(self, key: SnapshotKey, upper_bound_bytes: int) -> None:
+        """Reserve expansion for a victim already selected under admission lock."""
+        if upper_bound_bytes <= 0:
+            return
+        with self._lock:
+            if key not in self._manifests:
+                raise RuntimeError(f"snapshot generation is not committed: {key}")
+            if self._manifests[key].pinned <= 0:
+                raise RuntimeError(
+                    f"snapshot spill expansion requires a spill pin: {key}"
+                )
+            existing = self._expansion_reservations.get(key, 0)
+            additional = max(0, upper_bound_bytes - existing)
+            if self._usage_locked() + additional > self.capacity_bytes:
+                raise WarmCapacityError(
+                    "compressed spill cannot expand without exceeding WARM capacity"
+                )
+            self._expansion_reservations[key] = existing + additional
+            self._changed.notify_all()
+
+    def finish_expansion(
+        self, key: SnapshotKey, raw_allocated_bytes: int, *,
+        runtime_upper_bound_bytes: int = 0,
+        owned_allocated_bytes: int = 0,
+        retained_by_vm: bool = False,
+    ) -> SnapshotManifest:
+        """Replace expansion reservation and compressed charge with raw bytes."""
+        if raw_allocated_bytes < 0:
+            raise ValueError("raw snapshot allocation must be non-negative")
+        with self._lock:
+            item = self._manifests[key]
+            reserved = self._expansion_reservations.pop(key, None)
+            if reserved is None:
+                if item.expanded and item.allocated_bytes == raw_allocated_bytes:
+                    if retained_by_vm:
+                        item.retained_by_vm = True
+                    return item
+                raise RuntimeError(f"snapshot expansion was not reserved: {key}")
+            runtime_reserved = max(
+                0, runtime_upper_bound_bytes - owned_allocated_bytes
+            )
+            if raw_allocated_bytes + runtime_reserved > item.allocated_bytes + reserved:
+                self._expansion_reservations[key] = reserved
+                raise RuntimeError(
+                    f"raw expansion {raw_allocated_bytes} plus runtime reserve "
+                    f"{runtime_reserved} exceeds reserved peak "
+                    f"{item.allocated_bytes + reserved}"
+                )
+            item.allocated_bytes = raw_allocated_bytes
+            item.raw_allocated_bytes = raw_allocated_bytes
+            item.compressed_allocated_bytes = 0
+            item.expansion_allocated_bytes = 0
+            item.runtime_reserved_bytes = runtime_reserved
+            item.expanded = True
+            item.retained_by_vm = retained_by_vm
+            self._assert_capacity_locked()
+            self._changed.notify_all()
+            return item
+
+    def validate_expanded(self, key: SnapshotKey, raw_allocated_bytes: int) -> None:
+        """Validate that an already-materialized snapshot matches its charge."""
+        with self._lock:
+            item = self._manifests[key]
+            if not item.expanded or item.compressed_allocated_bytes != 0:
+                raise RuntimeError(f"snapshot expansion is still incomplete: {key}")
+            if item.expansion_allocated_bytes != 0:
+                raise RuntimeError(f"snapshot expansion reservation did not converge: {key}")
+            if raw_allocated_bytes < item.allocated_bytes:
+                raise RuntimeError(
+                    f"expanded snapshot allocation changed for {key}: "
+                    f"charged={item.allocated_bytes} actual={raw_allocated_bytes}"
+                )
+            growth = raw_allocated_bytes - item.allocated_bytes
+            if growth > item.runtime_reserved_bytes:
+                raise RuntimeError(
+                    f"expanded snapshot growth {growth} exceeds runtime reserve "
+                    f"{item.runtime_reserved_bytes}: {key}"
+                )
+            item.allocated_bytes = raw_allocated_bytes
+            item.raw_allocated_bytes = raw_allocated_bytes
+            item.runtime_reserved_bytes -= growth
 
     def reserve_for_admission(self, key: SnapshotKey, upper_bound_bytes: int,
                               *, timeout_s: float = 120,
@@ -419,6 +585,7 @@ class WarmSnapshotPool:
     def abort(self, key: SnapshotKey) -> None:
         with self._lock:
             self._reservations.pop(key, None)
+            self._expansion_reservations.pop(key, None)
             self._changed.notify_all()
 
     def pin(self, key: SnapshotKey) -> SnapshotManifest:
@@ -485,6 +652,7 @@ class WarmSnapshotPool:
             if item.pinned != (1 if consume_pinned else 0):
                 raise RuntimeError(f"cannot remove pinned snapshot: {key}")
             self._spillers.pop(key, None)
+            self._expansion_reservations.pop(key, None)
             removed = self._manifests.pop(key)
             self._changed.notify_all()
             return removed
@@ -531,7 +699,8 @@ class WarmSnapshotPool:
                 return (density, *stable)
             candidates = sorted(
                 (item for key, item in self._manifests.items()
-                 if key not in excluded and item.pinned == 0 and not item.retained_by_vm),
+                 if (key not in excluded and key not in self._expansion_reservations
+                     and item.pinned == 0 and not item.retained_by_vm)),
                 key=victim_order,
             )
             victims: list[SnapshotManifest] = []
@@ -561,6 +730,9 @@ class WarmSnapshotPool:
         with self._lock:
             return {
                 "reserved_bytes": sum(self._reservations.values()),
+                "expansion_reserved_bytes": sum(
+                    self._expansion_reservations.values()
+                ),
                 "committed_bytes": sum(item.allocated_bytes for item in self._manifests.values()),
                 "borrowed_bytes": sum(self._borrow_reservations.values()),
                 "borrow_accounted_bytes": self._borrow_charge_locked(),
@@ -587,6 +759,9 @@ class WarmSnapshotPool:
                 "value_rejections_to_cold": self._value_rejections,
                 "spill_count": self._spill_count,
                 "reserved_bytes": sum(self._reservations.values()),
+                "expansion_reserved_bytes": sum(
+                    self._expansion_reservations.values()
+                ),
                 "committed_bytes": sum(
                     item.allocated_bytes for item in self._manifests.values()
                 ),
@@ -600,6 +775,10 @@ class WarmSnapshotPool:
                 "borrow_reservations": dict(sorted(self._borrow_reservations.items())),
                 "reservations": {
                     repr(key): value for key, value in self._reservations.items()
+                },
+                "expansion_reservations": {
+                    repr(key): value
+                    for key, value in self._expansion_reservations.items()
                 },
                 "manifests": [
                     {**asdict(item), "tier": item.tier.value}
@@ -624,7 +803,10 @@ class WarmSnapshotPool:
 
     def _usage_locked(self) -> int:
         return self.external_warm_bytes + self._borrow_charge_locked() + sum(self._reservations.values()) + sum(
-            item.allocated_bytes for item in self._manifests.values()
+            self._expansion_reservations.values()
+        ) + sum(
+            item.allocated_bytes + getattr(item, "runtime_reserved_bytes", 0)
+            for item in self._manifests.values()
         )
 
     def _borrow_charge_locked(self) -> int:

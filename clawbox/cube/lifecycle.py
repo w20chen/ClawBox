@@ -59,6 +59,7 @@ class LifecycleTiming:
     stage_seconds: dict[str, float] | None = None
     create_attempts: list[dict[str, Any]] | None = None
     stage_spans: list[dict[str, Any]] | None = None
+    storage_observations: dict[str, Any] | None = None
 
 
 class _StageSeconds(dict):
@@ -80,6 +81,7 @@ class CubeSandboxLifecycle:
                  network_allow_out: list[str] | None = None,
                  network_deny_out: list[str] | None = None,
                  physical_observation: Callable[[], Mapping[str, Any]] | None = None,
+                 storage_observation: Callable[[], Mapping[str, Any]] | None = None,
                  role: str = "tool", warm_snapshot_root: str | None = None,
                  cold_snapshot_root: str | None = None,
                  snapshot_pool: WarmSnapshotPool | None = None,
@@ -128,6 +130,7 @@ class CubeSandboxLifecycle:
         self.network_allow_out = list(network_allow_out or [])
         self.network_deny_out = list(network_deny_out or [])
         self.physical_observation = physical_observation
+        self.storage_observation = storage_observation
         self.role = role
         self.warm_snapshot_root = warm_snapshot_root
         self.cold_snapshot_root = cold_snapshot_root
@@ -212,6 +215,7 @@ class CubeSandboxLifecycle:
                 snapshot_generation: int | None = None,
                 snapshot_path: str | None = None,
                 snapshot_metrics: Mapping[str, Any] | None = None,
+                storage_observations: Mapping[str, Any] | None = None,
                 stage_seconds: Mapping[str, float] | None = None,
                 create_attempts: list[dict[str, Any]] | None = None) -> float:
         completed_wall = time.time()
@@ -272,6 +276,7 @@ class CubeSandboxLifecycle:
             measured_stages or None,
             create_attempts,
             getattr(stage_seconds, 'spans', None),
+            dict(storage_observations) if storage_observations is not None else None,
         ))
         return duration
 
@@ -295,6 +300,22 @@ class CubeSandboxLifecycle:
 
     def _observe_physical(self) -> Mapping[str, Any] | None:
         return self.physical_observation() if self.physical_observation is not None else None
+
+    def _observe_storage(self) -> Mapping[str, Any] | None:
+        return self.storage_observation() if self.storage_observation is not None else None
+
+    def _capture_storage(self, observations: dict[str, Any], label: str) -> None:
+        try:
+            sample = self._observe_storage()
+        except Exception as exc:
+            observations[label] = {
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            return
+        if sample is not None:
+            observations[label] = dict(sample)
 
     @staticmethod
     def _host_used(sample: Mapping[str, Any] | None) -> int | None:
@@ -541,7 +562,10 @@ class CubeSandboxLifecycle:
                         )
                         pause_completed = True
                     if self.snapshot_compression == "zstd-page":
-                        from .snapshot_compression import compress_snapshot
+                        from .snapshot_compression import (
+                            apply_compression_accounting,
+                            compress_snapshot,
+                        )
                         native_manifest = dict(manifest)
                         with self._measure_stage(stage_seconds, "snapshot_compress_s"):
                             compression_before = self._observe_physical()
@@ -551,7 +575,7 @@ class CubeSandboxLifecycle:
                             )
                             compression_after = self._observe_physical()
                         manifest = {
-                            **native_manifest,
+                            **apply_compression_accounting(native_manifest, compression),
                             "compression": compression,
                             "compression_host_memory_before": compression_before,
                             "compression_host_memory_after": compression_after,
@@ -580,6 +604,7 @@ class CubeSandboxLifecycle:
                             retention_value_seconds=self._retention_value_seconds(
                                 int(manifest["logical_bytes"])
                             ),
+                            **self._pool_allocation_fields(manifest),
                         )
                         self._pending_snapshot_keys.discard(key)
                     elif predecessor is not None and self.snapshot_pool is not None:
@@ -646,7 +671,10 @@ class CubeSandboxLifecycle:
                         }
                         manifest.setdefault("transferred_bytes", None)
                         if self.snapshot_compression == "zstd-page":
-                            from .snapshot_compression import compress_snapshot
+                            from .snapshot_compression import (
+                                apply_compression_accounting,
+                                compress_snapshot,
+                            )
                             native_manifest = dict(manifest)
                             with self._measure_stage(stage_seconds, "snapshot_compress_s"):
                                 compression_before = self._observe_physical()
@@ -656,7 +684,7 @@ class CubeSandboxLifecycle:
                                 )
                                 compression_after = self._observe_physical()
                             manifest = {
-                                **native_manifest,
+                                **apply_compression_accounting(native_manifest, compression),
                                 "compression": compression,
                                 "compression_host_memory_before": compression_before,
                                 "compression_host_memory_after": compression_after,
@@ -687,6 +715,7 @@ class CubeSandboxLifecycle:
                                 retention_value_seconds=self._retention_value_seconds(
                                     int(manifest["logical_bytes"])
                                 ),
+                                **self._pool_allocation_fields(manifest),
                             )
                             self._pending_snapshot_keys.discard(key)
                         elif predecessor is not None and self.snapshot_pool is not None:
@@ -762,6 +791,31 @@ class CubeSandboxLifecycle:
                     shutil.rmtree(retired + suffix)
         self._peer_retired_warm_paths.clear()
 
+    @staticmethod
+    def _pool_allocation_fields(manifest: Mapping[str, Any]) -> dict[str, Any]:
+        compression = manifest.get("compression")
+        if not isinstance(compression, Mapping):
+            return {
+                "compressed_allocated_bytes": 0,
+                "raw_allocated_bytes": int(manifest["allocated_bytes"]),
+                "expansion_allocated_bytes": 0,
+                "owned_logical_bytes": int(manifest.get("owned_logical_bytes") or 0),
+                "owned_allocated_bytes": int(manifest.get("owned_allocated_bytes") or 0),
+                "expanded": True,
+            }
+        return {
+            "compressed_allocated_bytes": int(manifest["allocated_bytes"]),
+            "raw_allocated_bytes": int(
+                manifest.get("raw_allocated_bytes") or manifest["allocated_bytes"]
+            ),
+            "expansion_allocated_bytes": int(
+                compression.get("baseline_allocated_bytes") or 0
+            ),
+            "owned_logical_bytes": int(manifest.get("owned_logical_bytes") or 0),
+            "owned_allocated_bytes": int(manifest.get("owned_allocated_bytes") or 0),
+            "expanded": False,
+        }
+
     def _spill_to_cold(self, manifest: SnapshotManifest) -> None:
         with self._lock:
             if (self._state is not SandboxState.SWAPPED or self.sandbox is None or
@@ -781,8 +835,45 @@ class CubeSandboxLifecycle:
             spill_snapshot_metrics = None
             try:
                 if self.snapshot_compression == "zstd-page":
+                    from .snapshot import read_snapshot_metadata
                     from .snapshot_compression import decompress_snapshot
-                    decompress_snapshot(manifest.path, binary=self.snapshot_compression_binary)
+                    if manifest.expanded:
+                        raw_metrics = read_snapshot_metadata(
+                            manifest.path,
+                            require_lineage=self.snapshot_mechanism == "incremental-cow",
+                        )
+                        if self.snapshot_pool is not None:
+                            self.snapshot_pool.validate_expanded(
+                                manifest.key, int(raw_metrics["allocated_bytes"]),
+                            )
+                    else:
+                        if (self.snapshot_pool is not None
+                                and manifest.expansion_allocated_bytes > 0):
+                            runtime_extra = max(
+                                0, manifest.owned_logical_bytes - manifest.owned_allocated_bytes
+                            )
+                            self.snapshot_pool.reserve_selected_expansion(
+                                manifest.key,
+                                manifest.expansion_allocated_bytes + runtime_extra,
+                            )
+                        decompress_snapshot(
+                            manifest.path, binary=self.snapshot_compression_binary,
+                        )
+                        if (self.snapshot_pool is not None
+                                and manifest.expansion_allocated_bytes > 0):
+                            raw_metrics = read_snapshot_metadata(
+                                manifest.path,
+                                require_lineage=self.snapshot_mechanism == "incremental-cow",
+                            )
+                            self.snapshot_pool.finish_expansion(
+                                manifest.key, int(raw_metrics["allocated_bytes"]),
+                                runtime_upper_bound_bytes=int(
+                                    raw_metrics.get("owned_logical_bytes") or 0
+                                ),
+                                owned_allocated_bytes=int(
+                                    raw_metrics.get("owned_allocated_bytes") or 0
+                                ),
+                            )
                 with self._transfer("spill"):
                     self.client.relocate_snapshot(
                         self.sandbox, tier=SnapshotTier.COLD.value,
@@ -897,15 +988,16 @@ class CubeSandboxLifecycle:
             started_wall, started_mono = time.time(), time.monotonic()
             stage_seconds: dict[str, float] = _StageSeconds()
             restore_snapshot_metrics = None
+            storage_observations: dict[str, Any] = {}
             with self._measure_stage(stage_seconds, "physical_observation_before_s"):
                 host_memory_before = self._observe_physical()
             resume_attempted = False
             try:
-                resume_attempted = True
                 if self.prepare_cgroup is not None:
                     with self._measure_stage(stage_seconds, "prepare_cgroup_s"):
                         self.prepare_cgroup()
                 if self.snapshot_compression == "zstd-page" and self._snapshot_key is not None:
+                    from .snapshot import read_snapshot_metadata
                     from .snapshot_compression import decompress_snapshot
                     snapshot_root = (
                         self.warm_snapshot_root if self._snapshot_tier is SnapshotTier.WARM
@@ -917,18 +1009,89 @@ class CubeSandboxLifecycle:
                         f"{snapshot_root.rstrip('/')}/{self.sandbox_id}/"
                         f"{self.role}-g{self._snapshot_key.generation}.mem"
                     )
-                    with self._measure_stage(stage_seconds, "snapshot_decompress_s"):
-                        decompression_before = self._observe_physical()
-                        decompression = decompress_snapshot(
-                            compressed_path, binary=self.snapshot_compression_binary,
+                    pool_manifest = None
+                    if (self._snapshot_tier is SnapshotTier.WARM
+                            and self.snapshot_pool is not None):
+                        pool_manifest = self.snapshot_pool.manifest(self._snapshot_key)
+                    self._capture_storage(storage_observations, "before_expansion")
+                    raw_metadata = None
+                    decompression = None
+                    reused_expanded = (
+                        pool_manifest is not None and pool_manifest.expanded
+                    )
+                    if reused_expanded:
+                        with self._measure_stage(
+                            stage_seconds, "snapshot_expanded_validate_s",
+                        ):
+                            decompression_before = self._observe_physical()
+                            raw_metadata = read_snapshot_metadata(
+                                compressed_path,
+                                require_lineage=self.snapshot_mechanism == "incremental-cow",
+                            )
+                            self.snapshot_pool.validate_expanded(
+                                self._snapshot_key,
+                                int(raw_metadata["allocated_bytes"]),
+                            )
+                            decompression_after = self._observe_physical()
+                    else:
+                        if (pool_manifest is not None
+                                and pool_manifest.expansion_allocated_bytes > 0):
+                            runtime_extra = max(
+                                0,
+                                pool_manifest.owned_logical_bytes
+                                - pool_manifest.owned_allocated_bytes,
+                            )
+                            with self._measure_stage(
+                                stage_seconds, "snapshot_expansion_reserve_s",
+                            ):
+                                self.snapshot_pool.reserve_expansion_for_restore(
+                                    self._snapshot_key,
+                                    pool_manifest.expansion_allocated_bytes
+                                    + runtime_extra,
+                                )
+                            self._capture_storage(
+                                storage_observations, "after_expansion_reserve",
+                            )
+                        with self._measure_stage(stage_seconds, "snapshot_decompress_s"):
+                            decompression_before = self._observe_physical()
+                            decompression = decompress_snapshot(
+                                compressed_path, binary=self.snapshot_compression_binary,
+                            )
+                            decompression_after = self._observe_physical()
+                        self._capture_storage(
+                            storage_observations, "after_decompress",
                         )
-                        decompression_after = self._observe_physical()
+                        if (pool_manifest is not None
+                                and pool_manifest.expansion_allocated_bytes > 0):
+                            raw_metadata = read_snapshot_metadata(
+                                compressed_path,
+                                require_lineage=self.snapshot_mechanism == "incremental-cow",
+                            )
+                            with self._measure_stage(
+                                stage_seconds, "snapshot_expansion_commit_s",
+                            ):
+                                self.snapshot_pool.finish_expansion(
+                                    self._snapshot_key,
+                                    int(raw_metadata["allocated_bytes"]),
+                                    runtime_upper_bound_bytes=int(
+                                        raw_metadata.get("owned_logical_bytes") or 0
+                                    ),
+                                    owned_allocated_bytes=int(
+                                        raw_metadata.get("owned_allocated_bytes") or 0
+                                    ),
+                                )
+                                self._capture_storage(
+                                    storage_observations, "after_raw_accounting",
+                                )
                     restore_snapshot_metrics = {
                         "decompression": decompression,
                         "decompression_host_memory_before": decompression_before,
                         "decompression_host_memory_after": decompression_after,
+                        "raw_snapshot_metadata": raw_metadata,
+                        "reused_expanded_snapshot": reused_expanded,
                     }
                 with self._transfer("restore", stage_seconds), self._measure_stage(stage_seconds, "api_restore_s"):
+                    resume_attempted = True
                     self.sandbox = self.client.connect_sandbox(
                         self.sandbox_id,
                         snapshot_mechanism=self.snapshot_mechanism,
@@ -966,6 +1129,7 @@ class CubeSandboxLifecycle:
                     else:
                         self._verify_warm_files_removed()
                         self.snapshot_pool.remove(self._snapshot_key, consume_pinned=True)
+                    self._capture_storage(storage_observations, "after_runtime_retain")
                 if not self.lazy_restore:
                     self._snapshot_key = None
                     self._snapshot_tier = None
@@ -991,6 +1155,7 @@ class CubeSandboxLifecycle:
                                     host_memory_before=host_memory_before,
                                     stage_seconds=stage_seconds,
                                     snapshot_metrics=restore_snapshot_metrics,
+                                    storage_observations=storage_observations,
                                     tier_from=self._snapshot_tier.value if self._snapshot_tier else None,
                                     tier_to=SnapshotTier.LOCAL.value,
                                     snapshot_generation=self._generation)
@@ -1012,6 +1177,74 @@ class CubeSandboxLifecycle:
                                else SandboxState.UNKNOWN)
                 self._record(
                     "restore", before, self._state, started_wall, started_mono,
+                    status="error", error_type=type(exc).__name__,
+                    host_memory_before=host_memory_before,
+                    stage_seconds=stage_seconds,
+                    storage_observations=storage_observations,
+                )
+                raise
+
+    def crash_rollback(self) -> float:
+        """Explicitly return to the last globally committed snapshot.
+
+        Unlike restore(), this operation is valid after the VMM checkpoint
+        publisher has died and the local lifecycle may still report RUNNING or
+        UNKNOWN. The CubeMaster crash-rollback transaction is authoritative and
+        idempotent; only after it succeeds are failed-generation reservations
+        released.
+        """
+        with self._snapshot_access():
+            if self.sandbox_id is None or self._state is SandboxState.NEW:
+                raise LifecycleError("CubeSandbox has not been created")
+            if self._state is SandboxState.CLOSED:
+                raise LifecycleError("CubeSandbox is closed")
+            before = self._state
+            self._state = SandboxState.RESTORING
+            started_wall, started_mono = time.time(), time.monotonic()
+            stage_seconds: dict[str, float] = _StageSeconds()
+            host_memory_before = self._observe_physical()
+            try:
+                with self._measure_stage(stage_seconds, "api_crash_rollback_s"):
+                    self.sandbox = self.client.crash_rollback_sandbox(
+                        self.sandbox_id,
+                        snapshot_mechanism=self.snapshot_mechanism,
+                        before_retry=self.prepare_cgroup,
+                    )
+                if self.verify_cgroup is not None:
+                    with self._measure_stage(stage_seconds, "verify_cgroup_s"):
+                        self.verify_cgroup(self.sandbox_id)
+                released = []
+                if self.snapshot_pool is not None:
+                    for key in sorted(
+                        self._pending_snapshot_keys,
+                        key=lambda item: (item.session_id, item.role, item.generation),
+                    ):
+                        self.snapshot_pool.abort(key)
+                        released.append(repr(key))
+                self._pending_snapshot_keys.clear()
+                self._snapshot_key = None
+                self._snapshot_tier = None
+                self._tier = SnapshotTier.LOCAL
+                self._state = SandboxState.RUNNING
+                elapsed = self._record(
+                    "crash_rollback", before, self._state,
+                    started_wall, started_mono,
+                    host_memory_before=host_memory_before,
+                    stage_seconds=stage_seconds,
+                    snapshot_metrics={"released_pending_snapshots": released},
+                )
+                self._first_tool_restore = {
+                    "restore_ready_monotonic_s": self._timings[-1].completed_monotonic_s,
+                    "restore_ready_service_seconds": elapsed,
+                    "snapshot_generation": None,
+                    "snapshot_tier": "last-committed",
+                }
+                return elapsed
+            except Exception as exc:
+                self._state = SandboxState.UNKNOWN
+                self._record(
+                    "crash_rollback", before, self._state,
+                    started_wall, started_mono,
                     status="error", error_type=type(exc).__name__,
                     host_memory_before=host_memory_before,
                     stage_seconds=stage_seconds,

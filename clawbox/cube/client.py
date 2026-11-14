@@ -308,6 +308,33 @@ class CubeSandboxClient:
         self._handles[sandbox_id] = sandbox
         return sandbox
 
+    def crash_rollback_sandbox(
+        self, sandbox_id: str, *,
+        snapshot_mechanism: str = "incremental-cow",
+        before_retry: Callable[[], None] | None = None,
+    ) -> Any:
+        """Explicitly recover the last committed snapshot after VMM failure."""
+        method = getattr(self._sandbox_class, "crash_rollback", None)
+        if not callable(method):
+            raise RuntimeError(
+                "installed CubeSandbox SDK lacks crash_rollback"
+            )
+        sandbox = retry_with_backoff(
+            lambda: method(
+                sandbox_id, **self._sdk_kwargs(),
+                **({"snapshot_mechanism": snapshot_mechanism}
+                   if snapshot_mechanism != "full-copy" else {}),
+            ),
+            label=f"crash rollback sandbox {sandbox_id}",
+            attempts=10,
+            initial_delay_s=0.25,
+            max_delay_s=2.0,
+            before_retry=before_retry,
+            deadline_s=self.restore_retry_deadline_s,
+        )
+        self._handles[sandbox_id] = sandbox
+        return sandbox
+
     def get_sandbox_state(self, sandbox_or_id: Any) -> str | None:
         if not isinstance(sandbox_or_id, str):
             getter = getattr(sandbox_or_id, "get_info", None)

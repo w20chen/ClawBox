@@ -28,7 +28,11 @@ from clawbox.experiments import BASELINES, ExperimentSpec
 import clawbox.experiments.worker as worker_module
 from clawbox.experiments.openclaw_driver import NativeSSHRoute
 from clawbox.experiments.policy import PolicyCoordinator
-from clawbox.experiments.snapshot_pool import WarmSnapshotPool
+from clawbox.experiments.snapshot_pool import (
+    WarmCapacityError,
+    WarmSnapshotPool,
+    WarmSnapshotTooLarge,
+)
 from clawbox.experiments.spec_types import SnapshotTier
 from clawbox.experiments.worker import ExperimentWorker
 
@@ -1070,6 +1074,52 @@ def test_failed_warm_cleanup_keeps_capacity_until_files_are_removed(tmp_path):
     assert pool.reserved_bytes == pool.committed_bytes == 0
 
 
+def test_crash_rollback_is_repeatable_and_supports_later_cycles(tmp_path: Path) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(1 << 20)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    sandbox_id = lifecycle.sandbox_id
+
+    def lose_manifest_after_pause(sandbox, **kwargs):
+        raise RuntimeError("publisher crashed")
+
+    client.pause_sandbox = lose_manifest_after_pause
+    with pytest.raises(RuntimeError, match="publisher crashed"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert pool.reserved_bytes == 8192
+
+    rollback_calls = []
+
+    def crash_rollback(current_id, **kwargs):
+        rollback_calls.append(current_id)
+        item = _Sandbox.items[current_id]
+        item.state = "running"
+        return item
+
+    client.crash_rollback_sandbox = crash_rollback
+    del client.pause_sandbox
+
+    lifecycle.crash_rollback()
+    lifecycle.crash_rollback()
+    assert rollback_calls == [sandbox_id, sandbox_id]
+    assert pool.reserved_bytes == pool.committed_bytes == 0
+    assert lifecycle.state.value == "running"
+    assert sandbox_id in _Sandbox.items
+
+    for _ in range(2):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.COLD)
+        lifecycle.restore()
+    assert sandbox_id in _Sandbox.items
+    lifecycle.close()
+
+
 @pytest.mark.parametrize("capacity", [0, 512])
 def test_disabled_or_undersized_warm_pool_checkpoints_to_ssd(capacity) -> None:
     _Sandbox.items = {}
@@ -1113,6 +1163,390 @@ def test_lazy_restore_retains_warm_until_next_commit_or_close(capacity, expected
     lifecycle.restore()
     lifecycle.close()
     assert pool.committed_bytes == pool.reserved_bytes == 0
+
+
+def test_compressed_restore_charges_expanded_raw_for_runtime(
+    tmp_path, monkeypatch,
+) -> None:
+    import clawbox.cube.snapshot as snapshot_module
+    import clawbox.cube.snapshot_compression as compression_module
+
+    _Sandbox.items = {}
+    pool = WarmSnapshotPool(1200)
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=_Sandbox),
+        template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy", lazy_restore=True,
+        snapshot_compression="zstd-page",
+        snapshot_compression_binary="/bin/true",
+        storage_observation=lambda: {"unique_allocated_bytes": 1024},
+    )
+
+    def compress(_path, *, binary, native_snapshot_metrics=None):
+        assert binary == "/bin/true"
+        return {
+            "baseline_allocated_bytes": 900,
+            "compressed_allocated_bytes": 20,
+            "raw_native_allocated_bytes": 1024,
+            "compressed_container_allocated_bytes": 16,
+            "compression_manifest_allocated_bytes": 4,
+        }
+
+    def decompress(_path, *, binary):
+        assert binary == "/bin/true"
+        assert pool.expansion_reserved_bytes == 900
+        return {"wall_seconds": 0.1}
+
+    monkeypatch.setattr(compression_module, "compress_snapshot", compress)
+    monkeypatch.setattr(compression_module, "decompress_snapshot", decompress)
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_args, **_kwargs: {"allocated_bytes": 1024},
+    )
+
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    manifest = pool.manifest(lifecycle._snapshot_key)
+    assert manifest.allocated_bytes == 144
+    assert manifest.compressed_allocated_bytes == 144
+    assert manifest.raw_allocated_bytes == 1024
+    assert manifest.expansion_allocated_bytes == 900
+    assert not manifest.expanded
+
+    lifecycle.restore()
+
+    manifest = pool.manifest(lifecycle._snapshot_key)
+    assert manifest.expanded and manifest.retained_by_vm
+    assert manifest.allocated_bytes == manifest.raw_allocated_bytes == 1024
+    assert manifest.compressed_allocated_bytes == 0
+    assert pool.expansion_reserved_bytes == 0
+    assert pool.accounted_bytes == 1024
+    observations = lifecycle.timings[-1]["storage_observations"]
+    assert observations["after_expansion_reserve"]["unique_allocated_bytes"] == 1024
+    assert observations["after_raw_accounting"]["unique_allocated_bytes"] == 1024
+    assert observations["after_runtime_retain"]["unique_allocated_bytes"] == 1024
+    lifecycle.close()
+    assert pool.accounted_bytes == 0
+
+
+def test_compressed_restore_capacity_failure_precedes_decompression(
+    tmp_path, monkeypatch,
+) -> None:
+    import clawbox.cube.snapshot as snapshot_module
+    import clawbox.cube.snapshot_compression as compression_module
+
+    _Sandbox.items = {}
+    pool = WarmSnapshotPool(1100)
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(
+        client,
+        template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy", snapshot_compression="zstd-page",
+        snapshot_compression_binary="/bin/true",
+    )
+    calls = []
+    connect_calls = 0
+    original_connect = client.connect_sandbox
+
+    def count_connect(*args, **kwargs):
+        nonlocal connect_calls
+        connect_calls += 1
+        return original_connect(*args, **kwargs)
+
+    client.connect_sandbox = count_connect
+    client.get_sandbox_state = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("state query unavailable")
+    )
+
+    monkeypatch.setattr(
+        compression_module, "compress_snapshot",
+        lambda _path, **_kwargs: {
+            "baseline_allocated_bytes": 5000,
+            "compressed_allocated_bytes": 20,
+            "raw_native_allocated_bytes": 5024,
+            "compressed_container_allocated_bytes": 16,
+            "compression_manifest_allocated_bytes": 4,
+        },
+    )
+
+    def decompress(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"wall_seconds": 0.1}
+
+    monkeypatch.setattr(compression_module, "decompress_snapshot", decompress)
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_args, **_kwargs: {"allocated_bytes": 5024},
+    )
+
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    with pytest.raises((WarmSnapshotTooLarge, WarmCapacityError)):
+        lifecycle.restore()
+    assert calls == []
+    assert connect_calls == 0
+    assert lifecycle.state.value == "swapped"
+    assert pool.expansion_reserved_bytes == 0
+    assert pool.manifest(lifecycle._snapshot_key).compressed_allocated_bytes == 44
+    lifecycle.close()
+
+
+def test_compressed_restore_retry_reuses_expansion_reservation(
+    tmp_path, monkeypatch,
+) -> None:
+    import clawbox.cube.snapshot as snapshot_module
+    import clawbox.cube.snapshot_compression as compression_module
+
+    _Sandbox.items = {}
+    pool = WarmSnapshotPool(1200)
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=_Sandbox),
+        template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy", snapshot_compression="zstd-page",
+        snapshot_compression_binary="/bin/true",
+    )
+    monkeypatch.setattr(
+        compression_module, "compress_snapshot",
+        lambda _path, **_kwargs: {
+            "baseline_allocated_bytes": 900,
+            "compressed_allocated_bytes": 20,
+            "raw_native_allocated_bytes": 1024,
+            "compressed_container_allocated_bytes": 16,
+            "compression_manifest_allocated_bytes": 4,
+        },
+    )
+    calls = 0
+
+    def decompress(_path, *, binary):
+        nonlocal calls
+        calls += 1
+        assert pool.expansion_reserved_bytes == 900
+        if calls == 1:
+            raise RuntimeError("partial expansion")
+        return {"wall_seconds": 0.1}
+
+    monkeypatch.setattr(compression_module, "decompress_snapshot", decompress)
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_args, **_kwargs: {"allocated_bytes": 1024},
+    )
+
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    with pytest.raises(RuntimeError, match="partial expansion"):
+        lifecycle.restore()
+    assert pool.expansion_reserved_bytes == 900
+    assert lifecycle.state.value == "swapped"
+
+    lifecycle.restore()
+    assert calls == 2
+    assert pool.expansion_reserved_bytes == 0
+    assert pool.manifest(lifecycle._snapshot_key).allocated_bytes == 1024
+    assert pool.manifest(lifecycle._snapshot_key).expansion_allocated_bytes == 0
+    lifecycle.close()
+
+
+def test_compressed_restore_failure_after_expansion_keeps_raw_charged(
+    tmp_path, monkeypatch,
+) -> None:
+    import clawbox.cube.snapshot as snapshot_module
+    import clawbox.cube.snapshot_compression as compression_module
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(1200)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy", snapshot_compression="zstd-page",
+        snapshot_compression_binary="/bin/true",
+    )
+    monkeypatch.setattr(
+        compression_module, "compress_snapshot",
+        lambda _path, **_kwargs: {
+            "baseline_allocated_bytes": 900,
+            "compressed_allocated_bytes": 20,
+            "raw_native_allocated_bytes": 1024,
+            "compressed_container_allocated_bytes": 16,
+            "compression_manifest_allocated_bytes": 4,
+        },
+    )
+    monkeypatch.setattr(
+        compression_module, "decompress_snapshot",
+        lambda _path, **_kwargs: {"wall_seconds": 0.1},
+    )
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_args, **_kwargs: {"allocated_bytes": 1024},
+    )
+
+    original_connect = client.connect_sandbox
+    connect_calls = 0
+
+    def fail_once_after_expansion(sandbox_id, **kwargs):
+        nonlocal connect_calls
+        connect_calls += 1
+        _Sandbox.items[sandbox_id].state = "paused"
+        if connect_calls == 1:
+            raise RuntimeError("response lost after expansion")
+        return original_connect(sandbox_id, **kwargs)
+
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    client.connect_sandbox = fail_once_after_expansion
+    with pytest.raises(RuntimeError, match="response lost"):
+        lifecycle.restore()
+
+    manifest = pool.manifest(lifecycle._snapshot_key)
+    assert manifest.expanded
+    assert manifest.allocated_bytes == 1024
+    assert manifest.expansion_allocated_bytes == 0
+    assert not manifest.retained_by_vm
+    assert pool.expansion_reserved_bytes == 0
+    assert pool.accounted_bytes == 1024
+    assert lifecycle.state.value == "swapped"
+
+    lifecycle.restore()
+    assert connect_calls == 2
+    assert pool.manifest(lifecycle._snapshot_key).retained_by_vm
+    lifecycle.close()
+    assert pool.accounted_bytes == 0
+
+
+def test_compressed_spill_reserves_raw_then_retires_warm_manifest(
+    tmp_path, monkeypatch,
+) -> None:
+    import clawbox.cube.snapshot as snapshot_module
+    import clawbox.cube.snapshot_compression as compression_module
+
+    _Sandbox.items = {}
+    pool = WarmSnapshotPool(1200)
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=_Sandbox),
+        template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy", snapshot_compression="zstd-page",
+        snapshot_compression_binary="/bin/true",
+    )
+
+    def compression(_path, **kwargs):
+        return {
+            "baseline_allocated_bytes": 900,
+            "compressed_allocated_bytes": 20,
+            "raw_native_allocated_bytes": 1024,
+            "compressed_container_allocated_bytes": 16,
+            "compression_manifest_allocated_bytes": 4,
+        }
+
+    def decompress(_path, *, binary):
+        assert pool.expansion_reserved_bytes == 900
+        return {"wall_seconds": 0.1}
+
+    monkeypatch.setattr(compression_module, "compress_snapshot", compression)
+    monkeypatch.setattr(compression_module, "decompress_snapshot", decompress)
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_args, **_kwargs: {"allocated_bytes": 1024},
+    )
+
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    spilled = pool.spill_for_admission(pool.capacity_bytes)
+
+    assert [item.key for item in spilled] == [lifecycle._snapshot_key] or (
+        len(spilled) == 1 and spilled[0].generation == 1
+    )
+    assert lifecycle.tier is SnapshotTier.COLD
+    assert pool.committed_bytes == 0
+    assert pool.expansion_reserved_bytes == 0
+    event = next(item for item in lifecycle.timings if item["operation"] == "spill")
+    assert event["snapshot_metrics"]["compression"]["baseline_allocated_bytes"] == 900
+    lifecycle.close()
+
+
+def test_compressed_spill_retry_reuses_already_expanded_raw(
+    tmp_path, monkeypatch,
+) -> None:
+    import clawbox.cube.snapshot as snapshot_module
+    import clawbox.cube.snapshot_compression as compression_module
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(1200)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy", snapshot_compression="zstd-page",
+        snapshot_compression_binary="/bin/true",
+    )
+    monkeypatch.setattr(
+        compression_module, "compress_snapshot",
+        lambda _path, **_kwargs: {
+            "baseline_allocated_bytes": 900,
+            "compressed_allocated_bytes": 20,
+            "raw_native_allocated_bytes": 1024,
+            "compressed_container_allocated_bytes": 16,
+            "compression_manifest_allocated_bytes": 4,
+        },
+    )
+    decompress_calls = 0
+
+    def decompress(_path, *, binary):
+        nonlocal decompress_calls
+        decompress_calls += 1
+        assert pool.expansion_reserved_bytes == 900
+        return {"wall_seconds": 0.1}
+
+    monkeypatch.setattr(compression_module, "decompress_snapshot", decompress)
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_args, **_kwargs: {"allocated_bytes": 1024},
+    )
+    original_relocate = client.relocate_snapshot
+    relocate_calls = 0
+
+    def fail_relocate_once(*args, **kwargs):
+        nonlocal relocate_calls
+        relocate_calls += 1
+        if relocate_calls == 1:
+            raise RuntimeError("relocation response lost")
+        return original_relocate(*args, **kwargs)
+
+    client.relocate_snapshot = fail_relocate_once
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    with pytest.raises(RuntimeError, match="relocation response lost"):
+        pool.spill_for_admission(pool.capacity_bytes)
+
+    manifest = pool.manifest(lifecycle._snapshot_key)
+    assert manifest.expanded
+    assert manifest.allocated_bytes == 1024
+    assert manifest.expansion_allocated_bytes == 0
+    assert pool.expansion_reserved_bytes == 0
+    assert lifecycle.state.value == "swapped"
+
+    spilled = pool.spill_for_admission(pool.capacity_bytes)
+    assert len(spilled) == 1
+    assert decompress_calls == 1
+    assert relocate_calls == 2
+    assert lifecycle.tier is SnapshotTier.COLD
+    assert pool.committed_bytes == 0
+    lifecycle.close()
 
 
 def test_warm_overflow_spills_authoritative_lru_to_cold() -> None:

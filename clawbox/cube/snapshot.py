@@ -56,19 +56,23 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         return result
     manifest = json.loads(sidecar.read_text(encoding="utf-8"))
     layers = manifest.get("layers")
-    if manifest.get("schema_version") != 1 or not isinstance(layers, list) or not layers:
+    if manifest.get("schema_version") not in {1, 2} or not isinstance(layers, list) or not layers:
         raise RuntimeError("invalid native RAM lineage")
     logical = manifest.get("logical_bytes")
     if type(logical) is not int or logical <= 0:
         raise RuntimeError("invalid native RAM logical size")
-    # External layer zero is the immutable template RAM image.  It is a
-    # dependency of the lineage, but it is not owned by (or charged to) the
-    # WARM snapshot pool.
+    # External layers are immutable dependencies. Legacy schema 1 has only a
+    # template base at index zero; schema 2 may also reference managed COLD
+    # layers at any position. None are charged to the WARM snapshot pool.
     owned_files = [sidecar, memory]
     layer_files = []
     external_base_identity = None
     external_base_allocated_bytes = 0
-    private_delta_bytes = 0
+    external_layer_paths = []
+    external_layer_allocations = []
+    owned_layer_allocated_bytes = 0
+    owned_layer_allocations: dict[str, int] = {}
+    owned_ranges: list[tuple[int, int]] = []
     layer_allocations = []
     for index, layer in enumerate(layers):
         name = layer.get("name")
@@ -76,8 +80,18 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
             raise RuntimeError("invalid native RAM layer name")
         external_path = layer.get("external_path")
         if external_path is not None:
-            if index != 0 or not isinstance(external_path, str) or not Path(external_path).is_absolute():
+            managed = bool(layer.get("managed"))
+            layer_id = layer.get("layer_id")
+            if not isinstance(external_path, str) or not Path(external_path).is_absolute():
                 raise RuntimeError("invalid external native RAM base")
+            if not managed and index != 0:
+                raise RuntimeError("legacy external native RAM base must be layer zero")
+            if managed and (
+                not isinstance(layer_id, str) or not layer_id
+                or "/" in layer_id or "\\" in layer_id
+                or Path(external_path).parent.name != layer_id
+            ):
+                raise RuntimeError("invalid managed native RAM layer identity")
             file = Path(external_path)
         else:
             file = Path(path + ".layers") / name
@@ -93,18 +107,48 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         })
         if external_path is None:
             owned_files.append(file)
-            if not (index == 0 and manifest.get("reused_base_allocated_bytes", 0) > 0):
-                private_delta_bytes += _allocated_bytes(file, stat)
+            owned_layer_allocated_bytes += _allocated_bytes(file, stat)
+            owned_layer_allocations[f"{stat.st_dev}:{stat.st_ino}"] = _allocated_bytes(file, stat)
+            for item in layer.get("ranges") or []:
+                offset = item.get("offset")
+                length = item.get("length")
+                if (type(offset) is int and type(length) is int
+                        and offset >= 0 and length > 0):
+                    owned_ranges.append((offset, offset + length))
         else:
-            external_base_identity = f"{stat.st_dev}:{stat.st_ino}"
-            external_base_allocated_bytes = _allocated_bytes(file, stat)
-    if not os.path.samefile(memory, layer_files[-1]):
-        raise RuntimeError("native RAM manifest does not identify the current delta")
+            identity = f"{stat.st_dev}:{stat.st_ino}"
+            allocated = _allocated_bytes(file, stat)
+            external_layer_paths.append(external_path)
+            external_layer_allocations.append({
+                "layer_index": index,
+                "path": external_path,
+                "layer_id": layer_id if managed else None,
+                "managed": managed,
+                "identity": identity,
+                "allocated_bytes": allocated,
+            })
+            external_base_allocated_bytes += allocated
+            if index == 0:
+                external_base_identity = identity
+    if layers[-1].get("external_path") is None:
+        if not os.path.samefile(memory, layer_files[-1]):
+            raise RuntimeError("native RAM manifest does not identify the current delta")
+    elif memory.is_symlink() or not memory.is_file() or memory.stat().st_size != logical:
+        raise RuntimeError("zero-dirty native RAM snapshot placeholder is invalid")
     unique = {}
     for file in owned_files:
         stat = file.stat()
         unique[(stat.st_dev, stat.st_ino)] = _allocated_bytes(file, stat)
+    reused_base_allocated_bytes = int(manifest.get("reused_base_allocated_bytes", 0))
+    owned_logical_bytes = 0
+    end = 0
+    for start, stop in sorted(owned_ranges):
+        start = max(start, end)
+        if stop > start:
+            owned_logical_bytes += stop - start
+            end = stop
     return {
+        "lineage_schema_version": manifest["schema_version"],
         "snapshot_mechanism": "incremental-cow",
         "logical_bytes": logical,
         "allocated_bytes": sum(unique.values()),
@@ -116,10 +160,17 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         "external_base_path": layers[0].get("external_path"),
         "external_base_identity": external_base_identity,
         "external_base_allocated_bytes": external_base_allocated_bytes,
-        "private_delta_bytes": private_delta_bytes,
+        "external_layer_paths": external_layer_paths,
+        "external_layer_allocations": external_layer_allocations,
+        "managed_external_bytes": sum(
+            item["allocated_bytes"] for item in external_layer_allocations if item["managed"]
+        ),
+        "private_delta_bytes": max(0, owned_layer_allocated_bytes - reused_base_allocated_bytes),
+        "owned_allocated_bytes": sum(owned_layer_allocations.values()),
+        "owned_logical_bytes": min(logical, owned_logical_bytes),
         # A COLD lineage owns names, not necessarily exclusive data blocks.
         # Deduplicate identities across lineages when summing physical storage.
         "layer_allocations": layer_allocations,
-        "reused_base_allocated_bytes": manifest.get("reused_base_allocated_bytes", 0),
-        "dependency_count": max(0, len(layers) - 1) + int(external_base_identity is not None),
+        "reused_base_allocated_bytes": reused_base_allocated_bytes,
+        "dependency_count": max(0, len(layers) - 1) + len(external_layer_allocations),
     }

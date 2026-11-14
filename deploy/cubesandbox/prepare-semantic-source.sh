@@ -42,6 +42,7 @@ COLD_STREAM_PATCH_FILE=$SCRIPT_DIR/cold-snapshot-streaming.patch
 MEMORY_RECLAIM_PATCH_FILE=$SCRIPT_DIR/memory-snapshot-reclaim.patch
 BASE_CACHE_PATCH_FILE=$SCRIPT_DIR/base-template-warm-cache.patch
 PEER_DOMAIN_PATCH_FILE=$SCRIPT_DIR/peer-local-storage-domain.patch
+CROSS_TIER_PATCH_FILE=$SCRIPT_DIR/cross-tier-managed-lineage.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -76,6 +77,7 @@ PATCH_FILES=(
   "$MEMORY_RECLAIM_PATCH_FILE"
   "$BASE_CACHE_PATCH_FILE"
   "$PEER_DOMAIN_PATCH_FILE"
+  "$CROSS_TIER_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -97,6 +99,29 @@ require_current_patchset() {
     exit 1
   fi
 }
+
+# Cross-tier changes overlap several files touched by the peer/base-cache
+# patches, so their reverse checks are not reliable once the final patch is
+# present. The patchset stamp is authoritative: a complete stamp means every
+# listed patch was applied, while a matching pending stamp plus a reversible
+# cross-tier patch means the final patch landed before the process was
+# interrupted.
+if [[ -d "$SOURCE_DIR/.git" ]]; then
+  if [[ -f "$PATCHSET_STAMP" ]] && [[ "$(cat "$PATCHSET_STAMP")" == "$PATCHSET_ID" ]]; then
+    git -C "$SOURCE_DIR" apply --reverse --check "$CROSS_TIER_PATCH_FILE"
+    git -C "$SOURCE_DIR" diff --check
+    echo "standalone patch set already prepared: $SOURCE_DIR"
+    exit 0
+  fi
+  if [[ -f "$PATCHSET_PENDING" ]] && [[ "$(cat "$PATCHSET_PENDING")" == "$PATCHSET_ID" ]] &&
+    git -C "$SOURCE_DIR" apply --reverse --check "$CROSS_TIER_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" diff --check
+    printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
+    rm -f "$PATCHSET_PENDING"
+    echo "standalone patch set recovered after cross-tier final patch: $SOURCE_DIR"
+    exit 0
+  fi
+fi
 
 apply_upstream_pagemap_fix() {
   local base_revision tip_revision fetched_tip
@@ -171,8 +196,23 @@ apply_peer_domain_patch() {
   fi
 }
 
+apply_cross_tier_patch() {
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$CROSS_TIER_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$CROSS_TIER_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$CROSS_TIER_PATCH_FILE"
+  fi
+}
+
 if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "$PEER_DOMAIN_PATCH_FILE" >/dev/null 2>&1; then
-  require_current_patchset "$PATCHSET_STAMP" prepared
+  if [[ -f "$PATCHSET_STAMP" ]]; then
+    require_current_patchset "$PATCHSET_STAMP" complete
+  else
+    require_current_patchset "$PATCHSET_PENDING" interrupted
+  fi
+  apply_cross_tier_patch
+  git -C "$SOURCE_DIR" diff --check
+  printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
+  rm -f "$PATCHSET_PENDING"
   echo "standalone peer-domain patch set already prepared: $SOURCE_DIR"
   exit 0
 fi
@@ -194,6 +234,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   fi
   git -C "$SOURCE_DIR" diff --check
   apply_peer_domain_patch
+  apply_cross_tier_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -213,6 +254,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   apply_base_cache_patch
   git -C "$SOURCE_DIR" diff --check
   apply_peer_domain_patch
+  apply_cross_tier_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -301,6 +343,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && git -C "$SOURCE_DIR" apply --reverse --check "
   apply_memory_reclaim_patch
   apply_base_cache_patch
   apply_peer_domain_patch
+  apply_cross_tier_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone priority patch set already prepared: $SOURCE_DIR"
@@ -410,6 +453,7 @@ if [[ -d "$SOURCE_DIR/.git" ]] && { git -C "$SOURCE_DIR" apply --reverse --check
   apply_memory_reclaim_patch
   apply_base_cache_patch
   apply_peer_domain_patch
+  apply_cross_tier_patch
   printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
   rm -f "$PATCHSET_PENDING"
   echo "standalone patch set already prepared: $SOURCE_DIR"
@@ -482,6 +526,7 @@ apply_memory_reclaim_patch
 apply_once "$BASE_CACHE_PATCH_FILE" "fixed shared-DRAM base mappings and buffered lineage reads"
 
 apply_peer_domain_patch
+apply_cross_tier_patch
 git -C "$SOURCE_DIR" diff --check
 printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
 rm -f "$PATCHSET_PENDING"
