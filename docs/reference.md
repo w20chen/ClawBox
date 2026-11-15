@@ -360,7 +360,7 @@ validation checks their dependencies.
 | `admission` | `tool: off` (`off`, `fixed`, `predicted`); `startup_headroom_mib: 256`; `admission_margin_mib: 256`; fixed/non-command budgets unset; `prediction_reservation_scale: 1.0`; `small_tool_admission_bypass_mib: 4` |
 | `runtime` | `memory_protection: false`; `cpu_release_boost: false`; `proactive_memory_reclaim: false`; `runtime_poll_interval_seconds: 0.5`; nested `pressure_control` below |
 | `placement` | `policy: round_robin` (`os_default`, `round_robin`, `explicit`, `load_aware`); `template_affinity: false`; `placement_cpu_overcommit: 1024.0`; `template_balance_slack: 0.10`; `session_compute_nodes: []`; Tool-call CPU fields below |
-| `idle_reclaim` | `policy: off` (`off`, `wait`, `gpu`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024`; `gpu_reclaim_min_remaining_seconds: 1.0`; `gpu_signal_max_age_seconds: 5.0`. GPU policy requires `serving_sim` and `agent_and_tool`; see the inference options below. |
+| `idle_reclaim` | `policy: off` (`off`, `wait`, `gpu`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024`; `gpu_reclaim_min_remaining_seconds: 1.0`; `gpu_signal_max_age_seconds: 5.0`; `gpu_first_token_prewarm: true`. GPU policy requires `serving_sim` and `agent_and_tool`; see the inference options below. |
 | `shared_memory` | `borrow: off` (`off`, `hard`, `pressure`); `borrow_cooldown_seconds: 5`; `return_cooldown_seconds: 5`; `shared_memory_resident_headroom_mib: null` |
 | `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`); transfer limits below |
 | `deployment` | `mode: managed` (`managed`, `os-default`); `resident_capacity_accounting: false`; `lifecycle_reservation_scale: 1.0` |
@@ -988,21 +988,24 @@ and `scope: agent_and_tool`. Its editable options are:
 | --- | --- | --- |
 | `gpu_reclaim_min_remaining_seconds` | 1.0 seconds | Minimum remaining queue/prefill estimate for pressure-driven checkpoint selection; nonnegative. This is not a decode-completion prediction. |
 | `gpu_signal_max_age_seconds` | 5.0 seconds | Maximum age of a usable GPU estimate; strictly positive. Missing, expired or unmodelled estimates cannot authorize GPU-aware reclaim. |
+| `gpu_first_token_prewarm` | `true` | Every answer-worker `first_token` requests the same one-shot Runtime/Tool prewarm as `think_end`. This is an observed decode-start event, not a completion prediction. Because `first_token` precedes reasoning events, set `false` to wait for `think_end` and retain reactive restore on calls without it. |
 
 The policy uses observed `queued.est_wait_s` for A/P workers, excluding remote KV
 transfer waits, and discounts elapsed time. `think_end` from the answer worker
-(A/D) requests pre-restore of both Runtime and Tool once, before the full response
-or a Tool command arrives. Runtime restores first, including its model relay;
+(A/D), or its observed `first_token` fallback when enabled, requests pre-restore
+of both Runtime and Tool once, before the full response or a Tool command arrives.
+Runtime restores first, including its model relay;
 Tool then restores in the selected compute domain and its telemetry bridge is
 checked. Both restores use ordinary lifecycle memory admission; already resident
 VMs are skipped. Commands still require their normal prediction, growth admission
 and current SSH identity checks. Missing recorded reasoning counts remain unknown:
 the native simulator emits no `think_end` for that call. ClawBox only uses online
-`think_end` events marked `source: trace` for this backend; absent or other source
-values are ignored with `unobserved_reasoning_boundary`. This event marker does
-not give the CPU access to traces or reasoning counts. No boundary is inferred
-from `first_token`, and missing counts do not disable valid events from other
-calls. This behavior is automatic under the existing `policy: gpu` setting.
+`think_end` events marked `source: trace`; absent or other source values are
+ignored with `unobserved_reasoning_boundary`. The `first_token` trigger does not
+invent that boundary or estimate decode duration: it only begins ordinary,
+capacity-checked restore after decode has observably started. It precedes any
+later `think_end` for that call, and one-shot request binding prevents a second
+restore. Disable it when the later boundary is preferred.
 Response completion restores Runtime when
 needed. Signal loss or epoch changes fail the arm without selecting another
 reclaim policy.

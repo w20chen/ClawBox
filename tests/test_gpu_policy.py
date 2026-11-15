@@ -140,6 +140,24 @@ def test_think_end_prewarms_only_once_and_never_the_prefill_leg():
     assert not signal(c, event="think_end")["accepted"]
 
 
+def test_first_answer_token_prewarms_once_when_enabled():
+    c = coordinator()
+    waiting(c)
+    assert not signal(c, event="first_token", role="P")["should_prewarm"]
+    decision = signal(c, event="first_token", role="A")
+    assert decision["should_prewarm"]
+    assert decision["prewarm_trigger"] == "first_token"
+    assert not signal(c, event="think_end", role="A")["should_prewarm"]
+    assert c.wait_for_gpu_prewarm("session", "request")
+
+
+def test_first_token_prewarm_can_be_disabled():
+    c = coordinator(gpu_first_token_prewarm=False)
+    waiting(c)
+    assert not signal(c, event="first_token", role="A")["should_prewarm"]
+    assert signal(c, event="think_end", role="A")["should_prewarm"]
+
+
 @pytest.mark.parametrize("source", [None, "token", "unknown"])
 def test_unobserved_think_end_does_not_change_wait_or_block_later_valid_boundary(source):
     c = coordinator()

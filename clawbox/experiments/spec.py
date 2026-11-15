@@ -779,6 +779,7 @@ class PolicySpec(StrictFrozenModel):
     runtime_snapshot: bool = True
     gpu_reclaim_min_remaining_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     gpu_signal_max_age_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    gpu_first_token_prewarm: bool = True
     resource_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_overrides: dict[str, Any] = Field(default_factory=dict)
     mechanisms: dict[str, Any] = Field(default_factory=dict)

@@ -37,7 +37,8 @@ def base():
 def test_gpu_reclaim_requires_simulator_and_pair_scope():
     raw = base()
     raw['mechanisms']['idle_reclaim'].update(policy='gpu', scope='agent_and_tool',
-        gpu_reclaim_min_remaining_seconds=2.5, gpu_signal_max_age_seconds=4)
+        gpu_reclaim_min_remaining_seconds=2.5, gpu_signal_max_age_seconds=4,
+        gpu_first_token_prewarm=False)
     with pytest.raises(ValueError, match='backend=serving_sim'):
         ExperimentSpec.model_validate(raw)
     raw['inference']['backend'] = 'serving_sim'
@@ -46,6 +47,7 @@ def test_gpu_reclaim_requires_simulator_and_pair_scope():
     assert policy.eviction.value == 'gpu_aware_pressure'
     assert policy.gpu_reclaim_min_remaining_seconds == 2.5
     assert policy.gpu_signal_max_age_seconds == 4
+    assert policy.gpu_first_token_prewarm is False
     assert policy.restore.value == 'reactive'
     raw['mechanisms']['idle_reclaim']['scope'] = 'tool'
     with pytest.raises(ValueError, match='agent_and_tool'):

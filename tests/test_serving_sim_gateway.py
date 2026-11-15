@@ -541,19 +541,20 @@ def worker_prewarm_environment():
     return environment, restored, events, executor
 
 
-@pytest.mark.parametrize("runtime_resident,tool_resident,expected", [
-    (False, False, ["runtime", "tool"]),
-    (True, False, ["tool"]),
-    (False, True, ["runtime"]),
-    (True, True, []),
+@pytest.mark.parametrize("signal_event,runtime_resident,tool_resident,expected", [
+    ("think_end", False, False, ["runtime", "tool"]),
+    ("think_end", True, False, ["tool"]),
+    ("think_end", False, True, ["runtime"]),
+    ("think_end", True, True, []),
+    ("first_token", False, False, ["runtime", "tool"]),
 ])
-def test_worker_think_end_prewarms_both_vms(runtime_resident, tool_resident, expected):
+def test_worker_gpu_boundary_prewarms_both_vms(signal_event, runtime_resident, tool_resident, expected):
     env, restored, events, executor = worker_prewarm_environment()
     env["runtime_lifecycle"].resident = runtime_resident
     env["lifecycle"].resident = tool_resident
     try:
         signal = {"session_id": "session", "request_id": "request",
-                  "event": "think_end", "role": "A", "source": "trace", "t": 2.}
+                  "event": signal_event, "role": "A", "source": "trace", "t": 2.}
         env["on_model_signal"](signal)
         env["on_model_signal"](signal)  # duplicate delivery must not repeat either restore
     finally:
@@ -569,7 +570,8 @@ def test_worker_think_end_prewarms_both_vms(runtime_resident, tool_resident, exp
     if not runtime_resident:
         assert env["wait_state"]["runtime_restore_request_id"] == "request"
     assert any(event["event"] == "model_relay_reconnected" for event in events) is (not runtime_resident)
-    assert sum(event["event"] == "gpu_pair_prewarm_ready" for event in events) == 1
+    ready = [event for event in events if event["event"] == "gpu_pair_prewarm_ready"]
+    assert len(ready) == 1 and ready[0]["trigger"] == signal_event
     assert not env["coordinator"]._sessions["session"].tool_active
     assert not env["coordinator"]._sessions["session"].response_ready
     # The ordinary response-ready path observes the already resident Runtime.

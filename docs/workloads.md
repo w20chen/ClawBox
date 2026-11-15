@@ -296,8 +296,14 @@ sandbox:
 execution:
   apt_cache_proxy_url: http://HOST_ADDRESS:3142
   pypi_cache_index_url: http://HOST_ADDRESS:3141/root/pypi/+simple/
-  dependency_install_concurrency: 8
+  dependency_install_concurrency: null
 ```
+
+`null` leaves package installs ungated. Set a positive bound only when the cache,
+network, or package index needs protection, and measure the resulting gate wait.
+The permit is held for the complete package command, so a small value such as 8
+can serialize a Full1280 replay for many minutes even when ordinary Tool
+admission remains fast. Changing the bound requires a new run ID.
 
 For a high-concurrency replay, increase `replay_tool_timeout_multiplier` only
 when failed Tool spans show exit 124 for commands that completed in the recorded

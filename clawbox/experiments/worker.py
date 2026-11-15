@@ -4178,6 +4178,8 @@ class ExperimentWorker:
 
             def prewarm_pair_from_gpu(event: dict[str, Any]) -> None:
                 request_id = str(event["request_id"])
+                trigger = str(event["event"])
+                operation = f"gpu_{trigger}"
                 # Do not hold wait_lock while an already-claimed checkpoint finishes.
                 if not coordinator.wait_for_gpu_prewarm(session_id, request_id):
                     return
@@ -4189,10 +4191,10 @@ class ExperimentWorker:
                             return
                     events.write({"event": "gpu_pair_prewarm_started", "session_id": session_id,
                                   "request_id": request_id, "source": event.get("source"),
-                                  "gpu_virtual_time": event.get("t")})
+                                  "trigger": trigger, "gpu_virtual_time": event.get("t")})
                     # Runtime chooses the pair's resume placement first when
                     # peer placement is enabled. Tool then uses that domain.
-                    restore_runtime_for_model_wait_locked(event, phase="gpu_think_end")
+                    restore_runtime_for_model_wait_locked(event, phase=operation)
                     if not lifecycle.resident:
                         started = time.time()
                         self._restore_with_one_victim(
@@ -4203,11 +4205,11 @@ class ExperimentWorker:
                         wait_state.update(restore_request_id=request_id,
                                           restore_started_at=started, restore_completed_at=finished)
                         _record_time_span(timeline, "model.tool_prewarm", started, finished,
-                                          role="tool", operation="gpu_think_end",
+                                          role="tool", operation=operation,
                                           execution_id=request_id)
                     events.write({"event": "gpu_pair_prewarm_ready", "session_id": session_id,
                                   "request_id": request_id, "source": event.get("source"),
-                                  "gpu_virtual_time": event.get("t")})
+                                  "trigger": trigger, "gpu_virtual_time": event.get("t")})
 
             def on_model_signal(event: dict[str, Any]) -> None:
                 if arm.policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE:

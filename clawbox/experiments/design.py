@@ -79,6 +79,7 @@ IdleReclaim = subset('IdleReclaim', ResourcesSpec, RESOURCE_FIELDS['idle_reclaim
                      policy=(Literal['off', 'wait', 'gpu'], 'off'),
                      gpu_reclaim_min_remaining_seconds=(float, Field(default=1.0, ge=0, allow_inf_nan=False)),
                      gpu_signal_max_age_seconds=(float, Field(default=5.0, gt=0, allow_inf_nan=False)),
+                     gpu_first_token_prewarm=(bool, True),
                      scope=(Literal['tool', 'agent_and_tool'], 'tool'))
 SharedMemory = subset('SharedMemory', ResourcesSpec, RESOURCE_FIELDS['shared_memory'],
                       borrow=(Literal['off', 'hard', 'pressure'], 'off'))
@@ -285,6 +286,7 @@ def lower_arm(design, name, m):
              restore='reactive' if snapshots else 'none',
              gpu_reclaim_min_remaining_seconds=idle['gpu_reclaim_min_remaining_seconds'],
              gpu_signal_max_age_seconds=idle['gpu_signal_max_age_seconds'],
+             gpu_first_token_prewarm=idle['gpu_first_token_prewarm'],
              template_aware_placement=pl['template_affinity'], snapshot_aware_residency=snapshots and ck['residency'] == 'value',
              mechanisms=m, resource_overrides=r,
              execution_overrides={key: x[key] for key in (*PLACEMENT_FIELDS, 'placement_policy')})

@@ -290,7 +290,7 @@ class PolicyCoordinator:
             self._condition.notify_all()
 
     def observe_gpu_signal(self, session_id: str, wait_id: str, event: dict) -> dict:
-        """Use online prefill observations; never infer remaining decode length.
+        """Use online GPU observations without inventing a completion deadline.
 
         The caller consumes the signal stream independently of Runtime residency.
         ``signal_age_seconds`` may include transport lag measured by that caller;
@@ -352,8 +352,13 @@ class PolicyCoordinator:
             elif phase in {"first_token", "think_start", "think_end", "finish"}:
                 state.gpu_prefill_estimate_s = None
                 state.gpu_prefill_observed_monotonic_s = None
-            if phase == "think_end" and role in {"A", "D"}:
+            prewarm_boundary = (
+                phase == "think_end"
+                or (phase == "first_token" and self.policy.gpu_first_token_prewarm)
+            )
+            if prewarm_boundary and role in {"A", "D"}:
                 result["should_prewarm"] = not state.gpu_prewarm_requested
+                result["prewarm_trigger"] = phase
                 state.gpu_prewarm_requested = True
                 state.eviction_eligible = False
             # P-leg finish only completes prefill, not the logical model request.

@@ -1275,21 +1275,24 @@ GPU reports. This changes reporting only, with no host apply, image rebuild or
 retraining. Keep both GPU output and the CPU run directory. The CPU records actual
 Tool work, VM lifecycle and transport observations; the simulator records its
 predicted GPU timeline. Inspect wall-clock delivery lag before interpreting a
-large-concurrency result. When a call has no recorded reasoning-token count,
-the native simulator emits no `think_end`; ClawBox continues with reactive
-restore. It does not read the CPU trace, infer a boundary from the first output
-token, or treat missing counts as zero. For this simulator backend, only an
-online `think_end` marked `source: trace` can request prewarm; other sources are
-logged but ignored by the policy. Calls with valid boundaries in a mixed
-workload still prewarm normally. Use a separately labelled synthetic protocol
-check to test `think_end` handling when needed.
+large-concurrency result. When a call has no recorded reasoning-token count, the
+native simulator emits no `think_end`. With the default
+`gpu_first_token_prewarm: true`, every observed answer-worker `first_token`
+starts the same one-shot, capacity-checked prewarm. This does not read the CPU
+trace, treat missing counts as zero, or claim that decode is complete. Because
+the simulator emits `first_token` before `think_start`/`think_end`, set the option
+to `false` when prewarm should wait for a recorded reasoning boundary (and remain
+reactive on calls without one). Only an online `think_end` marked `source: trace`
+is accepted as a reasoning boundary; other sources are logged but ignored.
 
-With the GPU policy, `think_end` starts pre-restoring both VMs: Runtime first
+With the GPU policy, `think_end` (or the enabled `first_token` fallback) starts
+pre-restoring both VMs: Runtime first
 (including its model connection), then Tool and its telemetry bridge. Restoration
 may wait for memory admission or an in-progress checkpoint. This overlaps with
 the remaining model generation; it does not execute a Tool command early. Already
-resident VMs need no restore. Without `think_end`, Runtime restores for the full
-response and Tool restores when its actual command reaches admission.
+resident VMs need no restore. With both prewarm signals unavailable or disabled,
+Runtime restores for the full response and Tool restores when its actual command
+reaches admission.
 
 See the [inference and GPU policy options](reference.md) for defaults and which
 changes require a new run, qualification, image build or retraining.
