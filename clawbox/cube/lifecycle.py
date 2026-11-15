@@ -1204,6 +1204,9 @@ class CubeSandboxLifecycle:
             stage_seconds: dict[str, float] = _StageSeconds()
             host_memory_before = self._observe_physical()
             try:
+                if self.prepare_cgroup is not None:
+                    with self._measure_stage(stage_seconds, "prepare_cgroup_s"):
+                        self.prepare_cgroup()
                 with self._measure_stage(stage_seconds, "api_crash_rollback_s"):
                     self.sandbox = self.client.crash_rollback_sandbox(
                         self.sandbox_id,
@@ -1222,8 +1225,10 @@ class CubeSandboxLifecycle:
                         self.snapshot_pool.abort(key)
                         released.append(repr(key))
                 self._pending_snapshot_keys.clear()
-                self._snapshot_key = None
-                self._snapshot_tier = None
+                # The rollback target is the last committed generation already
+                # represented by _snapshot_key. A lazy-restored WARM generation
+                # remains physically referenced by the recovered VM and must
+                # stay charged until a successor commits or the VM is destroyed.
                 self._tier = SnapshotTier.LOCAL
                 self._state = SandboxState.RUNNING
                 elapsed = self._record(

@@ -331,6 +331,29 @@ def test_overlapping_restore_expansions_are_serialized_by_capacity() -> None:
     assert pool.accounted_bytes == 90
 
 
+def test_snapshot_aware_restore_expansion_spills_without_candidate_rejection() -> None:
+    pool = WarmSnapshotPool(100, snapshot_aware=True)
+    spilled = []
+    for index in (1, 2):
+        pool.reserve(key(index), 40)
+        pool.commit(
+            key(index), path=f"/warm/{index}", logical_bytes=40,
+            allocated_bytes=40, transferred_bytes=40,
+            retention_value_seconds=1,
+            spiller=lambda item: spilled.append(item.key),
+        )
+
+    with pool.consume_guard(key(1)):
+        count = pool.reserve_expansion_for_restore(
+            key(1), 30, timeout_s=.01,
+        )
+
+    assert count == 1
+    assert spilled == [key(2)]
+    assert pool.expansion_reserved_bytes == 30
+    assert pool.accounted_bytes == 70
+
+
 def test_compressed_spill_without_expansion_headroom_fails_closed() -> None:
     pool = WarmSnapshotPool(100, clock=lambda: 1.0)
     pool.reserve(key(1), 10)

@@ -1120,6 +1120,109 @@ def test_crash_rollback_is_repeatable_and_supports_later_cycles(tmp_path: Path) 
     lifecycle.close()
 
 
+def test_crash_rollback_client_retries_sdk_and_prepares_each_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = []
+    prepared = []
+
+    class CrashRollbackSandbox:
+        @classmethod
+        def crash_rollback(cls, sandbox_id, **kwargs):
+            attempts.append((sandbox_id, kwargs))
+            if len(attempts) == 1:
+                raise RequestsConnectionError("response lost")
+            return SimpleNamespace(sandbox_id=sandbox_id)
+
+    monkeypatch.setattr("clawbox.cube.api_retry.time.sleep", lambda _seconds: None)
+    client = CubeSandboxClient(
+        sandbox_class=CrashRollbackSandbox, request_timeout_s=5,
+    )
+
+    recovered = client.crash_rollback_sandbox(
+        "sandbox-1", before_retry=lambda: prepared.append(True),
+    )
+
+    assert recovered.sandbox_id == "sandbox-1"
+    assert len(attempts) == 2
+    assert prepared == [True]
+    assert client._handles["sandbox-1"] is recovered
+
+
+def test_crash_rollback_retry_deadline_does_not_start_an_expired_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+    attempts = []
+    prepared = []
+
+    class FailedCrashRollbackSandbox:
+        @classmethod
+        def crash_rollback(cls, sandbox_id, **kwargs):
+            attempts.append((sandbox_id, kwargs))
+            raise RequestsConnectionError("Cube API unavailable")
+
+    monkeypatch.setattr(
+        "clawbox.cube.api_retry.time.monotonic", lambda: now[0],
+    )
+    monkeypatch.setattr(
+        "clawbox.cube.api_retry.time.sleep",
+        lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+    client = CubeSandboxClient(
+        sandbox_class=FailedCrashRollbackSandbox, request_timeout_s=.1,
+    )
+
+    with pytest.raises(RuntimeError, match="crash rollback sandbox sandbox-1"):
+        client.crash_rollback_sandbox(
+            "sandbox-1", before_retry=lambda: prepared.append(True),
+        )
+
+    assert len(attempts) == 1
+    assert prepared == []
+
+
+def test_crash_rollback_preserves_retained_warm_generation_until_close(
+    tmp_path: Path,
+) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(4096)
+    prepared = []
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=1024,
+        snapshot_mechanism="full-copy", lazy_restore=True,
+        prepare_cgroup=lambda: prepared.append(True),
+    )
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    lifecycle.restore()
+    retained_key = lifecycle._snapshot_key
+    assert retained_key is not None
+    assert pool.manifest(retained_key).retained_by_vm
+
+    def fail_successor(_sandbox, **_kwargs):
+        raise RuntimeError("publisher crashed")
+
+    client.pause_sandbox = fail_successor
+    with pytest.raises(RuntimeError, match="publisher crashed"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    client.crash_rollback_sandbox = lambda sandbox_id, **_kwargs: _Sandbox.connect(sandbox_id)
+
+    lifecycle.crash_rollback()
+
+    assert prepared[-1] is True
+    assert lifecycle._snapshot_key == retained_key
+    assert lifecycle._snapshot_tier is SnapshotTier.WARM
+    assert pool.committed_bytes == 1024
+    assert pool.reserved_bytes == 0
+    lifecycle.close()
+    assert pool.committed_bytes == pool.reserved_bytes == 0
+
+
 @pytest.mark.parametrize("capacity", [0, 512])
 def test_disabled_or_undersized_warm_pool_checkpoints_to_ssd(capacity) -> None:
     _Sandbox.items = {}

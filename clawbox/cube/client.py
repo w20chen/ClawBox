@@ -8,7 +8,7 @@ import os
 import queue
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -175,6 +175,7 @@ class CubeSandboxClient:
         self.tcp_endpoint_initial_delay_s = float(tcp_endpoint_initial_delay_s)
         self.tcp_endpoint_max_delay_s = float(tcp_endpoint_max_delay_s)
         self.create_capacity_retry_seconds = float(create_capacity_retry_seconds)
+        self.restore_retry_deadline_s = float(request_timeout_s)
         self.cleanup_workers = int(cleanup_workers)
         self._delete_slots = threading.BoundedSemaphore(self.cleanup_workers)
 

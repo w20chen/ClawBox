@@ -291,7 +291,25 @@ def export_snapshot(control_socket: str, *, storage_domain: str,
 
     def scan(value: Any, key: str = "", *, document: Path | None = None, trail: str = ""):
         if isinstance(value, dict):
+            if value.get("managed") is True and isinstance(value.get("external_path"), str):
+                layer_id = value.get("layer_id")
+                if (not isinstance(layer_id, str) or not layer_id
+                        or "/" in layer_id or "\\" in layer_id):
+                    raise RuntimeError(
+                        f"invalid managed RAM layer identity at {document}:{trail}"
+                    )
+                layer = Path(value["external_path"])
+                if not layer.is_absolute() or not layer.is_file():
+                    raise RuntimeError(
+                        f"missing managed RAM layer at {document}:{trail}"
+                    )
+                # Preserve the schema-2 identity/path invariant after peer
+                # relocation. Native restore requires <...>/layers/<id>/<file>,
+                # while the package owns and cleans this transferred closure.
+                add(layer, f"ram/layers/{layer_id}/{layer.name}")
             for name, child in value.items():
+                if name == "external_path" and value.get("managed") is True:
+                    continue
                 scan(child, name, document=document, trail=trail + "/" + name)
         elif isinstance(value, list):
             for index, child in enumerate(value):

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from clawbox.cube import peer_replica
+from clawbox.cube.snapshot import read_snapshot_metadata
 
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "SEEK_DATA"), reason="Linux sparse/native packages")
@@ -116,6 +117,77 @@ def test_shared_ram_import_uses_real_hardlink_and_private_relocated_lineage(tmp_
     assert os.path.samefile(alias, memory)
     assert str(target) in Path(str(alias) + ".lineage.json").read_text()
     assert str(source) in Path(str(memory) + ".lineage.json").read_text()
+
+
+def test_managed_layer_peer_import_preserves_schema_identity(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    catalog, _ = _fixture(source)
+    warm = tmp_path / "warm"
+    warm.mkdir()
+    memory = warm / "guest.mem"
+    memory.write_bytes(b"B" * 8192)
+    catalog["memory_dev"] = str(memory)
+    delta_dir = Path(str(memory) + ".layers")
+    delta_dir.mkdir()
+    os.link(memory, delta_dir / "000001.mem")
+    managed = source / "cold" / "layers" / "stable-layer-1" / "000000.mem"
+    managed.parent.mkdir(parents=True)
+    managed.write_bytes(b"A" * 8192)
+    Path(str(memory) + ".lineage.json").write_text(json.dumps({
+        "schema_version": 2,
+        "logical_bytes": 8192,
+        "transferred_bytes": 4096,
+        "full_base": False,
+        "layers": [
+            {"name": "000000.mem", "managed": True,
+             "layer_id": "stable-layer-1", "external_path": str(managed),
+             "ranges": [{"gpa": 0, "offset": 0, "length": 4096}]},
+            {"name": "000001.mem",
+             "ranges": [{"gpa": 4096, "offset": 4096, "length": 4096}]},
+        ],
+    }))
+    monkeypatch.setattr(peer_replica, "native_control", lambda *args: catalog)
+    manifest = peer_replica.export_snapshot(
+        "socket", storage_domain="node0", domain_root=str(source),
+        memory_path=str(memory), shared_dram_root=str(warm),
+    )
+    relative = manifest["native"]["source_paths"][str(managed)]
+    assert relative == "ram/layers/stable-layer-1/000000.mem"
+
+    target = tmp_path / "target"
+    package = target / ".clawbox-peer" / "replicas" / "fixture"
+    object_paths = {}
+    for obj in manifest["objects"]:
+        if obj["storage_domain"] == "shared_dram":
+            object_paths[obj["relative_path"]] = obj["source_path"]
+        else:
+            destination = package / obj["relative_path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(Path(obj["source_path"]).read_bytes())
+            object_paths[obj["relative_path"]] = str(destination)
+
+    def native(_socket, _route, payload=None):
+        if payload is None:
+            raise RuntimeError("snapshot catalog not found")
+        return {"snapshot_id": catalog["snapshot_id"],
+                "memory_dev": payload["memory_path"],
+                "rootfs_dev": payload["rootfs_path"]}
+
+    monkeypatch.setattr(peer_replica, "native_control", native)
+    result = peer_replica.import_replica("socket", {
+        "state": "ready", "manifest": manifest,
+        "target_root": str(package), "storage_domain": "node1",
+        "manifest_id": "fixture", "object_paths": object_paths,
+    }, str(target))
+
+    metadata = read_snapshot_metadata(
+        result["memory_path"], require_lineage=True,
+    )
+    relocated = metadata["external_layer_allocations"][0]
+    assert relocated["layer_id"] == "stable-layer-1"
+    assert Path(relocated["path"]).parent.name == "stable-layer-1"
+    assert Path(relocated["path"]).parent.parent.name == "layers"
 
 
 def test_prepared_cas_identity_reuses_verified_digest_without_payload_read(tmp_path, monkeypatch):

@@ -398,7 +398,13 @@ class WarmSnapshotPool:
             additional = max(0, upper_bound_bytes - existing)
             try:
                 with self._admission_lock:
-                    spill = self.spill_for_admission(additional, exclude={key})
+                    # Expansion is required to restore an already-selected
+                    # generation. It is not a new residency candidate whose
+                    # value may be compared with victims.
+                    spill = self.spill_for_admission(
+                        additional, exclude={key},
+                        candidate_retention_value_seconds=float("inf"),
+                    )
                     with self._lock:
                         item = self._manifests.get(key)
                         if item is None:
