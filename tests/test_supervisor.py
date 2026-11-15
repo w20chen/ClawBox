@@ -43,6 +43,37 @@ class _ResultWorkerSupervisor(_NoCubeSupervisor):
         return [sys.executable, "-c", "pass"]
 
 
+@pytest.mark.parametrize('worker', [_ResultWorkerSupervisor, _BrokenWorkerSupervisor, _HangingWorkerSupervisor])
+@pytest.mark.parametrize('finalize_ok', [True, False])
+def test_owned_gpu_finalizes_on_success_failure_and_timeout(tmp_path, monkeypatch, worker, finalize_ok):
+    instances = []
+    class GPU:
+        def __init__(self, config, root):
+            self.stops = 0
+            self.receipt = {}
+            instances.append(self)
+        def start(self): pass
+        def check(self): pass
+        def stop(self):
+            self.stops += 1
+            return dict(stopped=True, finalized=finalize_ok)
+    monkeypatch.setattr('clawbox.experiments.serving_sim_process.ServingSimProcess', GPU)
+    from clawbox.experiments.spec import InferenceSpec
+    spec = _short_spec()
+    spec = spec.model_copy(update={'inference': InferenceSpec(backend='serving_sim', configuration={
+        'base_url': 'http://127.0.0.1:8000', 'serving_sim_launch': dict(cpu_affinity=[999],
+        cores=1, topology='8A', sim_root='/sim', venv='/venv', trace_catalog='/catalog.json')})})
+    supervisor = worker(spec, run_id='gpu', attempt_id='a', owner_id='o',
+                        output_root=tmp_path/'run', poll_interval_seconds=.02)
+    results = supervisor.run()
+    assert instances and all(gpu.stops == 1 for gpu in instances)
+    assert all(result.correctness['gpu_service_finalized'] == finalize_ok for result in results)
+    if not finalize_ok:
+        assert all(result.status is RunStatus.FAILED for result in results)
+    elif worker is _ResultWorkerSupervisor:
+        assert all(result.status is RunStatus.SUCCEEDED for result in results)
+
+
 def test_infrastructure_failure_still_stops_the_matrix(tmp_path):
     supervisor = _BrokenWorkerSupervisor(_short_spec(), run_id='broken', attempt_id='a',
         owner_id='o', output_root=tmp_path / 'broken', poll_interval_seconds=.02)

@@ -136,6 +136,33 @@ class AgentSpec(StrictFrozenModel):
     driver: AgentDriver = AgentDriver.OPENCLAW
 
 
+class ServingSimLaunchSpec(StrictFrozenModel):
+    sim_root: str
+    venv: str
+    trace_catalog: str
+    cpu_affinity: tuple[int, ...] = Field(min_length=1)
+    cores: int = Field(gt=0)
+    topology: str = Field(min_length=1)
+    persistence: Literal['native', 'final'] = 'final'
+    nofile: int = Field(default=65536, gt=0)
+    startup_timeout_seconds: float = Field(default=180., gt=0, allow_inf_nan=False)
+    shutdown_timeout_seconds: float = Field(default=720., gt=0, allow_inf_nan=False)
+    tokenizer_dir: str | None = None
+    cache_dir: str | None = None
+    hf_hub_cache: str | None = None
+
+    @model_validator(mode='after')
+    def launch_contract(self):
+        for name in ('sim_root', 'venv', 'trace_catalog', 'tokenizer_dir', 'cache_dir', 'hf_hub_cache'):
+            value = getattr(self, name)
+            if value is not None and not PurePosixPath(value).is_absolute():
+                raise ValueError(f'serving_sim_launch.{name} must be an absolute Linux path')
+        if (len(set(self.cpu_affinity)) != len(self.cpu_affinity)
+                or min(self.cpu_affinity) < 0 or len(self.cpu_affinity) != self.cores):
+            raise ValueError('serving_sim_launch requires exactly cores distinct nonnegative CPU IDs')
+        return self
+
+
 class InferenceSpec(StrictFrozenModel):
     backend: InferenceBackend = InferenceBackend.REPLAY
     configuration: dict[str, Any] = Field(default_factory=dict)
@@ -146,6 +173,20 @@ class InferenceSpec(StrictFrozenModel):
                      "oracle_model_wait_seconds", "oracle_model_wait_source"}
         if forbidden.intersection(self.configuration):
             raise ValueError("LLM-duration prediction/oracle policy is unsupported; remove model-wait prediction settings and use actual wait events")
+        if 'serving_sim_launch' in self.configuration:
+            if self.backend is not InferenceBackend.SERVING_SIM:
+                raise ValueError('serving_sim_launch requires the serving_sim backend')
+            ServingSimLaunchSpec.model_validate(self.configuration['serving_sim_launch'])
+            if self.configuration.get('clawtune_config'):
+                raise ValueError('managed serving_sim requires explicit base_url/model/api_key_env; remove clawtune_config')
+            url = urllib.parse.urlsplit(str(self.configuration.get('base_url', '')))
+            if (url.scheme != 'http' or url.hostname not in {'127.0.0.1', 'localhost'}
+                    or url.username or url.password or url.query or url.fragment
+                    or url.path not in ('', '/', '/v1', '/v1/')):
+                raise ValueError('managed serving_sim requires a local http://127.0.0.1:PORT base_url')
+        interval = self.configuration.get('serving_sim_diagnostic_interval_seconds', 1.)
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval <= 0:
+            raise ValueError('serving_sim_diagnostic_interval_seconds must be positive and finite')
         return self
 
 

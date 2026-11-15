@@ -816,12 +816,44 @@ Live API inference still has no complete supported qualification path. Fields be
 | `time_scale` | 1.0 | Nonnegative multiplier on replayed model delays |
 | `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; configure its `workload.json` with `--workload-manifest`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
 | `serving_sim_topology_digest` | Unset | Expected `topology_digest` returned by the ClawBox adapter's `/v1/clawbox/simulator/info`. Set this to reject a changed topology during matched comparisons; when unset, the actual digest is recorded without an equality requirement. |
+| `serving_sim_diagnostic_interval_seconds` | 1.0 seconds | Positive finite interval for client process/FD/event-loop samples, and managed server samples. Request diagnostics retain stages and exception chains without extra prompt/response copies. |
+| `serving_sim_launch` | Unset | Optional managed local simulator configuration below. Qualification and each formal arm launch a fresh service; success, failure and timeout all finalize it. Omit for a manually managed external service. |
 | `runtime_startup_timeout_seconds` | 60 | Integer 1–3600; Runtime setup and sidecar readiness deadline |
 | `runtime_completion_watch_seconds` | 10 | 1–60 seconds per completion notification wait; events wake it immediately |
 | `openclaw_bin` | `openclaw` | Guest executable |
 | `openclaw_exec_yield_ms` | Unset | Optional integer from 10 to 120000 milliseconds for background-capable OpenClaw exec calls. Synchronous replay recordings disable automatic background execution; see [workloads](workloads.md). |
 | `openclaw_tool_home` | `/root` | Absolute home directory inside the Tool VM. OpenClaw shell commands use it to find the image's Git and Conda configuration. Change for a custom Tool user; takes effect with a new run ID, without host apply or retraining. |
 | `clawtune_config`, `clawtune_root` | Unset | Reuse a ClawTune model configuration and source root |
+
+`inference.configuration.serving_sim_launch` fields:
+
+| Field | Default / requirement | Meaning |
+| --- | --- | --- |
+| `sim_root`, `venv`, `trace_catalog` | Required absolute Linux paths | Verified unmodified GPU source, existing simulator environment, and GPU-side catalog. CPU scheduling does not parse the catalog. |
+| `cpu_affinity`, `cores` | Required | Distinct real logical CPU IDs and their count; must be outside configured VM compute CPU sets and within supervisor affinity. |
+| `topology` | Required | Native simulated GPU topology, e.g. `8A`; separate from real CPU budget. |
+| `persistence` | `final` | `native` or `final`, using the existing report-saving semantics. |
+| `nofile` | 65536 descriptors | Minimum process soft limit. A lower hard limit fails with a remedy; configure the host/service limit before retrying. |
+| `startup_timeout_seconds` | 180 seconds | Positive finite readiness deadline; startup failure is recorded and owned resources are closed. |
+| `shutdown_timeout_seconds` | 720 seconds | Positive finite graceful-close deadline. Forced termination is a finalization failure. |
+| `tokenizer_dir` | Unset | Optional absolute path to the existing native tokenizer assets; otherwise native lookup applies. |
+| `cache_dir` | Unset | Optional absolute path to the existing cache used by simulator setup. Sets `SERVING_SIM_CACHE` in the child, including processor metadata lookup; otherwise inherited `SERVING_SIM_CACHE` or the launcher's default `venv.parent/cache` applies. |
+| `hf_hub_cache` | Unset | Optional absolute Hugging Face hub cache directory; sets child `HF_HUB_CACHE`. Needed to reuse pinned processor metadata from another account/cache. Independent of `tokenizer_dir`; otherwise inherited Hugging Face cache settings apply. |
+
+Managed launch requires explicit `base_url`, `model` and optional `api_key_env`,
+using local HTTP on `127.0.0.1` or `localhost`; `clawtune_config` cannot override
+that endpoint. Existing listeners/output directories are never adopted. The
+launcher also exposes `--nofile` (65536) and
+`--diagnostic-interval-seconds` (1.0 seconds) for manual services. A finalized
+report is distinct from timing validity: inspect native `validity.json` and
+`correctness.gpu_validity` before making performance claims.
+
+Changes require a new run ID and matching qualification, but no guest image
+rebuild or prediction retraining. Host apply is needed only if the saved host
+CPU/resource configuration or service hard limits must change. Reuse the
+installed simulator environment; setup/rebuild is required only when its actual
+dependencies or native assets change. A partially consumed GPU run cannot resume;
+abort/clean it up and preserve its artifacts before starting a new run.
 
 Put credential values in the environment or selected credential configuration,
 not experiment YAML. A selected `clawtune_config` supplies the endpoint, model,
@@ -964,6 +996,13 @@ Runtime builds also need Node.js/npm. The selected seed comes from
 `CLAWTUNE_KB_SEED` or ClawTune's default. The command saves successful image and
 template identities to the profile. See [update requirements](installation.md#update-an-existing-host)
 before rebuilding a role or adopting new KB state.
+
+Runtime images include the recorded-inference context guards. In `replay` and
+`serving_sim`, they disable both automatic compaction and the local prompt/tool
+context estimates that would inject an unrecorded summary call. Live inference
+retains OpenClaw's normal context handling. Updating these guards requires
+`images --role runtime`, adopting its new template, a new run ID and qualification;
+it does not require Tool images or predictor retraining.
 
 `CLAWTUNE_ROOT` and `CLAWTUNE_SIDECAR_SRC` must select the updated ClawTune
 source with ToolKB, TrieKB, and LatticeKB only. `CLAWTUNE_KB_SEED` defaults to

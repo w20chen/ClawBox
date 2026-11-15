@@ -12,6 +12,7 @@ from typing import Callable
 import httpx
 
 from clawbox.replay.process_sessions import rebind_process_sessions
+from .serving_sim_diagnostics import Diagnostics, exception_record
 
 
 class _Message:
@@ -92,6 +93,9 @@ class ServingSimClient:
         return self
 
     async def _start(self):
+        self.diagnostics = Diagnostics(self.output / 'requests.jsonl')
+        self.sample_task = asyncio.create_task(self.diagnostics.sample_loop(
+            float(self.configuration.get('serving_sim_diagnostic_interval_seconds', 1.))))
         self.client = httpx.AsyncClient(trust_env=False,
             headers={"Authorization": "Bearer " + self.credential} if self.credential else {},
             timeout=httpx.Timeout(20, read=None),
@@ -149,20 +153,25 @@ class ServingSimClient:
                                   received_unix_s=received,
                                   signal_age_seconds=max(0., received - float(record["wall_t"])
                                       - self.clock_offset_s + self.clock_uncertainty_s))
-                    self.signal_log.write(json.dumps(record, separators=(",", ":")) + "\n")
                     binding = self.callbacks.get(record.get("request_id"))
-                    if binding:
-                        session_id, callback = binding
-                        if record.get("session_id") != session_id:
-                            raise RuntimeError("simulator signal session identity mismatch")
-                        if callback is not None:
-                            callback(record)
+                    callback_started = time.monotonic()
+                    try:
+                        if binding:
+                            session_id, callback = binding
+                            if record.get("session_id") != session_id:
+                                raise RuntimeError("simulator signal session identity mismatch")
+                            if callback is not None:
+                                callback(record)
+                    finally:
+                        record['callback_seconds'] = time.monotonic() - callback_started
+                        self.signal_log.write(json.dumps(record, separators=(",", ":")) + "\n")
                 if not self.stopping:
                     raise RuntimeError("simulator signal stream disconnected")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self.error = exc
+            self.diagnostics.write('signal_failure', error=exception_record(exc))
             for task in list(self.requests.values()):
                 task.cancel()
         finally:
@@ -200,16 +209,27 @@ class ServingSimClient:
                      "replay": expected, "model": self.configuration["model"]}
         message, finished, done, first = _Message(), False, False, None
         mapping = None
+        diagnostic = dict(session_id=sid, request_id=rid, trace_id=trace_id, call_id=call_id,
+                          stage='submit', times={'submit': time.time()})
+        self.diagnostics.write('request_submitted', **diagnostic)
+        def stage(name):
+            diagnostic['stage'] = name
+            diagnostic['times'][name] = time.time()
         try:
             async with asyncio.timeout(timeout_s):
                 async with self.client.stream("POST", self.base + "/v1/chat/completions", json=forwarded) as response:
+                    stage('response_headers')
+                    diagnostic['http_status'] = response.status_code
                     if response.status_code != 200:
                         raise RuntimeError(f"serving_sim rejected model request with HTTP {response.status_code}; no automatic reexecution")
                     if "text/event-stream" not in response.headers.get("content-type", ""):
                         raise RuntimeError("serving_sim did not return SSE")
                     async for kind, _, data in sse_events(response):
+                        if 'first_sse' not in diagnostic['times']:
+                            stage('first_sse')
                         if data == "[DONE]":
                             done = True
+                            stage('done')
                             break
                         chunk = json.loads(data)
                         if kind == 'clawbox':
@@ -243,6 +263,7 @@ class ServingSimClient:
                             if reason not in {"stop", "tool_calls", "length", "content_filter", "function_call"}:
                                 raise RuntimeError("simulator response has an invalid finish reason")
                             finished = True
+                            stage('terminal')
                         elif first is None:
                             if "replay" not in chunk:
                                 raise RuntimeError("simulator first output lacks replay identity")
@@ -261,10 +282,23 @@ class ServingSimClient:
             # Compact only the delivered representation; GPU pacing and signals
             # continue to be consumed at their original times.
             chunk['choices'][0]['delta'] = rebind_process_sessions(message.value(), mapping)
+            self.diagnostics.write('request_completed', **diagnostic)
             return 200, "text/event-stream", ('data: ' + json.dumps(chunk, ensure_ascii=False)
                 + '\n\ndata: [DONE]\n\n').encode()
-        except TimeoutError:
-            raise TimeoutError('serving_sim model request timed out; GPU stream cancelled') from None
+        except BaseException as exc:
+            diagnostic['error'] = exception_record(exc)
+            diagnostic['cancelled'] = isinstance(exc, asyncio.CancelledError)
+            if diagnostic['cancelled']:
+                diagnostic['cancellation_reason'] = ('observation_failure' if self.error else
+                    'session_cleanup' if rid in self.cancelled_requests else
+                    'client_close' if self.stopping else 'caller_cancelled')
+            self.diagnostics.write('request_failed', **diagnostic)
+            exc.serving_sim_diagnostic = diagnostic
+            if isinstance(exc, TimeoutError):
+                error = TimeoutError('serving_sim model request timed out; GPU stream cancelled')
+                error.serving_sim_diagnostic = diagnostic
+                raise error from exc
+            raise
         finally:
             self.callbacks.pop(rid, None)
             self.requests.pop(rid, None)
@@ -304,6 +338,8 @@ class ServingSimClient:
         tasks = list(self.requests.values())
         if hasattr(self, "signal_task"):
             tasks.append(self.signal_task)
+        if hasattr(self, 'sample_task'):
+            tasks.append(self.sample_task)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -312,6 +348,8 @@ class ServingSimClient:
         await self.loop.shutdown_asyncgens()
         if hasattr(self, "signal_log"):
             self.signal_log.close()
+        if hasattr(self, 'diagnostics'):
+            self.diagnostics.close()
 
     def __exit__(self, *args):
         if self.loop.is_running():

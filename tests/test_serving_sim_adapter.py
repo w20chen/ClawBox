@@ -11,6 +11,28 @@ sd = pytest.importorskip('serving_sim.signals.signal_delivery')
 from clawbox.integrations.serving_sim_app import attach_management, INFO_PATH, EVENTS_PATH
 
 
+def test_signal_batch_keeps_order_and_gap_checks_without_rescanning_old_history():
+    from collections import deque
+    from clawbox.integrations.serving_sim_app import signal_batch
+    class Counted(deque):
+        visited = 0
+        def __reversed__(self):
+            for item in super().__reversed__():
+                self.visited += 1
+                yield item
+    feed = sd.Feed()
+    feed.sequence = 100010
+    feed.events = Counted((i, dict(request_id=str(i))) for i in range(11, 100011))
+    expected = feed.matching(100002, None, None)
+    assert signal_batch(feed, 100002) == expected
+    assert feed.events.visited == 9
+    assert signal_batch(feed, feed.sequence) == []
+    with pytest.raises(sd.CursorError, match='expired'):
+        signal_batch(feed, 9)
+    with pytest.raises(sd.CursorError, match='between'):
+        signal_batch(feed, feed.sequence + 1)
+
+
 @pytest.mark.parametrize('mode', ['native', 'final'])
 @pytest.mark.parametrize('close_fails', [False, True])
 def test_persistence_drains_driver_before_saving_all_records(tmp_path, mode, close_fails):

@@ -77,6 +77,9 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.posts.append(body)
             state.started.set()
+            if state.mode == 'before_headers':
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
             self.send_headers("text/event-stream")
             if state.mode == "error":
                 self.emit({"error": "synthetic failure"})
@@ -252,6 +255,22 @@ def test_http_200_does_not_mask_failed_or_truncated_gpu_output(client_factory, m
         with pytest.raises(RuntimeError, match=error):
             complete(client)
         assert len(server.posts) == 1
+        failure = json.loads((client.output / 'requests.jsonl').read_text().splitlines()[-1])
+        assert failure['event'] == 'request_failed'
+        assert failure['http_status'] == 200 and failure['stage'] == 'first_sse'
+        assert failure['error']['chain'] and failure['error']['traceback']
+
+
+def test_failure_before_headers_is_distinguished_and_never_resubmitted(client_factory):
+    with simulator('before_headers') as server, client_factory(server) as client:
+        with pytest.raises(Exception) as caught:
+            complete(client)
+        detail = caught.value.serving_sim_diagnostic
+        assert detail['stage'] == 'submit'
+        assert 'response_headers' not in detail['times']
+        assert len(server.posts) == 1
+        assert len(detail['error']['chain']) >= 2
+        assert 'real prompt' not in json.dumps(detail)
 
 
 def test_timeout_closes_the_real_upstream_http_stream(client_factory):

@@ -39,6 +39,7 @@ class GatewayRequest:
     content_type: str = "application/json"
     response_b64: str = ""
     error: str = ""
+    error_details: dict[str, Any] = field(default_factory=dict)
     started_unix_s: float = 0.0
     model_generated_unix_s: float = 0.0
     response_released_unix_s: float = 0.0
@@ -668,6 +669,7 @@ class ModelGateway:
             args=(request_id, payload, result), name='model-response', daemon=True).start())
 
     def _produce(self, request_id: str, payload: dict[str, Any], serving_result=None) -> None:
+        error_details = {}
         with self._changed:
             if self._requests[request_id].ready or self._cancelled.is_set():
                 return
@@ -740,6 +742,8 @@ class ModelGateway:
                         self._requests[request_id].replay_index, message,
                     )
         except Exception as exc:  # surfaced to the waiting guest request
+            from clawbox.experiments.serving_sim_diagnostics import exception_record
+            error_details = getattr(exc, 'serving_sim_diagnostic', None) or exception_record(exc)
             status, content_type, body, error, admission = 500, "application/json", b"", str(exc) or type(exc).__name__, {}
         with self._changed:
             request = self._requests[request_id]
@@ -752,6 +756,7 @@ class ModelGateway:
             request.content_type = content_type
             request.response_b64 = base64.b64encode(body).decode()
             request.error = error
+            request.error_details = error_details
             request.admission = admission
             request.ready = True
             request.response_released_unix_s = time.time()

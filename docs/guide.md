@@ -1095,6 +1095,68 @@ an explicit interface setting is preserved. No upstream source patch is applied.
 Reserve its actual CPU budget separately from experiment VM CPUs.
 `--cores` bounds real simulator CPUs; `--topology` selects simulated GPUs.
 
+For automatic GPU startup and finalization, add the following to the existing
+experiment YAML. Use verified local paths and CPU IDs reserved outside the VM
+compute sets; the values below are examples. Keep `base_url` local and choose an
+unused port. The simulator environment must already be installed with `setup`.
+
+```yaml
+inference:
+  backend: serving_sim
+  configuration:
+    model: qwen36-r2
+    base_url: http://127.0.0.1:8000
+    api_key_env: CLAWBOX_SIM_API_KEY
+    serving_sim_catalog_manifest: /absolute/gpu-bundle/manifest.json
+    serving_sim_diagnostic_interval_seconds: 1.0
+    serving_sim_launch:
+      sim_root: /absolute/agent-sched-bench-gpu
+      venv: /absolute/simulator-venv
+      trace_catalog: /absolute/gpu-bundle/catalog.json
+      tokenizer_dir: /absolute/downloaded-tokenizer-snapshot
+      cache_dir: /absolute/existing-simulator-cache
+      hf_hub_cache: /absolute/huggingface/hub
+      cpu_affinity: [240, 241, 242, 243]
+      cores: 4
+      topology: 8A
+      persistence: final
+      nofile: 65536
+      startup_timeout_seconds: 180
+      shutdown_timeout_seconds: 720
+```
+
+With `serving_sim_launch`, run `clawbox experiment qualify` and then
+`clawbox experiment run` as below; skip the manual `serve` commands and manual
+shutdown. Each qualification/formal arm gets a fresh service and output under
+its `gpu-service/` artifact directory. CPU failure and timeout still close that
+service and check its final reports. Inspect `gpu-service/process.json` and
+`gpu-service/service.log` on failure. Use `clawbox experiment abort RUN_ID` for a
+running experiment and `clawbox experiment destroy RUN_ID` after an
+interruption; preserve failed evidence and use a new run ID, since a partially
+consumed GPU service cannot resume. After reboot, restore and verify the saved
+host configuration before starting the new run. External services remain
+manually managed when `serving_sim_launch` is absent.
+
+Set `tokenizer_dir` to the existing model snapshot printed by simulator setup
+when running with `--sudo` or another account whose Hugging Face cache differs.
+This lets fresh shells reuse those assets without relying on an earlier shell's
+`HF_HOME`; no model download or image rebuild is needed.
+Set `hf_hub_cache` to the Hugging Face hub cache used during simulator setup;
+native processor initialization uses that cache independently of `tokenizer_dir`.
+Set `cache_dir` to the `SERVING_SIM_CACHE` directory used during setup for native
+caches. Omitting these fields uses the launcher's environment/default lookup.
+
+Recorded inference (`replay` and `serving_sim`) requires the current Runtime
+context guards: OpenClaw must not add summary requests when its local context
+estimate grows. Refresh an older Runtime with
+`clawbox experiment images --profile /absolute/host.json --role runtime`, adopt
+`runtime.template_id`, `runtime.image_digest` and `runtime.source_image_reference` from the updated profile
+in the new experiment's `environment.runtime`, and qualify it again.
+Preserve the old templates and case-specific Tool mappings. This update needs
+no Tool rebuild or ClawTune retraining; live inference keeps its context guards.
+
+The following commands describe that external-service alternative:
+
 ```bash
 export SIM_VENV=/absolute/simulator-venv
 python3 -m clawbox.integrations.serving_sim setup --sim-root /absolute/agent-sched-bench-gpu --cores 4

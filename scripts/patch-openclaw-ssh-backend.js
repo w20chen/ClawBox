@@ -12,6 +12,8 @@ let noOpEditPatchCount = 0;
 let sandboxPreflightPatchCount = 0;
 let cliCompactionPatchCount = 0;
 let agentCompactionPatchCount = 0;
+let toolContextGuardPatchCount = 0;
+let promptPrecheckPatchCount = 0;
 const changed = [];
 for (const name of fs.readdirSync(dist)) {
   if (!name.endsWith(".js")) continue;
@@ -35,6 +37,19 @@ for (const name of fs.readdirSync(dist)) {
     if (kind === 'cli') cliCompactionPatchCount += 1;
     else agentCompactionPatchCount += 1;
   }
+  // The tool-loop context guard and pre-prompt precheck can independently
+  // enter overflow recovery even when agent auto-compaction is disabled.
+  // Recorded inference must not inject a summary call or truncate history.
+  const toolGuardSignature = 'function installToolResultContextGuard(params) {';
+  const toolGuard = '\n\tif (process.env.CLAWBOX_REPLAY_NO_AUTO_COMPACTION === "1") return () => {};';
+  if (next.includes(toolGuardSignature)) {
+    if (!next.includes(toolGuardSignature + toolGuard)) next = next.replace(toolGuardSignature, toolGuardSignature + toolGuard);
+    toolContextGuardPatchCount += 1;
+  }
+  const promptPrecheck = 'const shouldSkipPrecheck = skipPromptSubmission ||';
+  const replayPrecheck = 'const shouldSkipPrecheck = process.env.CLAWBOX_REPLAY_NO_AUTO_COMPACTION === "1" || skipPromptSubmission ||';
+  if (next.includes(promptPrecheck)) next = next.replace(promptPrecheck, replayPrecheck);
+  if (next.includes(replayPrecheck)) promptPrecheckPatchCount += 1;
   if (next.includes("remoteWorkspaceDir: workspaceRoot")) rootPatchCount += 1;
 
   // A recorded no-op edit is still a completed tool call. OpenClaw 2026.7.1-2
@@ -123,6 +138,9 @@ if (sandboxPreflightPatchCount !== 1) {
 }
 if (cliCompactionPatchCount !== 1 || agentCompactionPatchCount !== 1) {
   throw new Error(`expected one CLI and agent compaction guard, found ${cliCompactionPatchCount}/${agentCompactionPatchCount}`);
+}
+if (toolContextGuardPatchCount !== 1 || promptPrecheckPatchCount !== 1) {
+  throw new Error(`expected one tool-loop and prompt context guard, found ${toolContextGuardPatchCount}/${promptPrecheckPatchCount}`);
 }
 console.log(`OpenClaw SSH backend and no-op edit continuation verified; changed: ${changed.join(", ") || "none"}`);
 return changed;

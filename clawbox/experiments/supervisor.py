@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -361,6 +362,8 @@ class ExperimentSupervisor:
         task_uid = _attempt_task_uid(self.owner_id, self.attempt_id, arm.arm_id)
         artifact_root = self.output_root / "attempts" / self.attempt_id / arm.arm_id
         if artifact_root.exists():
+            if 'serving_sim_launch' in arm.inference.configuration:
+                raise ValueError('cannot resume partially consumed GPU state; preserve this attempt and use a new run ID')
             if not self.resume:
                 raise ValueError(f'attempt already exists: {artifact_root}')
             # Each invocation has new logs/artifacts, while KB and progress have
@@ -376,6 +379,53 @@ class ExperimentSupervisor:
         self.state.update({"current_arm_id": arm.arm_id, "phase": "worker"})
         self._write_state()
 
+        simulator = None
+        try:
+            if 'serving_sim_launch' in arm.inference.configuration:
+                from .serving_sim_process import ServingSimProcess
+                from .topology import parse_cpu_list
+                launch_cpus = set(arm.inference.configuration['serving_sim_launch']['cpu_affinity'])
+                if any(launch_cpus & parse_cpu_list(node.cpus) for node in arm.resources.compute_nodes):
+                    raise ValueError('managed simulator CPUs overlap experiment VM compute CPUs')
+                simulator = ServingSimProcess(arm.inference.configuration, artifact_root)
+                simulator.start()
+                arm_state['gpu_service'] = simulator.receipt
+                self._write_state()
+            result = self._execute_arm(arm, frozen_spec, started_at, task_uid,
+                                       artifact_root, arm_state, simulator)
+        except BaseException as exc:
+            arm_state.update(status='cancelled' if isinstance(exc, KeyboardInterrupt) else 'failed',
+                             failure=f'{type(exc).__name__}: {exc}', completed_unix_s=time.time())
+            raise
+        finally:
+            if simulator is not None:
+                arm_state['gpu_service'] = simulator.stop()
+            self._write_state()
+
+        if simulator is not None:
+            gpu = arm_state['gpu_service']
+            valid = gpu.get('stopped') and gpu.get('finalized') and not gpu.get('shutdown_error')
+            result = result.model_copy(update={'correctness': {
+                **result.correctness, 'gpu_service_finalized': bool(valid),
+                'gpu_validity': gpu.get('validity'),
+            }})
+            if not valid:
+                result = result.model_copy(update={
+                    'status': RunStatus.FAILED, 'failure_category': FailureCategory.INFRASTRUCTURE,
+                    'correctness': {**result.correctness, 'validation_passed': False,
+                        'gpu_failure': 'GPU shutdown/finalization failed; inspect gpu-service/process.json'},
+                })
+        self._store_result(result)
+        child_result_path = artifact_root / 'arms' / f'{arm.arm_id}.json'
+        child_result_path.unlink(missing_ok=True)
+        child_result_path.with_suffix('.complete').unlink(missing_ok=True)
+        arm_state.update(status=result.status.value, completed_unix_s=time.time(),
+                         result=str(self.output_root / 'arms' / f'{arm.arm_id}.json'))
+        self._write_state()
+        return result
+
+    def _execute_arm(self, arm, frozen_spec, started_at, task_uid, artifact_root,
+                     arm_state, simulator=None):
         stdout_path = artifact_root / "worker.stdout.log"
         stderr_path = artifact_root / "worker.stderr.log"
         with stdout_path.open("ab") as stdout, stderr_path.open("ab") as stderr:
@@ -396,6 +446,8 @@ class ExperimentSupervisor:
             timed_out = False
             try:
                 while process.poll() is None:
+                    if simulator is not None:
+                        simulator.check()
                     now = time.monotonic()
                     if now >= deadline:
                         timed_out = True
@@ -507,20 +559,26 @@ class ExperimentSupervisor:
                 "correctness": {**result.correctness, "cleanup_verified": True},
             })
 
-        self._store_result(result)
-        # The worker result is an inter-process handoff.  The canonical result
-        # above contains the same evidence plus the supervisor's cleanup verdict.
-        child_result_path.unlink(missing_ok=True)
-        child_result_path.with_suffix(".complete").unlink(missing_ok=True)
-        arm_state.update({
-            "status": result.status.value,
-            "completed_unix_s": time.time(),
-            "result": str(self.output_root / "arms" / f"{arm.arm_id}.json"),
-        })
-        self._write_state()
         return result
 
     def run(self) -> list[ResultEnvelope]:
+        # SIGTERM must unwind the owned GPU lifecycle just like Ctrl-C.
+        import threading
+        managed = 'serving_sim_launch' in self.spec.inference.configuration
+        install = managed and os.name == 'posix' and threading.current_thread() is threading.main_thread()
+        previous = signal.getsignal(signal.SIGTERM) if install else None
+        def interrupt(_signum, _frame):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            raise KeyboardInterrupt('experiment supervisor terminated')
+        if install:
+            signal.signal(signal.SIGTERM, interrupt)
+        try:
+            return self._run_supervised()
+        finally:
+            if install:
+                signal.signal(signal.SIGTERM, previous)
+
+    def _run_supervised(self) -> list[ResultEnvelope]:
         arms = list(expand_matrix(self.spec))
         self._initialize(arms)
         frozen_spec = self.output_root / "experiment.yaml"
@@ -628,6 +686,12 @@ def cleanup_run(
             failures.append(f"{arm_id}: {type(exc).__name__}: {exc}")
             arm["cleanup_verified"] = False
             arm["cleanup_error"] = str(exc)
+        if (artifact_path / 'gpu-service' / 'process.json').exists():
+            try:
+                from .serving_sim_process import finalize_saved_service
+                arm['gpu_service'] = finalize_saved_service(artifact_path / 'gpu-service')
+            except Exception as exc:
+                failures.append(f'{arm_id} GPU: {type(exc).__name__}: {exc}')
     try:
         spec = load_experiment(run_root / "experiment.yaml")
         storage = spec.resources.snapshot_scheduling_storage
@@ -660,7 +724,15 @@ def abort_run(
     state = read_run_state(run_root)
     identity = state.get("supervisor")
     if process_is_alive(identity):
-        terminate_process_tree(int(identity["pid"]))
+        spec = load_experiment(run_root / 'experiment.yaml')
+        launch = spec.inference.configuration.get('serving_sim_launch')
+        if launch and os.name == 'posix':
+            psutil.Process(int(identity['pid'])).send_signal(signal.SIGTERM)
+            deadline = time.monotonic() + float(launch.get('shutdown_timeout_seconds', 720)) + cleanup_timeout_seconds + 30
+            while process_is_alive(identity) and time.monotonic() < deadline:
+                time.sleep(.5)
+        if process_is_alive(identity):
+            terminate_process_tree(int(identity["pid"]))
     result = cleanup_run(
         run_root, cleanup_workers=cleanup_workers,
         cleanup_timeout_seconds=cleanup_timeout_seconds,

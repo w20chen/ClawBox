@@ -1293,6 +1293,14 @@ class PolicyCoordinator:
                     self._waiter_blockers[ticket] = (
                         tuple(safety_reasons) if can_attempt else ('fifo_predecessor',)
                     )
+                    # Memory observations can switch the selected head between
+                    # creation and existing-session progress. That head may
+                    # already be sleeping behind this ticket after an earlier
+                    # observation. Hand it the wakeup before sleeping ourselves;
+                    # otherwise every waiter can wait for a FIFO predecessor
+                    # even after all memory claims have been released.
+                    if head is not ticket and head in self._waiter_events:
+                        self._waiter_events[head].set()
                     # Placement may reconsider a memory-blocked node, but must
                     # retain its FIFO ticket while merely waiting behind work.
                     # Restarting every 200 ms otherwise starves all creations

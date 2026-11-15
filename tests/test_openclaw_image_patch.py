@@ -51,6 +51,15 @@ async function runCliTurnCompactionLifecycle(params) {
 function shouldDisableAgentAutoCompaction(params) {
   return params.ownsCompaction === true;
 }
+function installToolResultContextGuard(params) {
+  const original = params.agent.transformContext;
+  params.agent.transformContext = () => { throw new Error('estimated context overflow'); };
+  return () => { params.agent.transformContext = original; };
+}
+function promptPrecheck(skipPromptSubmission, ownsCompaction) {
+  const shouldSkipPrecheck = skipPromptSubmission || ownsCompaction;
+  if (!shouldSkipPrecheck) throw new Error('prompt compaction reached');
+}
 function shouldSkipExecScriptPreflight(params) {
   return params.host === "gateway" && params.security === "full" && params.ask === "off";
 }
@@ -97,7 +106,22 @@ if (shouldSkipExecScriptPreflight({host:'node',security:'full',ask:'off'}))
   if (await runCliTurnCompactionLifecycle({sessionEntry:entry}) !== entry)
     throw new Error('replay context changed');
   if (!shouldDisableAgentAutoCompaction({})) throw new Error('agent compaction still enabled');
+  const originalTransform = messages => messages;
+  const agent = {transformContext: originalTransform};
+  const removeReplayGuard = installToolResultContextGuard({agent});
+  const messages = [{role:'toolResult', content:'x'.repeat(600000)}];
+  if (agent.transformContext(messages) !== messages) throw new Error('replay history changed');
+  removeReplayGuard();
+  if (agent.transformContext !== originalTransform) throw new Error('replay transform changed');
+  promptPrecheck(false, false);
   process.env.CLAWBOX_REPLAY_NO_AUTO_COMPACTION = '0';
+  const removeLiveGuard = installToolResultContextGuard({agent});
+  try { agent.transformContext(messages); throw new Error('live guard skipped'); }
+  catch (error) { if (error.message !== 'estimated context overflow') throw error; }
+  removeLiveGuard();
+  if (agent.transformContext !== originalTransform) throw new Error('live cleanup lost');
+  try { promptPrecheck(false, false); throw new Error('live precheck skipped'); }
+  catch (error) { if (error.message !== 'prompt compaction reached') throw error; }
   if (shouldDisableAgentAutoCompaction({})) throw new Error('live compaction disabled');
   if (!shouldDisableAgentAutoCompaction({ownsCompaction:true})) throw new Error('live guard lost');
   try { await runCliTurnCompactionLifecycle({}); throw new Error('live compaction skipped'); }

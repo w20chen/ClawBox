@@ -11,6 +11,64 @@ from clawbox.experiments.baselines import resolve_baseline
 MIB = 1024**2
 
 
+def test_changed_admission_head_wakes_its_sleeping_predecessor(monkeypatch):
+    """Different memory observations must not leave every ticket behind a head."""
+    c = PolicyCoordinator(
+        resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
+        emergency_free_mib=0, operation_headroom_mib=0,
+        physical_sample=lambda: (0, 100 * MIB),
+    )
+    high = ((9 * MIB, 100 * MIB), (9 * MIB, 100 * MIB), {})
+    low = ((0, 100 * MIB), (0, 100 * MIB), {})
+    stale_refresh = [True]
+
+    def observe(*args, **kwargs):
+        # The creation poll began with an older high-use observation. Restore
+        # already saw the released memory and yielded to FIFO creation.
+        if threading.current_thread().name == 'creation' and stale_refresh[0]:
+            stale_refresh[0] = False
+            return high
+        return low
+
+    monkeypatch.setattr(c, '_admission_snapshot', observe)
+    order, errors = [], []
+    finished = threading.Event()
+
+    def acquire(name, amount, kind, observation):
+        try:
+            c.acquire(name, amount, 2., wait_class=kind, _observations=observation)
+            order.append(name)
+            if len(order) == 2:
+                finished.set()
+        except Exception as exc:
+            errors.append(exc)
+
+    creation = threading.Thread(target=acquire, name='creation',
+        args=('creation', 6, 'create', high))
+    restore = threading.Thread(target=acquire, name='restore',
+        args=('restore', 1, 'restore', low))
+    creation.start()
+    try:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            with c._condition:
+                if c._waiter_blockers:
+                    break
+            time.sleep(.001)
+        else:
+            pytest.fail('creation did not reach its capacity wait')
+        restore.start()
+        progressed = finished.wait(1.)
+    finally:
+        creation.join(3)
+        if restore.ident is not None:
+            restore.join(3)
+    assert progressed, 'both waiters slept behind each other until their timeout'
+    assert not errors
+    assert order == ['creation', 'restore']
+    assert c.demand.pending_upper_bound() == 7 * MIB
+
+
 def test_kernel_observation_is_single_flight_without_becoming_a_cache():
     ledger = DemandLedger(sample=lambda: (0, 0), capacity=100 * MIB)
     entered, release = threading.Event(), threading.Event()

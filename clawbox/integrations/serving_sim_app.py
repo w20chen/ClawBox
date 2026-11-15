@@ -13,11 +13,38 @@ import os
 from pathlib import Path
 import time
 
+from clawbox.experiments.serving_sim_diagnostics import Diagnostics, exception_record
+
 
 INFO_PATH = "/v1/clawbox/simulator/info"
 EVENTS_PATH = "/request-signals/clawbox/events"
 ADAPTER_PROTOCOL = 2
 OUTCOMES_PATH = '/v1/clawbox/simulator/tool-outcomes'
+
+
+def attach_diagnostics(app, out: Path, interval_s: float):
+    upstream = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(application):
+        async with upstream(application):
+            diagnostics = Diagnostics(out / 'clawbox-diagnostics.jsonl')
+            application.state.diagnostics = diagnostics
+            sampler = asyncio.create_task(diagnostics.sample_loop(interval_s))
+            try:
+                yield
+            finally:
+                sampler.cancel()
+                await asyncio.gather(sampler, return_exceptions=True)
+                diagnostics.close()
+    app.router.lifespan_context = lifespan
+    return app
+
+
+def diagnose(app, event, **fields):
+    diagnostics = getattr(app.state, 'diagnostics', None)
+    if diagnostics is not None:
+        diagnostics.write(event, **fields)
 
 
 def attach_persistence(app, out: Path, mode: str):
@@ -82,6 +109,8 @@ def attach_chat_adapter(app):
         body = await request.json()  # Starlette caches this for the native route.
         if not isinstance(body, dict):
             return await upstream(request)
+        identity = {key: body.get(key) for key in ('session_id', 'request_id')}
+        diagnose(app, 'request_received', **identity)
         service = app.state.service
         try:
             binding = service.registry.prepare(body)
@@ -99,11 +128,17 @@ def attach_chat_adapter(app):
                       if expected_handles[key] else previous)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
-        response = await upstream(request)
+        try:
+            response = await upstream(request)
+        except BaseException as exc:
+            diagnose(app, 'request_rejected', **identity, error=exception_record(exc))
+            raise
+        diagnose(app, 'response_started', **identity, http_status=response.status_code)
         sessions[binding.session_id] = mapped
         native_stream = response.body_iterator
 
         async def stream():
+            exhausted = False
             try:
                 first = True
                 async for chunk in native_stream:
@@ -113,8 +148,15 @@ def attach_chat_adapter(app):
                         chunk = metadata + chunk if isinstance(chunk, str) else metadata.encode() + chunk
                         first = False
                     yield chunk
+                exhausted = True
+            except BaseException as exc:
+                diagnose(app, 'stream_error', **identity, error=exception_record(exc))
+                raise
             finally:
-                await native_stream.aclose()
+                try:
+                    await native_stream.aclose()
+                finally:
+                    diagnose(app, 'stream_closed', **identity, exhausted=exhausted)
         response.body_iterator = stream()
         return response
 
@@ -136,6 +178,26 @@ def catalog_digest(catalog: Path) -> str:
         identities.append(dict(trace_id=spec['trace_id'], agent_id=spec.get('agent_id'), sha256=digest))
     return hashlib.sha256(json.dumps(sorted(identities, key=lambda s: s['trace_id']),
                                      sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def signal_batch(feed, after: int) -> list:
+    """Read the unfiltered tail without rescanning already delivered history.
+
+    The native bounded deque and cursor contract stay unchanged. This function
+    takes one synchronous snapshot, before any SSE yield can publish more events.
+    """
+    from serving_sim.signals.signal_delivery import CursorError
+    if after < 0 or after > feed.sequence:
+        raise CursorError(400, 'signal cursor must be between zero and the head')
+    if feed.events and after < feed.events[0][0] - 1:
+        raise CursorError(409, 'signal cursor expired; resume from the reported head')
+    rows = []
+    for sequence, record in reversed(feed.events):
+        if sequence <= after:
+            break
+        rows.append((sequence, record))
+    rows.reverse()
+    return rows
 
 
 def attach_management(app, *, input_digest: str):
@@ -169,6 +231,10 @@ def attach_management(app, *, input_digest: str):
 
     @app.get(INFO_PATH)
     async def info():
+        nofile = None
+        if os.name == 'posix':
+            import resource
+            nofile = list(resource.getrlimit(resource.RLIMIT_NOFILE))
         service = getattr(app.state, 'service', None)
         if service is None:
             return JSONResponse(dict(ready=False, error='simulator initialization is incomplete'), status_code=503)
@@ -185,6 +251,7 @@ def attach_management(app, *, input_digest: str):
                       topology_digest=hashlib.sha256(topology.encode()).hexdigest(),
                       signals=dict(**service.feed.head(), service_events_path=EVENTS_PATH),
                       cpu_affinity=sorted(os.sched_getaffinity(0)),
+                      pid=os.getpid(), nofile=nofile,
                       persistence=getattr(app.state, 'persistence', 'native'))
         return JSONResponse(result, status_code=200 if result['ready'] else 503)
 
@@ -199,14 +266,15 @@ def attach_management(app, *, input_digest: str):
             cursor = start
             while not await request.is_disconnected():
                 try:
-                    rows = feed.matching(cursor, None, None)
+                    rows = signal_batch(feed, cursor)
                     head = feed.sequence
                 except CursorError as exc:
                     yield 'event: gap\ndata: ' + json.dumps(dict(error=str(exc), **feed.head())) + '\n\n'
                     return
                 feed.changed.clear()
                 for sequence, record in rows:
-                    yield f'id: {feed.cursor(sequence)}\nevent: signal\ndata: ' + json.dumps(record, allow_nan=False) + '\n\n'
+                    delivered = dict(record, adapter_emit_unix_s=time.time())
+                    yield f'id: {feed.cursor(sequence)}\nevent: signal\ndata: ' + json.dumps(delivered, allow_nan=False) + '\n\n'
                     if feed.delivery is not None:
                         feed.delivery(record)
                 cursor = head
@@ -223,9 +291,11 @@ def attach_management(app, *, input_digest: str):
     return app
 
 
-def create_app(out: Path, topology, trace_catalog: Path, *, persistence='native', **options):
+def create_app(out: Path, topology, trace_catalog: Path, *, persistence='native',
+               diagnostic_interval_seconds=1., **options):
     from serving_sim.joined.joined import create_app as upstream_app
     digest = catalog_digest(trace_catalog)
     app = upstream_app(out, topology, trace_catalog, **options)
     attach_persistence(app, out, persistence)
+    attach_diagnostics(app, out, diagnostic_interval_seconds)
     return attach_management(attach_chat_adapter(app), input_digest=digest)

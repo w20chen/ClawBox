@@ -75,6 +75,9 @@ def main(argv=None):
     parser.add_argument('--venv', type=Path, default=Path(os.environ.get('SIM_VENV',
                         Path.home()/'.cache/clawbox/serving-sim/venv')), help='isolated simulator environment; reused if present')
     parser.add_argument('--cores', type=int, default=4, help='real allowed logical CPUs (default: 4)')
+    parser.add_argument('--nofile', type=int, default=65536, help='minimum process open-file soft limit (default: 65536)')
+    parser.add_argument('--diagnostic-interval-seconds', type=float, default=1.,
+                        help='process and event-loop sample interval in seconds (default: 1)')
     parser.add_argument('--topology', default='8A')
     parser.add_argument('--trace-catalog', type=Path)
     parser.add_argument('--out', type=Path)
@@ -91,6 +94,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         require_host()
+        import math
+        import resource
+        if args.nofile < 1 or not math.isfinite(args.diagnostic_interval_seconds) or args.diagnostic_interval_seconds <= 0:
+            raise ValueError('nofile and diagnostic interval must be positive and finite')
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard != resource.RLIM_INFINITY and args.nofile > hard:
+            raise ValueError(f'NOFILE hard limit {hard} is below {args.nofile}; raise LimitNOFILE or ulimit -Hn before launch')
+        resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, args.nofile), hard))
         args.sim_root = args.sim_root.expanduser().resolve()
         args.venv = args.venv.expanduser().resolve()
         if not (args.sim_root/'serving_sim/setup.py').is_file():
@@ -142,6 +153,7 @@ def main(argv=None):
             key = os.environ.get(args.api_key_env)
             app = create_app(args.out.resolve(), args.topology, args.trace_catalog.resolve(),
                              persistence=args.persistence,
+                             diagnostic_interval_seconds=args.diagnostic_interval_seconds,
                              v0=args.v0, k=args.k, tokenizer_dir=args.tokenizer_dir,
                              api_keys=[key] if key else None)
             uvicorn.run(app, host=args.host, port=args.port,
