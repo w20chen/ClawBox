@@ -150,6 +150,7 @@ class CubeSandboxLifecycle:
         self._tier = SnapshotTier.LOCAL
         self._generation = 0
         self._snapshot_key: SnapshotKey | None = None
+        self._snapshot_parent_key: SnapshotKey | None = None
         self._pending_snapshot_keys: set[SnapshotKey] = set()
         self._warm_paths: set[str] = set()
         self._first_tool_restore: dict[str, Any] | None = None
@@ -496,6 +497,7 @@ class CubeSandboxLifecycle:
             with self._measure_stage(stage_seconds, 'physical_observation_before_s'):
                 host_memory_before = self._observe_physical()
             key = None
+            lineage_parent = self._snapshot_key
             pause_attempted = False
             pause_completed = False
             path = None
@@ -561,6 +563,9 @@ class CubeSandboxLifecycle:
                             snapshot_mechanism=self.snapshot_mechanism,
                         )
                         pause_completed = True
+                    manifest = self._annotate_snapshot_lineage(
+                        manifest, key=key, parent=lineage_parent, tier=tier,
+                    )
                     if self.snapshot_compression == "zstd-page":
                         from .snapshot_compression import (
                             apply_compression_accounting,
@@ -611,6 +616,7 @@ class CubeSandboxLifecycle:
                         self._verify_warm_files_removed()
                         self.snapshot_pool.remove(predecessor)
                     self._snapshot_key = key
+                    self._snapshot_parent_key = lineage_parent
                     self._replica_memory_path = path
                     self._snapshot_tier = tier
                     self._tier = tier
@@ -670,6 +676,9 @@ class CubeSandboxLifecycle:
                             "control_response_reconciled": True,
                         }
                         manifest.setdefault("transferred_bytes", None)
+                        manifest = self._annotate_snapshot_lineage(
+                            manifest, key=key, parent=lineage_parent, tier=tier,
+                        )
                         if self.snapshot_compression == "zstd-page":
                             from .snapshot_compression import (
                                 apply_compression_accounting,
@@ -722,6 +731,7 @@ class CubeSandboxLifecycle:
                             self._verify_warm_files_removed()
                             self.snapshot_pool.remove(predecessor)
                         self._snapshot_key = key
+                        self._snapshot_parent_key = lineage_parent
                         self._snapshot_tier = tier
                         self._tier = tier
                         self._state = SandboxState.SWAPPED
@@ -778,6 +788,57 @@ class CubeSandboxLifecycle:
             self.snapshot_reuse_probability * saved_per_gib
             * state_bytes / 1024**3
         )
+
+    def _lineage_snapshot_id(self, key: SnapshotKey | None) -> str | None:
+        if key is None:
+            return None
+        return "/".join((
+            self.ownership.run_id,
+            self.ownership.attempt_id,
+            key.session_id,
+            key.role,
+            f"g{key.generation}",
+        ))
+
+    def _lineage_path_tier(self, path: str | None) -> str:
+        if not path:
+            return "template"
+        candidate = Path(path).resolve()
+        for tier, root in (
+            (SnapshotTier.WARM, self.warm_snapshot_root),
+            (SnapshotTier.COLD, self.cold_snapshot_root),
+        ):
+            if root and candidate.is_relative_to(Path(root).resolve()):
+                return tier.value
+        return "external"
+
+    def _annotate_snapshot_lineage(
+        self, manifest: Mapping[str, Any], *, key: SnapshotKey,
+        parent: SnapshotKey | None, tier: SnapshotTier,
+    ) -> dict[str, Any]:
+        """Add compact DAG identity without reading RAM or persisting another file."""
+        result = dict(manifest)
+        result["lineage_snapshot_id"] = self._lineage_snapshot_id(key)
+        result["lineage_parent_snapshot_id"] = self._lineage_snapshot_id(parent)
+        external = {
+            int(item["layer_index"]): item.get("path")
+            for item in result.get("external_layer_allocations") or []
+            if isinstance(item, Mapping) and type(item.get("layer_index")) is int
+        }
+        layer_map = []
+        for item in result.get("lineage_layer_map") or []:
+            if not isinstance(item, Mapping):
+                continue
+            layer = dict(item)
+            index = layer.get("layer_index")
+            layer["tier"] = (
+                self._lineage_path_tier(external.get(index))
+                if layer.get("external") else tier.value
+            )
+            layer_map.append(layer)
+        if layer_map:
+            result["lineage_layer_map"] = layer_map
+        return result
 
     def _release_peer_retired_warm_paths(self) -> None:
         import shutil
@@ -888,11 +949,16 @@ class CubeSandboxLifecycle:
                         destination,
                         require_lineage=self.snapshot_mechanism == "incremental-cow",
                     )
+                    annotated_metrics = self._annotate_snapshot_lineage(
+                        native_metrics, key=manifest.key,
+                        parent=self._snapshot_parent_key,
+                        tier=SnapshotTier.COLD,
+                    )
                     spill_snapshot_metrics = {
-                        **native_metrics,
+                        **annotated_metrics,
                         "compression": compress_snapshot(
                             destination, binary=self.snapshot_compression_binary,
-                            native_snapshot_metrics=native_metrics,
+                            native_snapshot_metrics=annotated_metrics,
                         ),
                     }
                 self._release_peer_retired_warm_paths()

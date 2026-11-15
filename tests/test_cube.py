@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import re
+import shutil
 import threading
 import time
 import urllib.request
@@ -829,6 +830,59 @@ def test_lifecycle_preserves_id_across_pause_restore_and_executor(tmp_path) -> N
     assert lifecycle.sandbox_id == sandbox_id and lifecycle.resident
     lifecycle.close()
     assert sandbox_id not in _Sandbox.items
+
+
+def test_incremental_lifecycle_events_expose_compact_cross_tier_lineage(tmp_path) -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(
+        client,
+        template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=WarmSnapshotPool(65536), snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    first = lifecycle.timings[-1]["snapshot_metrics"]
+    lifecycle.restore()
+    pause = client.pause_sandbox
+
+    def pause_and_retire_warm(sandbox, **kwargs):
+        result = pause(sandbox, **kwargs)
+        previous = Path(first["memory_snapshot_path"])
+        previous.unlink()
+        Path(str(previous) + ".lineage.json").unlink()
+        shutil.rmtree(Path(str(previous) + ".layers"))
+        return result
+
+    # Native Cube retires the predecessor names after linking their page
+    # closure into the successor. The minimal fake has no lineage catalog, so
+    # reproduce that completed cleanup at the same post-pause boundary.
+    client.pause_sandbox = pause_and_retire_warm
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.COLD)
+    second = lifecycle.timings[-1]["snapshot_metrics"]
+
+    assert first["lineage_snapshot_id"].endswith("/session/tool/g1")
+    assert first["lineage_parent_snapshot_id"] is None
+    assert first["lineage_layer_map"] == [{
+        "layer_index": 0,
+        "identity": first["lineage_layer_map"][0]["identity"],
+        "allocated_bytes": first["lineage_layer_map"][0]["allocated_bytes"],
+        "external": False,
+        "managed": False,
+        "managed_layer_id": None,
+        "path_kind": "snapshot_owned",
+        "range_count": 0,
+        "range_bytes": 0,
+        "tier": "warm",
+    }]
+    assert second["lineage_snapshot_id"].endswith("/session/tool/g2")
+    assert second["lineage_parent_snapshot_id"] == first["lineage_snapshot_id"]
+    assert second["lineage_layer_map"][0]["tier"] == "cold"
+    lifecycle.restore()
+    lifecycle.close()
 
 
 def test_restore_fault_sampling_uses_current_verified_leaf_and_counts_its_time(tmp_path, monkeypatch):

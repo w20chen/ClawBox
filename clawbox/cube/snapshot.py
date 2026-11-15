@@ -74,6 +74,7 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
     owned_layer_allocations: dict[str, int] = {}
     owned_ranges: list[tuple[int, int]] = []
     layer_allocations = []
+    lineage_layer_map = []
     for index, layer in enumerate(layers):
         name = layer.get("name")
         if name != f"{index:06d}.mem":
@@ -99,25 +100,46 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         if file.is_symlink() or stat.st_size != logical:
             raise RuntimeError("missing or truncated native RAM layer")
         layer_files.append(file)
+        identity = f"{stat.st_dev}:{stat.st_ino}"
+        allocated_bytes = _allocated_bytes(file, stat)
         layer_allocations.append({
             "layer_index": index,
-            "identity": f"{stat.st_dev}:{stat.st_ino}",
-            "allocated_bytes": _allocated_bytes(file, stat),
+            "identity": identity,
+            "allocated_bytes": allocated_bytes,
             "external": external_path is not None,
+        })
+        ranges = layer.get("ranges") or []
+        valid_ranges = [
+            item for item in ranges
+            if isinstance(item, dict)
+            and type(item.get("offset")) is int and item["offset"] >= 0
+            and type(item.get("length")) is int and item["length"] > 0
+        ]
+        lineage_layer_map.append({
+            "layer_index": index,
+            "identity": identity,
+            "allocated_bytes": allocated_bytes,
+            "external": external_path is not None,
+            "managed": bool(layer.get("managed")),
+            "managed_layer_id": layer.get("layer_id") if layer.get("managed") else None,
+            "path_kind": (
+                "managed_external" if layer.get("managed")
+                else "template_external" if external_path is not None
+                else "snapshot_owned"
+            ),
+            "range_count": len(valid_ranges),
+            "range_bytes": sum(item["length"] for item in valid_ranges),
         })
         if external_path is None:
             owned_files.append(file)
-            owned_layer_allocated_bytes += _allocated_bytes(file, stat)
-            owned_layer_allocations[f"{stat.st_dev}:{stat.st_ino}"] = _allocated_bytes(file, stat)
-            for item in layer.get("ranges") or []:
+            owned_layer_allocated_bytes += allocated_bytes
+            owned_layer_allocations[identity] = allocated_bytes
+            for item in valid_ranges:
                 offset = item.get("offset")
                 length = item.get("length")
-                if (type(offset) is int and type(length) is int
-                        and offset >= 0 and length > 0):
-                    owned_ranges.append((offset, offset + length))
+                owned_ranges.append((offset, offset + length))
         else:
-            identity = f"{stat.st_dev}:{stat.st_ino}"
-            allocated = _allocated_bytes(file, stat)
+            allocated = allocated_bytes
             external_layer_paths.append(external_path)
             external_layer_allocations.append({
                 "layer_index": index,
@@ -171,6 +193,10 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         # A COLD lineage owns names, not necessarily exclusive data blocks.
         # Deduplicate identities across lineages when summing physical storage.
         "layer_allocations": layer_allocations,
+        # Compact, content-free lineage evidence for reconstructing the page
+        # inheritance DAG from lifecycle events. Tier is added by the lifecycle,
+        # which owns the configured WARM/COLD roots.
+        "lineage_layer_map": lineage_layer_map,
         "reused_base_allocated_bytes": reused_base_allocated_bytes,
         "dependency_count": max(0, len(layers) - 1) + len(external_layer_allocations),
     }

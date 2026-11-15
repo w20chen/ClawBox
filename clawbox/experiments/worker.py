@@ -3215,6 +3215,7 @@ class ExperimentWorker:
             node_results[node_id] = {
                 "resources": domain.arm.resources.model_dump(mode="json"),
                 "admission_control": domain.coordinator.admission_metrics(),
+                "gpu_signal_policy": domain.coordinator.gpu_signal_metrics(),
                 "checkpoint_capacity_skips": domain.coordinator.checkpoint_capacity_skips,
                 "peak_commitment_bytes": domain.coordinator.peak_commitment_bytes,
                 "observed_peak_bytes": domain.peak_bytes,
@@ -3440,6 +3441,13 @@ class ExperimentWorker:
                 ),
                 "blocked_admission_seconds": sum(d.coordinator.blocked_seconds for d in domains.values()),
                 "admission_control": coordinator.admission_metrics(),
+                "gpu_signal_policy": (
+                    {"scope": "per_compute_node", "nodes": {
+                        key: value["gpu_signal_policy"]
+                        for key, value in node_results.items()
+                    }}
+                    if arm.resources.compute_nodes else coordinator.gpu_signal_metrics()
+                ),
                 "policy_event_executor": policy_events.metrics(),
                 "runtime_memory_control": ({**self._runtime_memory.provenance,
                                             **self._runtime_memory.stats,
@@ -4205,12 +4213,20 @@ class ExperimentWorker:
                 if arm.policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE:
                     return
                 decision = coordinator.observe_gpu_signal(session_id, str(event["request_id"]), event)
-                events.write({"event": "gpu_policy_observation", "session_id": session_id,
-                              "request_id": event["request_id"], "signal": event["event"],
-                              "signal_sequence": event.get("signal_sequence"), "decision": decision})
+                # The client owns the buffered transport timestamp log. Keep
+                # the same phase/edge/summary observations there instead of
+                # duplicating every queue-rank refresh on disk.
+                event["_clawbox_log_signal"] = decision.get("should_log", True)
+                event["_clawbox_queued_observations_suppressed"] = decision.get(
+                    "queued_observations_suppressed", 0,
+                )
+                if decision.get("should_log", True):
+                    events.write({"event": "gpu_policy_observation", "session_id": session_id,
+                                  "request_id": event["request_id"], "signal": event["event"],
+                                  "signal_sequence": event.get("signal_sequence"), "decision": decision})
                 if decision.get("should_prewarm") and runtime_snapshot_enabled:
                     policy_events.submit_coalesced((session_id, "gpu_prewarm"), prewarm_pair_from_gpu, event)
-                elif event.get("event") in {"queued", "prefill_start"}:
+                elif decision.get("should_recheck_pressure"):
                     policy_events.submit_coalesced((session_id, "gpu_pressure"), pause_for_model_wait, event)
 
             def before_model_response_ready(step: int | None, message: dict[str, Any],

@@ -645,6 +645,12 @@ are nested within the lifecycle stage, not additional overhead to add again.
 `snapshot_metadata` with Unix/monotonic start and finish timestamps, wall time
 and caller-thread CPU time. Native pause completion is synchronous; the client
 validates the resulting lineage without a second status-poll request.
+Incremental checkpoint/spill lifecycle records also expose
+`lineage_snapshot_id`, `lineage_parent_snapshot_id`, and a compact
+`lineage_layer_map`. Each layer entry carries its backing identity, managed
+layer ID when present, declared range count/bytes, path kind and actual
+`warm`/`cold`/`template`/`external` tier. This reads native metadata only; it
+does not scan RAM or add a per-checkpoint sidecar/fsync.
 `memory.promote_volatile_layers` measures WARM-to-COLD inherited-range copies.
 `transferred_bytes` includes those copies plus newly dirty bytes;
 `dirty_bytes` counts only newly dirty bytes. Existing durable shared layers do
@@ -856,7 +862,7 @@ Live API inference still has no complete supported qualification path. Fields be
 | `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; configure its `workload.json` with `--workload-manifest`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
 | `serving_sim_topology_digest` | Unset | Expected `topology_digest` returned by the ClawBox adapter's `/v1/clawbox/simulator/info`. Set this to reject a changed topology during matched comparisons; when unset, the actual digest is recorded without an equality requirement. |
 | `serving_sim_diagnostic_interval_seconds` | 1.0 seconds | Positive finite interval for client process/FD/event-loop samples, and managed server samples. Request diagnostics retain stages and exception chains without extra prompt/response copies. |
-| `serving_sim_diagnostic_detail` | `full` | `compact` keeps every signal's identity, phase, estimate and timing, but omits verbose native signal payloads and repeated full pool snapshots/cost provenance from memory decisions. Actions, costs, lifecycle events and errors remain recorded; policy decisions are unchanged. Diagnostics are buffered, flushed at process samples/errors and closed normally. Use a new run ID when changing this field. |
+| `serving_sim_diagnostic_detail` | `full` | `compact` omits verbose native signal payloads and repeated full pool snapshots/cost provenance. With GPU-aware reclaim, it retains phase changes, reclaim-threshold crossings, actions and at most one repeated queued summary per second across the coordinator; suppressed counts are retained in aggregate result metrics. Every signal still updates the live estimate and policy state. Request stages, errors and lifecycle events remain recorded. Diagnostics are buffered, flushed at process samples/errors and closed normally. Use a new run ID when changing this field. |
 | `serving_sim_keepalive_expiry_seconds` | 2.0 seconds | Idle HTTP connection reuse lifetime; nonnegative and finite, 0 disables idle reuse. Keep below the server's idle timeout (Uvicorn default: 5 seconds) to avoid racing server-side close. Active model/signal streams are unaffected; failed model requests are not automatically resubmitted. |
 | `serving_sim_launch` | Unset | Optional managed local simulator configuration below. Qualification and each formal arm launch a fresh service; success, failure and timeout all finalize it. Omit for a manually managed external service. |
 | `runtime_startup_timeout_seconds` | 60 | Integer 1–3600; Runtime setup and sidecar readiness deadline |

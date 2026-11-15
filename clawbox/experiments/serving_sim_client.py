@@ -170,12 +170,21 @@ class ServingSimClient:
                                 callback(record)
                     finally:
                         record['callback_seconds'] = time.monotonic() - callback_started
+                        log_signal = bool(record.pop("_clawbox_log_signal", True))
+                        suppressed = record.pop(
+                            "_clawbox_queued_observations_suppressed", 0,
+                        )
                         logged = ({k: record[k] for k in (
                             'event', 'session_id', 'request_id', 'engine_id', 'role', 'source',
                             'signal_sequence', 't', 'wall_t', 'queued_since', 'est_wait_s', 'layer',
                             'adapter_emit_unix_s', 'received_unix_s', 'signal_age_seconds', 'callback_seconds')
                             if k in record} if self.compact_diagnostics else record)
-                        self.signal_log.write(json.dumps(logged, separators=(",", ":")) + "\n")
+                        if log_signal:
+                            if suppressed:
+                                logged["queued_observations_suppressed"] = int(suppressed)
+                            self.signal_log.write(
+                                json.dumps(logged, separators=(",", ":")) + "\n"
+                            )
                 if not self.stopping:
                     raise RuntimeError("simulator signal stream disconnected")
         except asyncio.CancelledError:

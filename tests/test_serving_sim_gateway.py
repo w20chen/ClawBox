@@ -244,6 +244,27 @@ def test_missing_reasoning_completes_without_think_end_or_cpu_trace(client_facto
             assert len(server.posts) == 1
 
 
+def test_policy_can_suppress_redundant_signal_timestamp_records(client_factory):
+    observed = Event()
+
+    def callback(record):
+        record["_clawbox_log_signal"] = False
+        observed.set()
+
+    with simulator() as server, client_factory(server) as client:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(complete, client, callback)
+            try:
+                assert observed.wait(2)
+            finally:
+                server.finish.set()
+            pending.result(timeout=2)
+        output = client.output
+
+    rows = [json.loads(line) for line in (output / "observations.jsonl").read_text().splitlines()]
+    assert [row["event"] for row in rows] == ["chat_complete"]
+
+
 @pytest.mark.parametrize("clock_offset_s", [-120., 120.])
 def test_gpu_signal_age_uses_measured_host_clock_offset(client_factory, clock_offset_s):
     observed, records = Event(), []

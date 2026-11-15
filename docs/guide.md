@@ -1199,8 +1199,11 @@ does not imply valid timing: inspect `validity.json` separately.
 
 For lower logging overhead use `serving_sim_diagnostic_detail: compact` and a
 process sampling interval such as 5 seconds. Request stage records still contain
-every request ID and submit/header/first-SSE/terminal/DONE times; signal records
-retain virtual/scheduled/emitted/received times and callback duration. Join CPU
+every request ID and submit/header/first-SSE/terminal/DONE times. Under GPU-aware
+reclaim, signal records keep every phase/decision edge plus a global one-second
+summary of repeated queued updates; result metrics retain accepted and suppressed
+counts. Every queued estimate still updates scheduling state. Retained records
+include virtual/scheduled/emitted/received times and callback duration. Join CPU
 `serving-sim/ARM_ID/requests.jsonl` and `observations.jsonl` with the managed GPU's
 `output/clawbox-diagnostics.jsonl` by request ID (and signal sequence for signals).
 Unix timestamps are seconds; `monotonic_ns` is nanoseconds on the same host.

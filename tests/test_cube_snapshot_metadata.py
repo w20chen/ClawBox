@@ -157,6 +157,14 @@ def test_managed_external_layers_can_occupy_any_position_and_are_not_warm_bytes(
     assert metadata["external_layer_paths"] == [str(path) for _, path in managed]
     assert len(metadata["external_layer_allocations"]) == 2
     assert all(item["managed"] for item in metadata["external_layer_allocations"])
+    assert [item["managed_layer_id"] for item in metadata["lineage_layer_map"]] == [
+        managed[0][0], managed[1][0], None,
+    ]
+    assert [item["range_count"] for item in metadata["lineage_layer_map"]] == [1, 1, 1]
+    assert [item["range_bytes"] for item in metadata["lineage_layer_map"]] == [page] * 3
+    assert [item["path_kind"] for item in metadata["lineage_layer_map"]] == [
+        "managed_external", "managed_external", "snapshot_owned",
+    ]
     assert metadata["managed_external_bytes"] == sum(
         path.stat().st_blocks * 512 for _, path in managed
     )

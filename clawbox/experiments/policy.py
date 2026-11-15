@@ -10,7 +10,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Condition, Event, Lock, Thread
-from typing import Protocol
+from typing import Any, Protocol
 
 from .spec import EvictionPolicy, PolicySpec, ReclamationPolicy, RestorePolicy
 from .spec_types import SnapshotTier
@@ -245,6 +245,12 @@ class PolicyCoordinator:
         self.safety_intervention_count = 0
         self.safety_interventions_by_reason: dict[str, int] = {}
         self._new_session_admission_blocked = False
+        self._gpu_last_queued_log_monotonic_s = float("-inf")
+        self._gpu_queued_logs_suppressed = 0
+        self._gpu_signal_counts: Counter[str] = Counter()
+        self._gpu_policy_log_count = 0
+        self._gpu_policy_log_suppressed_total = 0
+        self._gpu_pressure_recheck_count = 0
 
     def set_new_session_admission_blocked(self, blocked: bool) -> None:
         """Latch only new VM-pair admission; existing sessions must make progress."""
@@ -322,6 +328,8 @@ class PolicyCoordinator:
                     return {**result, "reason": "duplicate_or_stale_signal"}
                 state.gpu_signal_sequences[engine] = sequence
             now = time.monotonic()
+            previous_phase = state.gpu_phase
+            previous_remaining = self._gpu_prefill_remaining(state, now)
             state.gpu_phase = str(phase)
             if phase == "queued":
                 estimate = event.get("est_wait_s")
@@ -351,10 +359,52 @@ class PolicyCoordinator:
             # P-leg finish only completes prefill, not the logical model request.
             if phase == "finish" and role in {"A", "D"}:
                 state.eviction_eligible = False
+            remaining = self._gpu_prefill_remaining(state, now)
+            threshold = self.policy.gpu_reclaim_min_remaining_seconds
+            previously_reclaimable = (
+                previous_remaining is not None and previous_remaining >= threshold
+            )
+            reclaimable = remaining is not None and remaining >= threshold
+            phase_changed = previous_phase != str(phase)
+            should_recheck_pressure = (
+                phase in {"queued", "prefill_start"}
+                and (phase_changed or previously_reclaimable != reclaimable)
+            )
+            should_log = phase != "queued" or phase_changed or should_recheck_pressure
+            suppressed = 0
+            if phase == "queued":
+                if not should_log and now - self._gpu_last_queued_log_monotonic_s >= 1.0:
+                    should_log = True
+                if should_log:
+                    suppressed = self._gpu_queued_logs_suppressed
+                    self._gpu_queued_logs_suppressed = 0
+                    self._gpu_last_queued_log_monotonic_s = now
+                else:
+                    self._gpu_queued_logs_suppressed += 1
+            self._gpu_signal_counts[str(phase)] += 1
+            self._gpu_policy_log_count += int(should_log)
+            self._gpu_policy_log_suppressed_total += int(not should_log)
+            self._gpu_pressure_recheck_count += int(should_recheck_pressure)
             self._condition.notify_all()
             return {**result, "accepted": True, "phase": phase,
-                    "estimated_prefill_remaining_seconds": self._gpu_prefill_remaining(state, now),
+                    "phase_changed": phase_changed,
+                    "should_recheck_pressure": should_recheck_pressure,
+                    "should_log": should_log,
+                    "queued_observations_suppressed": suppressed,
+                    "estimated_prefill_remaining_seconds": remaining,
                     "prewarm_requested": state.gpu_prewarm_requested}
+
+    def gpu_signal_metrics(self) -> dict[str, Any]:
+        """Return aggregate acceptance/logging counts, including the final tail."""
+        with self._condition:
+            return {
+                "accepted_by_phase": dict(self._gpu_signal_counts),
+                "accepted_total": sum(self._gpu_signal_counts.values()),
+                "policy_log_records": self._gpu_policy_log_count,
+                "policy_log_records_suppressed": self._gpu_policy_log_suppressed_total,
+                "queued_suppressed_since_last_record": self._gpu_queued_logs_suppressed,
+                "pressure_rechecks": self._gpu_pressure_recheck_count,
+            }
 
     def wait_for_gpu_prewarm(self, session_id: str, wait_id: str) -> bool:
         """Wait for a claimed checkpoint before VM-pair prewarm, outside wait_lock.

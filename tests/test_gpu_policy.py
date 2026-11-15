@@ -85,6 +85,44 @@ def test_prefill_estimate_expires_and_duplicate_signal_does_not_refresh_it(monke
     assert c.victim_for_restore("other") is None
 
 
+def test_queued_rank_updates_refresh_estimate_but_log_and_recheck_only_on_edges(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr("clawbox.experiments.policy.time.monotonic", lambda: now[0])
+    c = coordinator(gpu_reclaim_min_remaining_seconds=2)
+    waiting(c)
+
+    first = signal(c, est_wait_s=30, signal_sequence=1)
+    assert first["should_log"] and first["should_recheck_pressure"]
+
+    now[0] += 0.1
+    rank_update = signal(c, est_wait_s=29, signal_sequence=2)
+    assert not rank_update["should_log"]
+    assert not rank_update["should_recheck_pressure"]
+    assert rank_update["estimated_prefill_remaining_seconds"] == 29
+
+    now[0] += 0.1
+    threshold_crossing = signal(c, est_wait_s=1, signal_sequence=3)
+    assert threshold_crossing["should_log"]
+    assert threshold_crossing["should_recheck_pressure"]
+    assert threshold_crossing["queued_observations_suppressed"] == 1
+
+    now[0] += 0.1
+    assert not signal(c, est_wait_s=1, signal_sequence=4)["should_log"]
+    now[0] += 1.1
+    summary = signal(c, est_wait_s=1, signal_sequence=5)
+    assert summary["should_log"]
+    assert not summary["should_recheck_pressure"]
+    assert summary["queued_observations_suppressed"] == 1
+    assert c.gpu_signal_metrics() == {
+        "accepted_by_phase": {"queued": 5},
+        "accepted_total": 5,
+        "policy_log_records": 3,
+        "policy_log_records_suppressed": 2,
+        "queued_suppressed_since_last_record": 0,
+        "pressure_rechecks": 2,
+    }
+
+
 def test_think_end_prewarms_only_once_and_never_the_prefill_leg():
     c = coordinator()
     waiting(c)
