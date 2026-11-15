@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Barrier, Event
 
 import pytest
 
@@ -192,6 +192,164 @@ def test_failed_successor_commit_preserves_retained_baseline():
     pool.abort(successor)
     assert pool.committed_bytes == 60
     assert pool.manifest(key(1)).retained_by_vm
+
+
+def test_expansion_reservation_transitions_to_retained_raw_allocation() -> None:
+    pool = WarmSnapshotPool(100)
+    pool.reserve(key(1), 40)
+    pool.commit(
+        key(1), path="/warm/1", logical_bytes=80, allocated_bytes=10,
+        transferred_bytes=80, compressed_allocated_bytes=10,
+        raw_allocated_bytes=65, expansion_allocated_bytes=60, expanded=False,
+    )
+    assert pool.committed_bytes == 10
+
+    with pool.consume_guard(key(1)):
+        pool.reserve_expansion_for_restore(key(1), 60, timeout_s=.01)
+        assert pool.committed_bytes == 10
+        assert pool.expansion_reserved_bytes == 60
+        assert pool.accounted_bytes == 70
+
+        pool.finish_expansion(key(1), 65, retained_by_vm=True)
+        manifest = pool.manifest(key(1))
+        assert manifest.allocated_bytes == 65
+        assert manifest.raw_allocated_bytes == 65
+        assert manifest.compressed_allocated_bytes == 0
+        assert manifest.expansion_allocated_bytes == 0
+        assert manifest.expanded and manifest.retained_by_vm
+        assert pool.expansion_reserved_bytes == 0
+        assert pool.accounted_bytes == 65
+        pool.finish_expansion(key(1), 65, retained_by_vm=True)
+        assert pool.accounted_bytes == 65
+        pool.validate_expanded(key(1), 65)
+        with pytest.raises(RuntimeError, match="allocation changed"):
+            pool.validate_expanded(key(1), 64)
+
+    pool.remove(key(1))
+    assert pool.accounted_bytes == 0
+
+
+def test_runtime_page_materialization_consumes_preexisting_reserve() -> None:
+    pool = WarmSnapshotPool(200)
+    pool.reserve(key(1), 50)
+    pool.commit(
+        key(1), path="/warm/1", logical_bytes=150, allocated_bytes=10,
+        transferred_bytes=150, compressed_allocated_bytes=10,
+        raw_allocated_bytes=120, expansion_allocated_bytes=40,
+        owned_logical_bytes=100, owned_allocated_bytes=40, expanded=False,
+    )
+    with pool.consume_guard(key(1)):
+        pool.reserve_expansion_for_restore(key(1), 100, timeout_s=.01)
+        pool.finish_expansion(
+            key(1), 45, runtime_upper_bound_bytes=100,
+            owned_allocated_bytes=40, retained_by_vm=True,
+        )
+        item = pool.manifest(key(1))
+        assert item.runtime_reserved_bytes == 60
+        assert pool.accounted_bytes == 105
+        pool.validate_expanded(key(1), 50)
+        item = pool.manifest(key(1))
+        assert item.allocated_bytes == 50
+        assert item.runtime_reserved_bytes == 55
+        assert pool.accounted_bytes == 105
+
+
+def test_expansion_reservation_is_idempotent_and_remove_releases_failed_stage() -> None:
+    pool = WarmSnapshotPool(100)
+    pool.reserve(key(1), 20)
+    pool.commit(
+        key(1), path="/warm/1", logical_bytes=80, allocated_bytes=10,
+        transferred_bytes=80, compressed_allocated_bytes=10,
+        raw_allocated_bytes=90, expansion_allocated_bytes=90, expanded=False,
+    )
+    with pytest.raises(RuntimeError, match="consumer pin"):
+        pool.reserve_expansion_for_restore(key(1), 90, timeout_s=.01)
+    with pool.consume_guard(key(1)):
+        pool.reserve_expansion_for_restore(key(1), 90, timeout_s=.01)
+        pool.reserve_expansion_for_restore(key(1), 90, timeout_s=.01)
+        assert pool.expansion_reserved_bytes == 90
+        with pytest.raises(ValueError, match="failed expansion"):
+            raise ValueError("failed expansion")
+
+    assert pool.manifest(key(1)).pinned == 0
+    assert pool.expansion_reserved_bytes == 90
+    with pytest.raises(WarmCapacityError, match="no spillable"):
+        pool.lru_victims(1)
+    pool.remove(key(1))
+    assert pool.accounted_bytes == 0
+
+
+def test_concurrent_expansions_cannot_overcommit_capacity() -> None:
+    pool = WarmSnapshotPool(100)
+    for index in (1, 2):
+        pool.reserve(key(index), 10)
+        pool.commit(
+            key(index), path=f"/warm/{index}", logical_bytes=80,
+            allocated_bytes=5, transferred_bytes=80,
+            compressed_allocated_bytes=5, raw_allocated_bytes=85,
+            expansion_allocated_bytes=80, expanded=False,
+        )
+
+    with pool.consume_guard(key(1)), pool.consume_guard(key(2)):
+        pool.reserve_expansion_for_restore(key(1), 80, timeout_s=.01)
+        with pytest.raises(WarmCapacityError, match="no spillable"):
+            pool.reserve_expansion_for_restore(key(2), 80, timeout_s=.01)
+        assert pool.expansion_reserved_bytes == 80
+        assert pool.accounted_bytes == 90
+
+
+def test_overlapping_restore_expansions_are_serialized_by_capacity() -> None:
+    pool = WarmSnapshotPool(100)
+    for index in (1, 2):
+        pool.reserve(key(index), 10)
+        pool.commit(
+            key(index), path=f"/warm/{index}", logical_bytes=80,
+            allocated_bytes=5, transferred_bytes=80,
+            compressed_allocated_bytes=5, raw_allocated_bytes=85,
+            expansion_allocated_bytes=80, expanded=False,
+        )
+
+    entered = Barrier(3)
+
+    def reserve_expansion(index: int) -> str:
+        entered.wait(timeout=5)
+        try:
+            pool.reserve_expansion_for_restore(key(index), 80, timeout_s=.05)
+            return "admitted"
+        except WarmCapacityError:
+            return "rejected"
+
+    with pool.consume_guard(key(1)), pool.consume_guard(key(2)):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            one = executor.submit(reserve_expansion, 1)
+            two = executor.submit(reserve_expansion, 2)
+            entered.wait(timeout=5)
+            outcomes = [one.result(timeout=5), two.result(timeout=5)]
+
+    assert sorted(outcomes) == ["admitted", "rejected"]
+    assert pool.expansion_reserved_bytes == 80
+    assert pool.accounted_bytes == 90
+
+
+def test_compressed_spill_without_expansion_headroom_fails_closed() -> None:
+    pool = WarmSnapshotPool(100, clock=lambda: 1.0)
+    pool.reserve(key(1), 10)
+    pool.commit(
+        key(1), path="/warm/1", logical_bytes=80, allocated_bytes=10,
+        transferred_bytes=80, compressed_allocated_bytes=10,
+        raw_allocated_bytes=90, expansion_allocated_bytes=90, expanded=False,
+        spiller=lambda item: pool.reserve_selected_expansion(
+            item.key, item.expansion_allocated_bytes,
+        ),
+    )
+    commit(pool, 2, 90)
+
+    with pytest.raises(WarmCapacityError, match="compressed spill cannot expand"):
+        pool.spill_for_admission(1)
+
+    assert pool.committed_bytes == 100
+    assert pool.expansion_reserved_bytes == 0
+    assert pool.manifest(key(1)).pinned == 0
 
 
 def test_oversize_and_capacity_pressure_fail_closed() -> None:

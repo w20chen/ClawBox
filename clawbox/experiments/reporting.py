@@ -124,13 +124,25 @@ def _warm_metrics(events_path: str | None) -> dict[str, int]:
             snapshot = timing.get("snapshot_metrics") or {}
             metrics["transferred_bytes"] += int(snapshot.get("transferred_bytes") or 0)
             metrics["private_delta_bytes"] += int(snapshot.get("private_delta_bytes") or 0)
-            identity = snapshot.get("external_base_identity")
-            if identity:
-                metrics["base_reference_count"] += 1
-                bases[str(identity)] = max(
-                    bases.get(str(identity), 0),
-                    int(snapshot.get("external_base_allocated_bytes") or 0),
-                )
+            allocations = snapshot.get("external_layer_allocations")
+            if isinstance(allocations, list) and allocations:
+                for allocation in allocations:
+                    identity = allocation.get("identity")
+                    if not identity:
+                        continue
+                    metrics["base_reference_count"] += 1
+                    bases[str(identity)] = max(
+                        bases.get(str(identity), 0),
+                        int(allocation.get("allocated_bytes") or 0),
+                    )
+            else:
+                identity = snapshot.get("external_base_identity")
+                if identity:
+                    metrics["base_reference_count"] += 1
+                    bases[str(identity)] = max(
+                        bases.get(str(identity), 0),
+                        int(snapshot.get("external_base_allocated_bytes") or 0),
+                    )
     metrics["unique_base_backing_bytes"] = sum(bases.values())
     return metrics
 
