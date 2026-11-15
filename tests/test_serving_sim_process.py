@@ -52,8 +52,10 @@ def test_finalized_marker_requires_successful_native_close(tmp_path, native_clos
     service.out.mkdir(parents=True)
     service.process = SimpleNamespace(returncode=0, poll=lambda: 0)
     (service.out/'clawbox-persistence.json').write_text(json.dumps(dict(finalized=True, native_close_succeeded=native_close)))
-    (service.out/'validity.json').write_text('{}')
+    (service.out/'validity.json').write_text('{"prompt_source":"actual"}')
     (service.out/'realized.json').write_text('[]')
+    (service.out/'realized-inputs.jsonl').touch()
+    (service.out/'realized-tokens.bin').touch()
     result = service.stop()
     assert result['finalized'] == native_close
     assert ('shutdown_error' in result) != native_close
@@ -68,6 +70,19 @@ def test_uvicorn_signal_exit_requires_requested_stop_and_saved_reports(tmp_path,
     if requested:
         service.receipt['shutdown_signal'] = int(signal.SIGTERM)
     (service.out/'clawbox-persistence.json').write_text(json.dumps(dict(finalized=True, native_close_succeeded=True)))
-    (service.out/'validity.json').write_text('{}')
+    (service.out/'validity.json').write_text('{"prompt_source":"actual"}')
     (service.out/'realized.json').write_text('[]')
+    (service.out/'realized-inputs.jsonl').touch()
+    (service.out/'realized-tokens.bin').touch()
     assert ('shutdown_error' in service.stop()) != requested
+
+
+@pytest.mark.parametrize('missing', ['realized-inputs.jsonl', 'realized-tokens.bin'])
+def test_final_reports_require_incremental_inputs(tmp_path, missing):
+    from clawbox.experiments.serving_sim_process import final_reports
+    (tmp_path/'validity.json').write_text('{"prompt_source":"actual"}')
+    for name in ('realized.json', 'realized-inputs.jsonl', 'realized-tokens.bin'):
+        if name != missing:
+            (tmp_path/name).touch()
+    with pytest.raises(RuntimeError, match=missing):
+        final_reports(tmp_path)

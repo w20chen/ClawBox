@@ -668,16 +668,17 @@ class WatermarkController:
                   candidates: dict[str, Any] | None = None,
                   estimates: dict[str, Any] | None = None,
                   effect: dict[str, Any] | None = None):
-        self.events.write({'event': 'memory_scheduling_decision',
+        record = {'event': 'memory_scheduling_decision',
             'compute_node': self.node_id, 'action': action, 'reason': reason,
             'policy': self.memory_scheduling,
             'cost_model': (self.action_cost_model.name if self.action_cost_model
                            else 'uncalibrated_deterministic_fallback'),
-            'cost_provenance': (self.action_cost_model.provenance
-                                if self.action_cost_model else None),
             'candidates': candidates, 'cost_estimates': estimates,
-            'physical_effect': effect,
-            'pool': self.shared_pool.snapshot()})
+            'physical_effect': effect}
+        if not getattr(self.events, 'compact_diagnostics', False):
+            record.update(cost_provenance=(self.action_cost_model.provenance
+                          if self.action_cost_model else None), pool=self.shared_pool.snapshot())
+        self.events.write(record)
 
     def _reclaim_one(self, *, reason: str,
                      tier: SnapshotTier | None = None) -> bool:
@@ -2037,11 +2038,13 @@ class EventWriter:
     _FLUSH_INTERVAL_SECONDS = 0.25
 
     def __init__(self, path: Path, *,
+                 compact_diagnostics: bool = False,
                  activity_tracker: ArmActivityTracker | None = None,
                  context: dict[str, Any] | None = None,
                  session_case_ids: dict[str, str] | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
+        self.compact_diagnostics = compact_diagnostics
         self.lock = Lock()
         self.sequence = 0
         self.activity_tracker = activity_tracker
@@ -2391,6 +2394,7 @@ class ExperimentWorker:
         activity_tracker = ArmActivityTracker(arm.concurrency)
         events = EventWriter(
             self.output_root / "events" / f"{arm.arm_id}.jsonl",
+            compact_diagnostics=arm.inference.configuration.get('serving_sim_diagnostic_detail') == 'compact',
             activity_tracker=activity_tracker,
             context={
                 "run_id": self.run_id,

@@ -47,10 +47,11 @@ def setup(args, python: Path):
     run(['uv', 'pip', 'sync', '--python', python, '--require-hashes', lock])
     child = [python, '-m', 'clawbox.integrations.serving_sim', '_metadata',
              '--sim-root', args.sim_root, '--venv', args.venv, '--cores', args.cores]
-    run(child)
     env = dict(os.environ, BUILD_JOBS=str(min(args.cores, 6)), JOBS=str(min(args.cores, 6)),
                PYO3_PYTHON=str(python), SIM_BUILD_CORES=str(args.cores),
                SIM_CPUSET=','.join(map(str, sorted(os.sched_getaffinity(0)))))
+    run(['bash', args.sim_root/'serving_sim/native/build.sh'], env=env)
+    run(child)
     run(['bash', args.sim_root/'serving_sim/routers/dynamo_shim_d66/build.sh'], env=env)
     source = Path(os.environ.get('MOONCAKE_SRC', Path.home()/'.cache/agent-sched-bench/mooncake-v0.3.13.post1')).expanduser()
     if not source.exists():
@@ -82,7 +83,7 @@ def main(argv=None):
     parser.add_argument('--trace-catalog', type=Path)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--persistence', choices=['native', 'final'], default='native',
-                        help='native: cumulative reports per request; final: save at graceful shutdown')
+                        help='both use native incremental input flushing and final summaries at graceful shutdown')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--k', type=float, default=1.)
@@ -159,8 +160,10 @@ def main(argv=None):
             uvicorn.run(app, host=args.host, port=args.port,
                         ssl_keyfile=args.ssl_keyfile, ssl_certfile=args.ssl_certfile)
         return 0
-    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-        print(f'ClawBox simulator {args.command} failed: {exc}', file=sys.stderr)
+    except (ValueError, OSError, ImportError, subprocess.CalledProcessError) as exc:
+        remedy = ('; run setup for this simulator checkout and --venv to build/install its native dependencies'
+                  if isinstance(exc, ImportError) else '')
+        print(f'ClawBox simulator {args.command} failed: {exc}{remedy}', file=sys.stderr)
         return 2
 
 

@@ -743,6 +743,23 @@ def test_arm_provenance_uses_each_assigned_case_vm_shape() -> None:
     assert scope["pair_memory_mib_per_agent"] is None
 
 
+def test_compact_memory_decisions_avoid_pool_snapshot_and_keep_action():
+    rows = []
+    controller = WatermarkController.__new__(WatermarkController)
+    controller.events = SimpleNamespace(compact_diagnostics=True, write=rows.append)
+    controller.node_id = 'node0'
+    controller.memory_scheduling = 'joint'
+    controller.action_cost_model = None
+    def forbidden():
+        pytest.fail('compact diagnostics must not construct a full pool snapshot')
+    controller.shared_pool = SimpleNamespace(snapshot=forbidden)
+    controller._decision('checkpoint', 'local_high_watermark', estimates={'seconds': 0.2}, effect={'released': 10})
+    assert rows[0]['action'] == 'checkpoint' and rows[0]['reason'] == 'local_high_watermark'
+    assert rows[0]['cost_estimates'] == {'seconds': 0.2}
+    assert rows[0]['physical_effect'] == {'released': 10}
+    assert 'pool' not in rows[0] and 'cost_provenance' not in rows[0]
+
+
 def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: Path) -> None:
     path = tmp_path / "events.jsonl"
     writer = EventWriter(

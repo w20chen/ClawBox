@@ -48,10 +48,11 @@ def diagnose(app, event, **fields):
 
 
 def attach_persistence(app, out: Path, mode: str):
-    """Optionally defer native cumulative reports until the driver has stopped.
+    """Record native finalization without suppressing periodic input/step cleanup.
 
-    Native save() computes reporting statistics and rewrites all recorded inputs;
-    it does not advance the simulation or flush an execution queue.
+    Current sim-release saves summaries only at startup and close. Its ordinary
+    save() flushes incremental inputs and releases obsolete step rows. Both
+    persistence labels therefore use that native lifecycle unchanged.
     """
     if mode not in {'native', 'final'}:
         raise ValueError('persistence must be native or final')
@@ -60,32 +61,24 @@ def attach_persistence(app, out: Path, mode: str):
 
     @asynccontextmanager
     async def lifespan(application):
-        service = original_save = None
-        deferred = 0
         closed = False
-        def defer_save():
-            nonlocal deferred
-            deferred += 1
+        started = None
         marker = out / 'clawbox-persistence.json'
         try:
             async with upstream(application):
-                service = application.state.service
-                original_save = service.save
                 marker.write_text(json.dumps(dict(mode=mode, finalized=False)) + '\n')
-                if mode == 'final':
-                    service.save = defer_save
-                yield
+                try:
+                    yield
+                finally:
+                    started = time.monotonic()
             closed = True
         finally:
-            if original_save is not None:
-                service.save = original_save
-                # The native lifespan has awaited its paced driver and released
-                # its renderer. All request handlers have drained before this.
-                started = time.monotonic()
-                original_save()
-                marker.write_text(json.dumps(dict(mode=mode, finalized=True,
-                    native_close_succeeded=closed, deferred_saves=deferred,
-                    final_save_seconds=time.monotonic() - started)) + '\n')
+            if started is not None:
+                # Native close flushes decode spans, saves with final=True and
+                # closes incremental files. Calling save again would use closed files.
+                marker.write_text(json.dumps(dict(mode=mode, finalized=closed,
+                    native_close_succeeded=closed, report_policy='native_final',
+                    native_close_seconds=time.monotonic() - started)) + '\n')
 
     app.router.lifespan_context = lifespan
     return app
@@ -106,7 +99,8 @@ def attach_chat_adapter(app):
     expected_handles, sessions = {}, {}
 
     async def completions(request):
-        body = await request.json()  # Starlette caches this for the native route.
+        # Reuse the JSON already validated by the native ASGI middleware.
+        body = request.state.request_signal_body
         if not isinstance(body, dict):
             return await upstream(request)
         identity = {key: body.get(key) for key in ('session_id', 'request_id')}
@@ -142,7 +136,10 @@ def attach_chat_adapter(app):
             try:
                 first = True
                 async for chunk in native_stream:
+                    if chunk == 'data: [DONE]\n\n' or chunk == b'data: [DONE]\n\n':
+                        diagnose(app, 'done_emitted', **identity)
                     if first:
+                        diagnose(app, 'first_sse_emitted', **identity)
                         metadata = 'event: clawbox\ndata: ' + json.dumps(dict(
                             protocol=ADAPTER_PROTOCOL, **binding.metadata(), process_sessions=mapped)) + '\n\n'
                         chunk = metadata + chunk if isinstance(chunk, str) else metadata.encode() + chunk
@@ -244,6 +241,7 @@ def attach_management(app, *, input_digest: str):
                       ready=service.running and not service.driver.done(),
                       accepted_requests=len(service.registry.requests), server_wall_time=time.time(),
                       clock=dict(v0=service.clock.v0, k=service.clock.k, wall_epoch0=service.epoch0),
+                      prompt_source='actual' if service.trace_prompts is None else 'trace',
                       catalog_digest=input_digest, trace_ids=sorted(service.refs.traces),
                       traces={tid: dict(model_calls=len(calls),
                           missing_reasoning_calls=sum(r.reasoning_tokens is None for r in calls))
@@ -295,7 +293,7 @@ def create_app(out: Path, topology, trace_catalog: Path, *, persistence='native'
                diagnostic_interval_seconds=1., **options):
     from serving_sim.joined.joined import create_app as upstream_app
     digest = catalog_digest(trace_catalog)
-    app = upstream_app(out, topology, trace_catalog, **options)
+    app = upstream_app(out, topology, trace_catalog, prompt_source='actual', **options)
     attach_persistence(app, out, persistence)
     attach_diagnostics(app, out, diagnostic_interval_seconds)
     return attach_management(attach_chat_adapter(app), input_digest=digest)

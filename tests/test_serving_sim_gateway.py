@@ -49,6 +49,7 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
             if self.path == "/v1/clawbox/simulator/info":
                 body = json.dumps({"ready": True, "clock": {"k": 1},
                     "adapter_protocol": 2,
+                    "prompt_source": "actual",
                     "traces": {"trace": {"model_calls": 1,
                         "missing_reasoning_calls": int(state.mode == "no_reasoning")}},
                     "accepted_requests": 0, "catalog_digest": "catalog",
@@ -73,6 +74,13 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
                 pass
 
         def do_POST(self):
+            try:
+                self.respond()
+            except (BrokenPipeError, ConnectionError):
+                # Cancellation may close the socket before the first SSE write.
+                state.disconnected.set()
+
+        def respond(self):
             assert self.path == "/v1/chat/completions"
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.posts.append(body)
@@ -166,6 +174,15 @@ def test_service_must_explicitly_confirm_no_previous_requests(client_factory, co
         assert not server.posts
 
 
+@pytest.mark.parametrize('source', ['trace', None])
+def test_service_must_use_actual_agent_prompts(client_factory, source):
+    with simulator(info_override={'prompt_source': source}) as server:
+        with pytest.raises(ValueError, match='actual Agent prompts'):
+            with client_factory(server):
+                pass
+        assert not server.posts
+
+
 def test_expected_topology_is_checked_before_model_submission(client_factory):
     with simulator(info_override={"topology_digest": "actual"}) as server:
         client = client_factory(server)
@@ -176,7 +193,8 @@ def test_expected_topology_is_checked_before_model_submission(client_factory):
         assert not server.posts
 
 
-def test_host_observes_think_end_while_response_stream_is_still_running(client_factory):
+@pytest.mark.parametrize('compact', [False, True])
+def test_host_observes_think_end_while_response_stream_is_still_running(client_factory, compact):
     observed, records = Event(), []
 
     def callback(record):
@@ -184,6 +202,7 @@ def test_host_observes_think_end_while_response_stream_is_still_running(client_f
         observed.set()
 
     with simulator() as server, client_factory(server) as client:
+        client.compact_diagnostics = compact
         with ThreadPoolExecutor(max_workers=1) as pool:
             pending = pool.submit(complete, client, callback)
             try:

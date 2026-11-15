@@ -18,6 +18,17 @@ from .spec import ServingSimLaunchSpec
 from .serving_sim_diagnostics import exception_record
 
 
+def final_reports(out: Path) -> dict:
+    """Current native realized records reference these incremental sidecars."""
+    for name in ('realized.json', 'realized-inputs.jsonl', 'realized-tokens.bin'):
+        if not (out / name).is_file():
+            raise RuntimeError(f'simulator final {name} is missing; preserve the incomplete run')
+    validity = json.loads((out / 'validity.json').read_text())
+    if validity.get('prompt_source') != 'actual':
+        raise RuntimeError('simulator final report does not confirm actual Agent prompts')
+    return {k: validity.get(k) for k in ('lag', 'warning_threshold_exceeded', 'prompt_source')}
+
+
 class ServingSimProcess:
     def __init__(self, configuration: dict, artifact_root: Path):
         self.configuration = configuration
@@ -134,10 +145,7 @@ class ServingSimProcess:
                 self.receipt['persistence'] = marker
                 if not marker.get('finalized') or not marker.get('native_close_succeeded'):
                     raise RuntimeError('simulator did not finalize after successful native close')
-                validity = json.loads((self.out / 'validity.json').read_text())
-                if not (self.out / 'realized.json').is_file():
-                    raise RuntimeError('simulator final realized.json is missing')
-                self.receipt['validity'] = {k: validity.get(k) for k in ('lag', 'warning_threshold_exceeded')}
+                self.receipt['validity'] = final_reports(self.out)
                 self.receipt['finalized'] = True
                 # Uvicorn re-raises its caught signal after a graceful lifespan
                 # close. Preserve that exit code, but do not call a verified
@@ -178,8 +186,15 @@ def finalize_saved_service(root: Path) -> dict:
             raise RuntimeError('GPU cleanup needed forced termination; final reports are incomplete')
     marker_path = root / 'output' / 'clawbox-persistence.json'
     marker = json.loads(marker_path.read_text()) if marker_path.exists() else {}
+    finalized = bool(marker.get('finalized') and marker.get('native_close_succeeded'))
+    if finalized:
+        try:
+            receipt['validity'] = final_reports(root / 'output')
+        except Exception as exc:
+            finalized = False
+            receipt['shutdown_error'] = exception_record(exc)
     receipt.update(stopped=True, persistence=marker, recovered_unix_s=time.time(),
-                   finalized=bool(marker.get('finalized') and marker.get('native_close_succeeded')))
+                   finalized=finalized)
     temporary = root / 'process.tmp'
     temporary.write_text(json.dumps(receipt, indent=2), encoding='utf-8')
     temporary.replace(root / 'process.json')

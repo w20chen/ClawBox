@@ -1095,6 +1095,29 @@ an explicit interface setting is preserved. No upstream source patch is applied.
 Reserve its actual CPU budget separately from experiment VM CPUs.
 `--cores` bounds real simulator CPUs; `--topology` selects simulated GPUs.
 
+For sim-release `ae5c94517a32fe735ce93a62efe2748587f39cdf`, upgrade using a new
+GPU checkout and a separate simulator environment; retain the previous checkout,
+environment and run outputs. Clone on Linux to preserve native build scripts:
+
+```bash
+git clone --branch sim-release https://github.com/HCAHOI/agent-sched-bench-gpu.git /absolute/agent-sched-bench-gpu
+git -C /absolute/agent-sched-bench-gpu checkout --detach ae5c94517a32fe735ce93a62efe2748587f39cdf
+export SIM_VENV=/absolute/simulator-venv
+python3 -m clawbox.integrations.serving_sim setup --sim-root /absolute/agent-sched-bench-gpu --cores 4
+python3 -m clawbox.integrations.serving_sim check --sim-root /absolute/agent-sched-bench-gpu --cores 4
+```
+
+Use your authorized Git transport for this repository. Setup builds the new
+Rust simulator extension and the native shims. Existing pinned tokenizer caches
+can be reused. Point the new experiment at this checkout/environment and use a
+new run ID with fresh qualification; the simulator upgrade alone needs no VM
+image rebuild, host apply or retraining.
+
+ClawBox keeps actual Agent prompts for prefill/KV simulation and normal `k=1`
+pacing. It does not enable the upstream trace-prompt or accelerated warm-up
+modes, which would change these experiment inputs. Upstream many-cluster replay
+capacity results do not establish this workflow's capacity.
+
 For automatic GPU startup and finalization, add the following to the existing
 experiment YAML. Use verified local paths and CPU IDs reserved outside the VM
 compute sets; the values below are examples. Keep `base_url` local and choose an
@@ -1109,6 +1132,8 @@ inference:
     api_key_env: CLAWBOX_SIM_API_KEY
     serving_sim_catalog_manifest: /absolute/gpu-bundle/manifest.json
     serving_sim_diagnostic_interval_seconds: 1.0
+    serving_sim_diagnostic_detail: compact
+    serving_sim_keepalive_expiry_seconds: 2.0
     serving_sim_launch:
       sim_root: /absolute/agent-sched-bench-gpu
       venv: /absolute/simulator-venv
@@ -1136,6 +1161,25 @@ interruption; preserve failed evidence and use a new run ID, since a partially
 consumed GPU service cannot resume. After reboot, restore and verify the saved
 host configuration before starting the new run. External services remain
 manually managed when `serving_sim_launch` is absent.
+
+Both `persistence: final` and `persistence: native` retain the current simulator's
+incremental input flushes and step-memory release; summaries are written at
+startup and graceful shutdown. Preserve the final `realized.json` with its
+`realized-inputs.jsonl` and `realized-tokens.bin` sidecars. A finalized report
+does not imply valid timing: inspect `validity.json` separately.
+
+For lower logging overhead use `serving_sim_diagnostic_detail: compact` and a
+process sampling interval such as 5 seconds. Request stage records still contain
+every request ID and submit/header/first-SSE/terminal/DONE times; signal records
+retain virtual/scheduled/emitted/received times and callback duration. Join CPU
+`serving-sim/ARM_ID/requests.jsonl` and `observations.jsonl` with the managed GPU's
+`output/clawbox-diagnostics.jsonl` by request ID (and signal sequence for signals).
+Unix timestamps are seconds; `monotonic_ns` is nanoseconds on the same host.
+Server `first_sse_emitted` and `done_emitted` mark handoff to the HTTP stream;
+compare them with client `times.first_sse` and `times.done`. These deltas include
+HTTP/event-loop delivery, not just network propagation. CPU submit to server
+`request_received` also includes client encoding and request handling.
+This changes diagnostics only, not arrivals or simulated LLM timing.
 
 Set `tokenizer_dir` to the existing model snapshot printed by simulator setup
 when running with `--sudo` or another account whose Hugging Face cache differs.

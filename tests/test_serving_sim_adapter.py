@@ -40,13 +40,16 @@ def test_persistence_drains_driver_before_saving_all_records(tmp_path, mode, clo
     from clawbox.integrations.serving_sim_app import attach_persistence
     records, writes = [], []
     service = NS(running=True)
-    def save():
-        writes.append((service.running, list(records)))
+    files_closed = False
+    def save(final=False):
+        assert not files_closed, 'must not save after native close has closed inputs'
+        writes.append((final, service.running, list(records)))
     service.save = save
     @asynccontextmanager
     async def native_lifespan(application):
+        nonlocal files_closed
         application.state.service = service
-        service.save()
+        service.save(final=True)
         try:
             yield
         finally:
@@ -55,6 +58,8 @@ def test_persistence_drains_driver_before_saving_all_records(tmp_path, mode, clo
             service.running = False
             if close_fails:
                 raise RuntimeError('driver failed')
+            service.save(final=True)
+            files_closed = True
     application = attach_persistence(FastAPI(lifespan=native_lifespan), tmp_path, mode)
     async def run():
         async with application.router.lifespan_context(application):
@@ -68,11 +73,13 @@ def test_persistence_drains_driver_before_saving_all_records(tmp_path, mode, clo
     else:
         asyncio.run(run())
     assert service.save is save
-    assert len(writes) == (2 if mode == 'final' else 1002)
-    assert writes[-1] == (False, records)
+    assert len(writes) == (1001 if close_fails else 1002)
+    assert sum(not row[0] for row in writes) == 1000  # native flushing/step release is never suppressed
+    if not close_fails:
+        assert writes[-1] == (True, False, records)
     marker = json.loads((tmp_path/'clawbox-persistence.json').read_text())
-    assert marker['finalized'] and marker['native_close_succeeded'] == (not close_fails)
-    assert marker['deferred_saves'] == (1000 if mode == 'final' else 0)
+    assert marker['finalized'] == marker['native_close_succeeded'] == (not close_fails)
+    assert marker['report_policy'] == 'native_final'
 
 
 def test_catalog_identity_hashes_bytes_without_loading_conversations(tmp_path):
@@ -99,11 +106,14 @@ def test_gpu_adapter_process_mapping_is_per_session_and_keeps_native_output():
                        dict(role='assistant', content='recorded'), 2, None, 'stop')
     catalog = NS(traces={'trace': (ref,)}, get=lambda tid, index: ref)
     application = FastAPI()
+    sd.attach_routes(application)
     registry = ReplayRegistry(catalog)
     application.state.service = NS(registry=registry)
+    diagnostics = []
+    application.state.diagnostics = NS(write=lambda event, **fields: diagnostics.append((event, fields)))
     closed = []
     async def native(request):
-        body = await request.json()
+        body = request.state.request_signal_body
         registry.accept(registry.prepare(body))
         async def stream():
             try:
@@ -134,6 +144,8 @@ def test_gpu_adapter_process_mapping_is_per_session_and_keeps_native_output():
         assert set(closed) == {'a', 'b'}
         assert len(registry.requests) == 2
         assert ref.messages == recorded_messages
+        for event in ('first_sse_emitted', 'done_emitted', 'stream_closed'):
+            assert {fields['request_id'] for kind, fields in diagnostics if kind == event} == {'a', 'b'}
     asyncio.run(run())
 
 
@@ -143,7 +155,7 @@ def app():
     result.state.feed = feed
     result.state.service = NS(feed=feed, cfg={'topology': {'cards': []}},
         running=True, driver=NS(done=lambda: False), registry=NS(requests={}),
-        refs=NS(traces={'trace': ()}), clock=NS(v0=0., k=1.), epoch0=100.)
+        refs=NS(traces={'trace': ()}), clock=NS(v0=0., k=1.), epoch0=100., trace_prompts=None)
     return attach_management(result, input_digest='catalog')
 
 
@@ -160,6 +172,7 @@ def test_adapter_auth_readiness_and_original_routes(monkeypatch):
             data = response.json()
             assert data['adapter'] == 'clawbox' and data['accepted_requests'] == 0
             assert data['catalog_digest'] == 'catalog' and data['clock']['k'] == 1
+            assert data['prompt_source'] == 'actual'
             assert data['service_id'] == data['signals']['epoch']
             # Upstream's original endpoint still requires its original filter.
             assert (await client.get('/request-signals/events', headers=headers)).status_code == 422

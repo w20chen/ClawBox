@@ -817,6 +817,8 @@ Live API inference still has no complete supported qualification path. Fields be
 | `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; configure its `workload.json` with `--workload-manifest`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
 | `serving_sim_topology_digest` | Unset | Expected `topology_digest` returned by the ClawBox adapter's `/v1/clawbox/simulator/info`. Set this to reject a changed topology during matched comparisons; when unset, the actual digest is recorded without an equality requirement. |
 | `serving_sim_diagnostic_interval_seconds` | 1.0 seconds | Positive finite interval for client process/FD/event-loop samples, and managed server samples. Request diagnostics retain stages and exception chains without extra prompt/response copies. |
+| `serving_sim_diagnostic_detail` | `full` | `compact` keeps every signal's identity, phase, estimate and timing, but omits verbose native signal payloads and repeated full pool snapshots/cost provenance from memory decisions. Actions, costs, lifecycle events and errors remain recorded; policy decisions are unchanged. Diagnostics are buffered, flushed at process samples/errors and closed normally. Use a new run ID when changing this field. |
+| `serving_sim_keepalive_expiry_seconds` | 2.0 seconds | Idle HTTP connection reuse lifetime; nonnegative and finite, 0 disables idle reuse. Keep below the server's idle timeout (Uvicorn default: 5 seconds) to avoid racing server-side close. Active model/signal streams are unaffected; failed model requests are not automatically resubmitted. |
 | `serving_sim_launch` | Unset | Optional managed local simulator configuration below. Qualification and each formal arm launch a fresh service; success, failure and timeout all finalize it. Omit for a manually managed external service. |
 | `runtime_startup_timeout_seconds` | 60 | Integer 1–3600; Runtime setup and sidecar readiness deadline |
 | `runtime_completion_watch_seconds` | 10 | 1–60 seconds per completion notification wait; events wake it immediately |
@@ -832,7 +834,7 @@ Live API inference still has no complete supported qualification path. Fields be
 | `sim_root`, `venv`, `trace_catalog` | Required absolute Linux paths | Verified unmodified GPU source, existing simulator environment, and GPU-side catalog. CPU scheduling does not parse the catalog. |
 | `cpu_affinity`, `cores` | Required | Distinct real logical CPU IDs and their count; must be outside configured VM compute CPU sets and within supervisor affinity. |
 | `topology` | Required | Native simulated GPU topology, e.g. `8A`; separate from real CPU budget. |
-| `persistence` | `final` | `native` or `final`, using the existing report-saving semantics. |
+| `persistence` | `final` | `native` or `final`; current sim-release uses the same native incremental-input flushing and shutdown-only final summaries for both. ClawBox verifies successful native close. |
 | `nofile` | 65536 descriptors | Minimum process soft limit. A lower hard limit fails with a remedy; configure the host/service limit before retrying. |
 | `startup_timeout_seconds` | 180 seconds | Positive finite readiness deadline; startup failure is recorded and owned resources are closed. |
 | `shutdown_timeout_seconds` | 720 seconds | Positive finite graceful-close deadline. Forced termination is a finalization failure. |
@@ -875,6 +877,13 @@ only at session finalization when needed. The GPU service retains the recordings
 CPU sessions retain only actual requests, replies and live process identities.
 Native GPU scheduling and filtered signal APIs remain unchanged.
 
+The adapter targets sim-release `ae5c94517a32fe735ce93a62efe2748587f39cdf`.
+It explicitly uses `prompt_source=actual`: prefill and KV state depend on the
+Agent's actual messages. Trace-prompt replay, accelerated warm-up and
+`serve-many` are not exposed by this integration. Retain `k=1` and one fresh
+cluster per arm; do not interpret upstream trace-prompt capacity measurements
+as capacity measurements of this actual-prompt workflow.
+
 `prepare-serving-sim` requires the original format-5 source, its adapted CPU trace,
 and the configured prediction artifacts offline. Its new output directory contains
 the GPU catalog/traces, CPU workload/manifest, and separate provenance. Existing
@@ -891,7 +900,7 @@ changes do not require host apply, image rebuilding, or retraining by themselves
 | `--topology` | `8A`; simulated GPU topology, independent of real CPU count |
 | `--trace-catalog` | Required by serve; use the prepared bundle's catalog |
 | `--out` | Required new directory for serve/smoke; preserve completed outputs |
-| `--persistence` | `native`: preserve per-request cumulative reports. `final`: defer those reports until graceful shutdown, avoiding repeated serialization of the entire run; only affects serve. Stop with Ctrl-C/SIGTERM and verify `clawbox-persistence.json` reports `finalized: true`. Abrupt termination loses deferred reports. Record this choice and use a new run ID when changing it; no rebuild or retraining required. |
+| `--persistence` | `native` (default) or `final`: both preserve the current simulator's incremental input writes, periodic flush/step release and final summaries at graceful shutdown. Stop with Ctrl-C/SIGTERM and verify `clawbox-persistence.json` has both `finalized: true` and `native_close_succeeded: true`. Abrupt termination leaves incomplete reports. |
 | `--host`, `--port` | `127.0.0.1`, `8000` |
 | `--k`, `--v0` | Virtual clock speed 1 and initial virtual seconds 0; real CPU runs require k=1 |
 | `--api-key-env` | `CLAWBOX_SIM_API_KEY`; unset means no authentication |
@@ -906,6 +915,15 @@ the upstream lock. Setup reuses complete pinned metadata (`HF_HOME` controls its
 environment/cache settings in fresh shells; existing verified environments need only check.
 The adapter does not rebuild VM images or retrain ClawTune. Native dependency changes
 require setup; changing service settings requires a fresh service and new run ID/qualification.
+
+When upgrading from the older simulator, run setup in a new simulator checkout
+and dedicated environment: this release requires the simulator's own Rust
+extension in addition to the Dynamo/Mooncake libraries. ARM setup uses matching
+package versions with ARM wheel hashes. Preserve `realized.json`,
+`realized-inputs.jsonl` and `realized-tokens.bin` together: the summary now refers
+to incremental message/token data. The native
+`serving_sim.joined.realized.read(output_path, records, messages=True)` reader
+reconstructs full inputs offline; CPU scheduling does not consume these files.
 
 Use a separate fresh service for qualification, then restart
 it before a formal arm so KV state cannot leak across arms. Qualification uses

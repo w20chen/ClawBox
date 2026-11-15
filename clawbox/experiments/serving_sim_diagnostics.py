@@ -24,11 +24,13 @@ class Diagnostics:
     """One writer per event loop; no request bodies or per-token records."""
 
     def __init__(self, path: Path):
-        self.stream = path.open('x', encoding='utf-8', buffering=1)
+        self.stream = path.open('x', encoding='utf-8', buffering=65536)
 
     def write(self, event: str, **fields):
-        self.stream.write(json.dumps(dict(event=event, unix_s=time.time(), **fields),
+        self.stream.write(json.dumps(dict(event=event, unix_s=time.time(), monotonic_ns=time.monotonic_ns(), **fields),
                                      separators=(',', ':')) + '\n')
+        if 'error' in fields or event == 'process_sample':
+            self.stream.flush()
 
     async def sample_loop(self, interval_s: float):
         import psutil

@@ -185,6 +185,11 @@ class InferenceSpec(StrictFrozenModel):
                     or url.path not in ('', '/', '/v1', '/v1/')):
                 raise ValueError('managed serving_sim requires a local http://127.0.0.1:PORT base_url')
         interval = self.configuration.get('serving_sim_diagnostic_interval_seconds', 1.)
+        if self.configuration.get('serving_sim_diagnostic_detail', 'full') not in ('compact', 'full'):
+            raise ValueError('serving_sim_diagnostic_detail must be compact or full')
+        expiry = self.configuration.get('serving_sim_keepalive_expiry_seconds', 2.)
+        if isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not math.isfinite(expiry) or expiry < 0:
+            raise ValueError('serving_sim_keepalive_expiry_seconds must be nonnegative and finite')
         if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval <= 0:
             raise ValueError('serving_sim_diagnostic_interval_seconds must be positive and finite')
         return self

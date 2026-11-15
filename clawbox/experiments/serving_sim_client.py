@@ -81,6 +81,7 @@ class ServingSimClient:
         self.cancelled_requests = set()
         self.error = None
         self.stopping = False
+        self.compact_diagnostics = configuration.get('serving_sim_diagnostic_detail') == 'compact'
 
     def __enter__(self):
         self.output.mkdir(parents=True, exist_ok=True)
@@ -99,7 +100,10 @@ class ServingSimClient:
         self.client = httpx.AsyncClient(trust_env=False,
             headers={"Authorization": "Bearer " + self.credential} if self.credential else {},
             timeout=httpx.Timeout(20, read=None),
-            limits=httpx.Limits(max_connections=None, max_keepalive_connections=32))
+            # Uvicorn closes idle sockets after 5 s. Expire ours first to avoid
+            # racing that close (the native load client uses the same 2 s bound).
+            limits=httpx.Limits(max_connections=None, max_keepalive_connections=32,
+                keepalive_expiry=float(self.configuration.get('serving_sim_keepalive_expiry_seconds', 2.))))
         sent = time.time()
         response = await self.client.get(self.base + "/v1/clawbox/simulator/info", timeout=20)
         received = time.time()
@@ -113,6 +117,8 @@ class ServingSimClient:
             uncertainty_s=self.clock_uncertainty_s, method="HTTP request midpoint")
         if not self.info.get("ready") or self.info.get("clock", {}).get("k") != 1:
             raise ValueError("serving_sim requires a ready service with k=1 for real CPU execution")
+        if self.info.get('prompt_source') != 'actual':
+            raise ValueError('serving_sim requires actual Agent prompts; restart with the current ClawBox launcher')
         if type(self.info.get("accepted_requests")) is not int or self.info["accepted_requests"] != 0:
             raise ValueError("simulator already contains requests; restart it with a new output directory for this arm")
         expected_topology = self.configuration.get("serving_sim_topology_digest")
@@ -164,7 +170,12 @@ class ServingSimClient:
                                 callback(record)
                     finally:
                         record['callback_seconds'] = time.monotonic() - callback_started
-                        self.signal_log.write(json.dumps(record, separators=(",", ":")) + "\n")
+                        logged = ({k: record[k] for k in (
+                            'event', 'session_id', 'request_id', 'engine_id', 'role', 'source',
+                            'signal_sequence', 't', 'wall_t', 'queued_since', 'est_wait_s', 'layer',
+                            'adapter_emit_unix_s', 'received_unix_s', 'signal_age_seconds', 'callback_seconds')
+                            if k in record} if self.compact_diagnostics else record)
+                        self.signal_log.write(json.dumps(logged, separators=(",", ":")) + "\n")
                 if not self.stopping:
                     raise RuntimeError("simulator signal stream disconnected")
         except asyncio.CancelledError:
