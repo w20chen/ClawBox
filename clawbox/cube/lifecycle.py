@@ -832,7 +832,8 @@ class CubeSandboxLifecycle:
             layer = dict(item)
             index = layer.get("layer_index")
             layer["tier"] = (
-                self._lineage_path_tier(external.get(index))
+                "template" if layer.get("path_kind") == "template_external"
+                else self._lineage_path_tier(external.get(index))
                 if layer.get("external") else tier.value
             )
             layer_map.append(layer)

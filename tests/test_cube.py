@@ -30,6 +30,7 @@ import clawbox.experiments.worker as worker_module
 from clawbox.experiments.openclaw_driver import NativeSSHRoute
 from clawbox.experiments.policy import PolicyCoordinator
 from clawbox.experiments.snapshot_pool import (
+    SnapshotKey,
     WarmCapacityError,
     WarmSnapshotPool,
     WarmSnapshotTooLarge,
@@ -883,6 +884,25 @@ def test_incremental_lifecycle_events_expose_compact_cross_tier_lineage(tmp_path
     assert second["lineage_layer_map"][0]["tier"] == "cold"
     lifecycle.restore()
     lifecycle.close()
+
+
+def test_incremental_lineage_labels_template_backing_separately(tmp_path) -> None:
+    template = tmp_path / "template.mem"
+    template.write_bytes(b"template")
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=_Sandbox),
+        template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+    )
+    manifest = lifecycle._annotate_snapshot_lineage({
+        "external_layer_allocations": [{"layer_index": 0, "path": str(template)}],
+        "lineage_layer_map": [{
+            "layer_index": 0, "external": True, "path_kind": "template_external",
+        }],
+    }, key=SnapshotKey("session", "tool", 1), parent=None, tier=SnapshotTier.WARM)
+
+    assert manifest["lineage_layer_map"][0]["tier"] == "template"
 
 
 def test_restore_fault_sampling_uses_current_verified_leaf_and_counts_its_time(tmp_path, monkeypatch):
