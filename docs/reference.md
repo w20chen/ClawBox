@@ -612,6 +612,45 @@ Remove the active cache with `experiment base-cache cleanup` followed by
 `experiment base-cache cleanup --apply` before installation, then repeat
 `experiment base-cache prepare PLAN.yaml --apply` before qualification.
 
+`build-cubesandbox-release.sh --lifecycle-components --source DIR [--jobs N]`
+builds Cubelet, Shim and cube-runtime using an existing builder image. `N` is
+the positive compiler parallelism, default `1`; this mode needs no guest asset
+bundle. `install-incremental-cubesandbox.sh --lifecycle-components CUBE_SOURCE
+CLAWBOX_DIR WARM_ROOT COLD_ROOT` installs those components and builds/installs
+the Zstd helper on an idle standalone host. It preserves backups and restores
+the previous binaries if installation fails. Finish qualification after startup
+before launching a new run ID; changing these host binaries requires no guest
+image rebuild or predictor retraining.
+An already active Cubelet is kept running when its binary and drop-in settings
+are identical, so a Shim/runtime/helper update does not rebuild the TAP pool.
+
+This mode enables `CLAWBOX_CROSS_TIER_LINEAGE=1` in a Cubelet systemd drop-in,
+retains lazy private mappings and sets the explicit WARM/COLD roots. COLD-to-WARM
+successors reuse managed SSD layers; exclusively owned delta files remain
+compressed. WARM-to-COLD preserves durable shared layers and copies only the
+still-referenced tmpfs ranges into owned SSD layers before publishing. Dirty
+pages supersede inherited ranges, including zero-value updates. A COLD
+successor therefore has no tmpfs dependency without rewriting all guest RAM.
+Crash rollback remains a separate opt-in with matching API/Master
+and database prerequisites.
+
+`CLAWBOX_CHECKPOINT_LOG` selects aggregate native phase JSONL (default for this
+installer: `/data/log/clawbox-checkpoint-phases.jsonl`); changing it requires a
+Cubelet restart. Per-range logging remains disabled. Compression/decompression
+metrics include `phase_seconds.read`, `codec`, `write` and `sync`, in wall-clock
+seconds. `write` includes sparse-page scanning; `sync` includes final index
+publication for compression. Missing helper timings are `null`. These durations
+are nested within the lifecycle stage, not additional overhead to add again.
+`snapshot_metrics.checkpoint_api_timing` records `pause_rpc` and
+`snapshot_metadata` with Unix/monotonic start and finish timestamps, wall time
+and caller-thread CPU time. Native pause completion is synchronous; the client
+validates the resulting lineage without a second status-poll request.
+`memory.promote_volatile_layers` measures WARM-to-COLD inherited-range copies.
+`transferred_bytes` includes those copies plus newly dirty bytes;
+`dirty_bytes` counts only newly dirty bytes. Existing durable shared layers do
+not count as transferred. A missing parent or invalidated dirty history still
+requires a full base.
+
 For peer local-SSD restore, `build-cubesandbox-release.sh --peer-components`
 builds API/Master/Cubelet, but does not build or install the required Shim.
 The matching Shim must permit `fadvise64` in its VMM seccomp filter for direct

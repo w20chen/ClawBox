@@ -1,0 +1,53 @@
+--- a/Cubelet/services/cubebox/service.go
++++ b/Cubelet/services/cubebox/service.go
+@@ -855,6 +855,16 @@
+ 		retErr = fmt.Errorf("internal error")
+ 	})
+ 	res = &cubebox.ListCubeSandboxResponse{}
++
++	// An Info request names one sandbox. Do not materialize the whole host
++	// inventory (including private store JSON) before filtering that identity.
++	if req != nil && req.GetId() != "" {
++		sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, req.GetId())
++		if err == nil && sb != nil {
++			res.Items = []*cubebox.CubeSandbox{toGRPCCubeBox(sb, req.GetOption())}
++		}
++		return res, nil
++	}
+ 
+ 	cubeboxInStore := s.cubeboxMgr.cubeboxManger.List()
+ 	if len(cubeboxInStore) > maxListCubebox {
+--- /dev/null
++++ b/Cubelet/services/cubebox/list_identity_test.go
+@@ -0,0 +1,31 @@
++package cubebox
++
++import (
++	"context"
++	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
++	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
++	"testing"
++)
++
++type noInventoryForInfo struct{ fakeCubeboxAPI }
++
++func (*noInventoryForInfo) List() []*cubeboxstore.CubeBox {
++	panic("single-sandbox Info must not enumerate unrelated sandboxes")
++}
++
++func TestListSingleSandboxDoesNotEnumerateInventory(t *testing.T) {
++	store := &noInventoryForInfo{fakeCubeboxAPI: fakeCubeboxAPI{
++		cb: newCubeboxWithStatusForTest("target", cubeboxstore.Status{}),
++	}}
++	service := &service{cubeboxMgr: &local{cubeboxManger: store}}
++	id := "target"
++	rsp, err := service.List(context.Background(), &cubebox.ListCubeSandboxRequest{Id: &id})
++	if err != nil || len(rsp.Items) != 1 || rsp.Items[0].Id != id {
++		t.Fatalf("single sandbox result: %+v, %v", rsp, err)
++	}
++	missing := "absent"
++	rsp, err = service.List(context.Background(), &cubebox.ListCubeSandboxRequest{Id: &missing})
++	if err != nil || len(rsp.Items) != 0 {
++		t.Fatalf("missing result: %+v, %v", rsp, err)
++	}
++}

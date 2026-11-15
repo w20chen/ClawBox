@@ -14,8 +14,16 @@
 
 /* Keep the host dependency to the runtime libzstd ABI; kunpeng has libzstd.so.1. */
 size_t ZSTD_compressBound(size_t srcSize);
-size_t ZSTD_compress(void *dst, size_t dstCapacity, const void *src, size_t srcSize, int level);
-size_t ZSTD_decompress(void *dst, size_t dstCapacity, const void *src, size_t compressedSize);
+typedef struct ZSTD_CCtx_s ZSTD_CCtx;
+typedef struct ZSTD_DCtx_s ZSTD_DCtx;
+ZSTD_CCtx *ZSTD_createCCtx(void);
+size_t ZSTD_freeCCtx(ZSTD_CCtx *cctx);
+size_t ZSTD_compressCCtx(ZSTD_CCtx *cctx, void *dst, size_t dstCapacity,
+                       const void *src, size_t srcSize, int level);
+ZSTD_DCtx *ZSTD_createDCtx(void);
+size_t ZSTD_freeDCtx(ZSTD_DCtx *dctx);
+size_t ZSTD_decompressDCtx(ZSTD_DCtx *dctx, void *dst, size_t dstCapacity,
+                         const void *src, size_t compressedSize);
 unsigned ZSTD_isError(size_t code);
 const char *ZSTD_getErrorName(size_t code);
 
@@ -43,6 +51,14 @@ struct __attribute__((packed)) entry {
     uint8_t reserved[3];
 };
 
+struct phase_times { double read, codec, write, sync; };
+
+static double now_seconds(void) {
+    struct timespec value;
+    clock_gettime(CLOCK_MONOTONIC, &value);
+    return (double)value.tv_sec + (double)value.tv_nsec / 1e9;
+}
+
 static double seconds(struct timespec a, struct timespec b) {
     return (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
 }
@@ -53,8 +69,14 @@ static double cpu_seconds(const struct rusage *r) {
 }
 
 static int all_zero(const uint8_t *data, size_t size) {
-    size_t i;
-    for (i = 0; i < size; ++i) if (data[i] != 0) return 0;
+    /* Use libc's vector comparison instead of scanning zero pages byte by byte. */
+    static const uint8_t zeros[4096] = {0};
+    while (size) {
+        size_t length = size < sizeof(zeros) ? size : sizeof(zeros);
+        if (memcmp(data, zeros, length)) return 0;
+        data += length;
+        size -= length;
+    }
     return 1;
 }
 
@@ -82,13 +104,18 @@ static int read_full(int fd, void *buffer, size_t size, off_t offset) {
 static int write_sparse(int fd, const uint8_t *buffer, size_t size, off_t offset) {
     long host_page = sysconf(_SC_PAGESIZE);
     if (host_page <= 0) { errno = EINVAL; return -1; }
+    size_t run = 0;
     for (size_t cursor = 0; cursor < size; cursor += (size_t)host_page) {
         size_t length = size - cursor < (size_t)host_page
                       ? size - cursor : (size_t)host_page;
-        if (!all_zero(buffer + cursor, length)
-                && write_full(fd, buffer + cursor, length, offset + (off_t)cursor) < 0)
-            return -1;
+        if (all_zero(buffer + cursor, length)) {
+            if (cursor > run && write_full(fd, buffer + run, cursor - run,
+                                           offset + (off_t)run) < 0) return -1;
+            run = cursor + length;
+        }
     }
+    if (size > run && write_full(fd, buffer + run, size - run,
+                                 offset + (off_t)run) < 0) return -1;
     return 0;
 }
 
@@ -108,7 +135,8 @@ static long exec_peak_rss_kib(void) {
 
 static void report(const char *operation, const struct stat *input, const struct stat *output,
                    const struct header *h, uint64_t holes, uint64_t zstd,
-                   uint64_t payload, double wall, double cpu, long peak_kib) {
+                   uint64_t payload, double wall, double cpu, long peak_kib,
+                   const struct phase_times *phases) {
     uint64_t in_alloc = input ? allocated_bytes(input) : 0;
     uint64_t out_alloc = output ? allocated_bytes(output) : 0;
     double mib = h->logical_size / 1048576.0;
@@ -118,10 +146,12 @@ static void report(const char *operation, const struct stat *input, const struct
            ",\"index_bytes\":%" PRIu64 ",\"payload_bytes\":%" PRIu64
            ",\"input_allocated_bytes\":%" PRIu64 ",\"output_allocated_bytes\":%" PRIu64
            ",\"wall_seconds\":%.9f,\"cpu_seconds\":%.9f,\"logical_mib_per_second\":%.3f"
-           ",\"peak_rss_kib\":%ld}\n",
+           ",\"peak_rss_kib\":%ld,\"read_seconds\":%.9f,\"codec_seconds\":%.9f"
+           ",\"write_seconds\":%.9f,\"sync_seconds\":%.9f}\n",
            operation, h->chunk_size, h->logical_size, h->chunk_count, holes, zstd,
            h->chunk_count * (uint64_t)sizeof(struct entry), payload, in_alloc, out_alloc,
-           wall, cpu, wall > 0 ? mib / wall : 0.0, peak_kib);
+           wall, cpu, wall > 0 ? mib / wall : 0.0, peak_kib,
+           phases->read, phases->codec, phases->write, phases->sync);
 }
 
 static int compress_file(const char *input_path, const char *output_path) {
@@ -130,10 +160,12 @@ static int compress_file(const char *input_path, const char *output_path) {
     struct header h = {0};
     struct entry *entries = NULL;
     uint8_t *page = NULL, *compressed = NULL;
+    ZSTD_CCtx *context = NULL;
     uint64_t holes = 0, zstd = 0, payload = 0;
     struct timespec wall_a, wall_b;
     struct rusage usage_a, usage_b;
     long chunk_size = CHUNK_BYTES;
+    struct phase_times phases = {0};
     if ((in = open(input_path, O_RDONLY | O_CLOEXEC)) < 0 || fstat(in, &in_st) < 0) { perror(input_path); goto done; }
     if (!S_ISREG(in_st.st_mode)) { fprintf(stderr, "input is not a regular file\n"); goto done; }
     memcpy(h.magic, MAGIC, 8); h.version = VERSION; h.chunk_size = (uint32_t)chunk_size;
@@ -143,7 +175,8 @@ static int compress_file(const char *input_path, const char *output_path) {
     if (h.chunk_count > SIZE_MAX / sizeof(struct entry)) { fprintf(stderr, "snapshot too large\n"); goto done; }
     entries = calloc((size_t)h.chunk_count, sizeof(*entries));
     page = malloc((size_t)chunk_size); compressed = malloc(ZSTD_compressBound((size_t)chunk_size));
-    if (!entries || !page || !compressed) { perror("allocate"); goto done; }
+    context = ZSTD_createCCtx();
+    if (!entries || !page || !compressed || !context) { perror("allocate"); goto done; }
     if ((out = open(output_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, in_st.st_mode & 0777)) < 0) { perror(output_path); goto done; }
     if (ftruncate(out, (off_t)h.data_offset) < 0 || write_full(out, &h, sizeof(h), 0) < 0) { perror("initialize output"); goto done; }
     clock_gettime(CLOCK_MONOTONIC, &wall_a); getrusage(RUSAGE_SELF, &usage_a);
@@ -153,13 +186,19 @@ static int compress_file(const char *input_path, const char *output_path) {
         off_t data = lseek(in, position, SEEK_DATA);
         if (data < 0) { if (errno == ENXIO) break; perror("SEEK_DATA"); goto done; }
         if ((uint64_t)data >= (uint64_t)position + valid) continue;
-        memset(page, 0, (size_t)chunk_size);
+        /* pread fills all valid bytes, including holes; no extra zero pass. */
+        double phase_start = now_seconds();
         if (read_full(in, page, valid, position) < 0) { perror("read chunk"); goto done; }
+        phases.read += now_seconds() - phase_start;
         uint64_t index = (uint64_t)position / h.chunk_size;
-        size_t encoded = ZSTD_compress(compressed, ZSTD_compressBound(valid), page, valid, 1);
+        phase_start = now_seconds();
+        size_t encoded = ZSTD_compressCCtx(context, compressed, ZSTD_compressBound(valid), page, valid, 1);
+        phases.codec += now_seconds() - phase_start;
         if (ZSTD_isError(encoded)) { fprintf(stderr, "zstd: %s\n", ZSTD_getErrorName(encoded)); goto done; }
         off_t target = (off_t)(h.data_offset + payload);
+        phase_start = now_seconds();
         if (write_full(out, compressed, encoded, target) < 0) { perror("write payload"); goto done; }
+        phases.write += now_seconds() - phase_start;
         entries[index].offset = (uint64_t)target;
         entries[index].length = (uint32_t)encoded;
         entries[index].encoding = ENCODING_ZSTD;
@@ -167,17 +206,20 @@ static int compress_file(const char *input_path, const char *output_path) {
         ++zstd;
     }
     holes = h.chunk_count - zstd;
+    double sync_start = now_seconds();
     if (write_full(out, entries, (size_t)(h.chunk_count * sizeof(*entries)), (off_t)h.index_offset) < 0
         || ftruncate(out, (off_t)(h.data_offset + payload)) < 0 || fsync(out) < 0) { perror("finalize output"); goto done; }
+    phases.sync = now_seconds() - sync_start;
     clock_gettime(CLOCK_MONOTONIC, &wall_b); getrusage(RUSAGE_SELF, &usage_b);
     if (fstat(out, &out_st) < 0) { perror("stat output"); goto done; }
     report("compress", &in_st, &out_st, &h, holes, zstd, payload,
-           seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), exec_peak_rss_kib());
+           seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), exec_peak_rss_kib(), &phases);
     rc = 0;
 done:
     if (in >= 0) close(in);
     if (out >= 0) close(out);
     if (rc) unlink(output_path);
+    ZSTD_freeCCtx(context);
     free(entries); free(page); free(compressed); return rc;
 }
 
@@ -186,8 +228,10 @@ static int decompress_file(const char *input_path, const char *output_path) {
     struct stat in_st, out_st;
     struct header h = {0}; struct entry *entries = NULL;
     uint8_t *page = NULL, *payload_buffer = NULL; size_t payload_capacity = 0;
+    ZSTD_DCtx *context = NULL;
     uint64_t holes = 0, zstd = 0, payload = 0;
     struct timespec wall_a, wall_b; struct rusage usage_a, usage_b;
+    struct phase_times phases = {0};
     if ((in = open(input_path, O_RDONLY | O_CLOEXEC)) < 0 || fstat(in, &in_st) < 0) { perror(input_path); goto done; }
     if (read_full(in, &h, sizeof(h), 0) < 0 || memcmp(h.magic, MAGIC, 8) || h.version != VERSION
         || h.chunk_size == 0 || h.chunk_count != (h.logical_size + h.chunk_size - 1) / h.chunk_size
@@ -196,7 +240,8 @@ static int decompress_file(const char *input_path, const char *output_path) {
     }
     if (h.chunk_count > SIZE_MAX / sizeof(struct entry)) goto done;
     entries = malloc((size_t)(h.chunk_count * sizeof(*entries))); page = malloc(h.chunk_size);
-    if (!entries || !page || read_full(in, entries, (size_t)(h.chunk_count * sizeof(*entries)), (off_t)h.index_offset) < 0) { perror("read index"); goto done; }
+    context = ZSTD_createDCtx();
+    if (!entries || !page || !context || read_full(in, entries, (size_t)(h.chunk_count * sizeof(*entries)), (off_t)h.index_offset) < 0) { perror("read index"); goto done; }
     if ((out = open(output_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600)) < 0 || ftruncate(out, (off_t)h.logical_size) < 0) { perror(output_path); goto done; }
     clock_gettime(CLOCK_MONOTONIC, &wall_a); getrusage(RUSAGE_SELF, &usage_a);
     for (uint64_t i = 0; i < h.chunk_count; ++i) {
@@ -204,25 +249,34 @@ static int decompress_file(const char *input_path, const char *output_path) {
         if (e->encoding == ENCODING_HOLE) { ++holes; continue; }
         if (e->length == 0 || e->offset < h.data_offset) { fprintf(stderr, "invalid chunk entry\n"); goto done; }
         if (e->length > payload_capacity) { uint8_t *next = realloc(payload_buffer, e->length); if (!next) { perror("payload buffer"); goto done; } payload_buffer = next; payload_capacity = e->length; }
+        double phase_start = now_seconds();
         if (read_full(in, payload_buffer, e->length, (off_t)e->offset) < 0) { perror("read payload"); goto done; }
+        phases.read += now_seconds() - phase_start;
         if (e->encoding == ENCODING_ZSTD) {
-            size_t decoded = ZSTD_decompress(page, valid, payload_buffer, e->length);
+            phase_start = now_seconds();
+            size_t decoded = ZSTD_decompressDCtx(context, page, valid, payload_buffer, e->length);
+            phases.codec += now_seconds() - phase_start;
             if (ZSTD_isError(decoded) || decoded != valid) { fprintf(stderr, "zstd decode failed\n"); goto done; }
             ++zstd;
         } else { fprintf(stderr, "invalid encoding\n"); goto done; }
+        phase_start = now_seconds();
         if (write_sparse(out, page, valid, (off_t)(i * h.chunk_size)) < 0) { perror("write chunk"); goto done; }
+        phases.write += now_seconds() - phase_start;
         payload += e->length;
     }
+    double sync_start = now_seconds();
     if (fsync(out) < 0) { perror("sync output"); goto done; }
+    phases.sync = now_seconds() - sync_start;
     clock_gettime(CLOCK_MONOTONIC, &wall_b); getrusage(RUSAGE_SELF, &usage_b);
     if (fstat(out, &out_st) < 0) goto done;
     report("decompress", &in_st, &out_st, &h, holes, zstd, payload,
-           seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), exec_peak_rss_kib());
+           seconds(wall_a, wall_b), cpu_seconds(&usage_b) - cpu_seconds(&usage_a), exec_peak_rss_kib(), &phases);
     rc = 0;
 done:
     if (in >= 0) close(in);
     if (out >= 0) close(out);
     if (rc) unlink(output_path);
+    ZSTD_freeDCtx(context);
     free(entries); free(page); free(payload_buffer); return rc;
 }
 

@@ -745,6 +745,28 @@ def test_incremental_pause_cannot_silently_use_legacy_api() -> None:
     assert sandbox.state == "paused"
 
 
+def test_pause_uses_synchronous_server_completion_and_validates_lineage(monkeypatch) -> None:
+    from clawbox.cube import snapshot
+    calls = []
+
+    def pause(**kwargs):
+        calls.append(kwargs)
+        return {"tier": "warm", "generation": 1, "memory_snapshot_path": "/warm/vm/g1.mem"}
+
+    def validate(path, *, require_lineage):
+        assert path == "/warm/vm/g1.mem" and require_lineage
+        raise RuntimeError("invalid native RAM lineage")
+
+    monkeypatch.setattr(snapshot, "read_snapshot_metadata", validate)
+    with pytest.raises(RuntimeError, match="invalid native RAM lineage"):
+        CubeSandboxClient.pause_sandbox(
+            SimpleNamespace(pause=pause), tier="warm",
+            memory_snapshot_path="/warm/vm/g1.mem", generation=1,
+        )
+    assert calls[0]["wait"] is False
+
+
+
 def test_missing_cold_destination_fails_before_pausing_vm() -> None:
     _Sandbox.items = {}
     lifecycle = CubeSandboxLifecycle(CubeSandboxClient(sandbox_class=_Sandbox),

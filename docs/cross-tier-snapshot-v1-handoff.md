@@ -253,9 +253,10 @@ successors were incremental. This is x86 evidence only.
 
 ## Known limits
 
-- A WARM parent checkpointed directly to COLD can still be a full base; the
-  incremental guarantee covered here is COLD parent to later WARM successor
-  with cross-tier enabled.
+- With cross-tier enabled, WARM-to-COLD retains durable shared layers and
+  materializes only inherited tmpfs ranges on SSD. Missing parents or invalid
+  dirty-tracking history still require a full base. Validate zero updates,
+  durable-layer inode sharing, and restore after removing the WARM parent.
 - VMA pressure is bounded proactively, but the mmap/copy decision must be
   measured on ARM64 using the target kernel and page size.
 - S1 forced/low-budget copy, ARM64 qualification, low-concurrency smoke, and

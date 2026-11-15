@@ -159,6 +159,22 @@ def test_incompressible_chunk_stays_in_zstd_format(tmp_path: Path):
     assert _digest(snapshot) == original_digest
 
 
+def test_sparse_write_coalescing_preserves_holes_and_partial_final_page(tmp_path: Path):
+    binary = _build_helper(tmp_path)
+    page = os.sysconf("SC_PAGESIZE")
+    # Nonzero runs separated by zero pages, crossing the 1 MiB frame boundary.
+    expected = (b"A" * (1024 * 1024 - page) + b"\0" * (2 * page)
+                + b"B" * (3 * page) + b"\0" * page + b"tail")
+    snapshot = tmp_path / "runs.mem"
+    snapshot.write_bytes(expected)
+    compress_snapshot(snapshot, binary=str(binary))
+    restored = decompress_snapshot(snapshot, binary=str(binary))
+    assert snapshot.read_bytes() == expected
+    assert snapshot.stat().st_blocks * 512 < len(expected)
+    assert restored is not None
+    assert all(value >= 0 for value in restored["phase_seconds"].values())
+
+
 def test_allocated_zeros_and_holes_roundtrip_without_losing_zero_updates(tmp_path: Path):
     binary = _build_helper(tmp_path)
     snapshot = tmp_path / "delta.mem"

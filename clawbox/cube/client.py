@@ -720,14 +720,18 @@ class CubeSandboxClient:
         if tier is None:
             if snapshot_mechanism != "full-copy":
                 raise ValueError("incremental-cow requires an explicit snapshot tier and path")
-            sandbox.pause(wait=True)
+            # CubeAPI returns only after Cubelet has saved the snapshot,
+            # destroyed the runtime and CubeMaster has committed PAUSED.
+            # SDK wait=True adds a redundant state query after that barrier.
+            sandbox.pause(wait=False)
             return None
         if not memory_snapshot_path or generation is None:
             raise ValueError("tiered pause requires memory_snapshot_path and generation")
+        api_timing: list[dict[str, Any]] = []
         try:
-            with span('native.pause_sdk'):
+            with _creation_span(api_timing, "pause_rpc"), span('native.pause_sdk'):
                 result = sandbox.pause(
-                    wait=True, snapshot_tier=tier,
+                    wait=False, snapshot_tier=tier,
                     memory_snapshot_path=memory_snapshot_path,
                     snapshot_generation=generation,
                     **({"snapshot_mechanism": snapshot_mechanism}
@@ -749,14 +753,16 @@ class CubeSandboxClient:
         from .snapshot import read_snapshot_metadata
         if snapshot_mechanism == "incremental-cow" or "logical_bytes" not in result or "allocated_bytes" not in result:
             try:
-                metadata = read_snapshot_metadata(
-                    memory_snapshot_path, require_lineage=snapshot_mechanism == "incremental-cow",
-                )
+                with _creation_span(api_timing, "snapshot_metadata"):
+                    metadata = read_snapshot_metadata(
+                        memory_snapshot_path, require_lineage=snapshot_mechanism == "incremental-cow",
+                    )
             except OSError as exc:
                 raise RuntimeError("tiered pause completed without an accessible direct memory snapshot") from exc
         else:
             metadata = {}
         enriched = {**result, **metadata}
+        enriched["checkpoint_api_timing"] = api_timing
         enriched.setdefault("transferred_bytes", None)
         enriched["transferred_bytes_unavailable_reason"] = (
             "CubeSandbox pause API does not expose shim bytes written"

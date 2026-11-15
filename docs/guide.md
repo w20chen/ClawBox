@@ -121,6 +121,35 @@ For a cache-off comparison, clean up first and set
 binary for both arms; it also buffers lineage JSON reads. Comparing an old
 binary against a cached new binary would mix both changes in the result.
 
+### Update checkpoint and restore on an existing host
+
+On an idle standalone v0.7.0 host, prepare a new source directory with the
+current patch set. Reuse the installed builder image and the existing guest
+templates. Set the two storage paths below to the roots in your host plan.
+After installation, set `cube_source` in your editable host plan/profile to
+the new source directory so future host checks use the matching sources.
+
+```bash
+export CUBE_SOURCE_DIR="$HOME/src/CubeSandbox-lifecycle"
+bash scripts/build-cubesandbox-release.sh --lifecycle-components --source "$CUBE_SOURCE_DIR" --jobs 8
+sudo bash scripts/install-incremental-cubesandbox.sh --lifecycle-components \
+  "$CUBE_SOURCE_DIR" "$PWD" /absolute/warm-root /absolute/cold-root
+```
+
+The installer preserves backups, updates Cubelet/Shim/runtime and the Zstd
+helper, and enables managed cross-tier lineage. COLD-to-WARM reuses SSD layers;
+WARM-to-COLD copies only retained tmpfs ranges while preserving SSD sharing.
+It requires separate WARM
+tmpfs and COLD disk filesystems, no live VMs, and no active base cache. It
+restarts Cubelet when its binary or settings change; rebuilding the prepared
+TAP pool can take several minutes. If only Shim/runtime/helper changes, the
+idle host keeps its existing Cubelet process and TAP pool.
+Service startup alone is not readiness: use `experiment launch` below, which
+refreshes host state and runs real VM qualification. Use a new run ID and retain
+`environment.resources.snapshot_compression: zstd-page`. No guest rebuild,
+kernel change or predictor retraining is needed. This update does not enable
+crash rollback or peer storage; those require their matching API/Master setup.
+
 ## 2. Run a smoke experiment
 
 ```bash

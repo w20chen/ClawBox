@@ -9,6 +9,7 @@ mirror=upstream
 go_proxy=${GOPROXY:-}
 rustup_init_url=${RUSTUP_INIT_URL:-}
 peer_components=0
+lifecycle_components=0
 while (( $# )); do
   case "$1" in
     --help)
@@ -17,8 +18,10 @@ while (( $# )); do
       echo 'Use CUBE_SOURCE_URL for a reachable source mirror and BUILDX_CONFIG for an alternate writable build cache.'
       echo 'Use --go-proxy URL to select the Go module proxy (cn defaults to https://goproxy.cn,direct).'
       echo 'Use --peer-components --source DIR to build only matching peer API/Master/Cubelet against an existing builder image; no guest assets or Shim rebuild.'
+      echo 'Use --lifecycle-components --source DIR to build Cubelet/Shim/runtime against an existing builder image; no guest assets or API/Master rebuild.'
       exit 0 ;;
     --peer-components) peer_components=1; shift ;;
+    --lifecycle-components) lifecycle_components=1; shift ;;
     --direct-network)
       unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
       shift ;;
@@ -29,6 +32,14 @@ while (( $# )); do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if (( lifecycle_components )); then
+  (( ! peer_components )) || { echo 'choose one component build mode' >&2; exit 2; }
+  [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo '--jobs must be a positive integer' >&2; exit 2; }
+  export CUBE_SOURCE_DIR="$source_dir"
+  bash "$project/deploy/cubesandbox/prepare-semantic-source.sh"
+  make -C "$source_dir" builder-run BUILDER_CMD="set -e; cd /workspace/CubeShim; CARGO_BUILD_JOBS=$jobs cargo build --release --locked; cd /workspace; IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk; cd /workspace/CubeNet/cubevs; make gen; cd /workspace/Cubelet; GOMAXPROCS=$jobs go test ./services/cubebox -run TestListSingleSandboxDoesNotEnumerateInventory -count=1; GOMAXPROCS=$jobs go test ./services/cubebox -run TestManaged -count=1; mkdir -p /workspace/_output/bin; GOMAXPROCS=$jobs go build -o /workspace/_output/bin/cubelet ./cmd/cubelet"
+  exit 0
+fi
 if (( peer_components )); then
   export CUBE_SOURCE_DIR="$source_dir"
   bash "$project/deploy/cubesandbox/prepare-semantic-source.sh"

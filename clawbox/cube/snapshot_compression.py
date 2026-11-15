@@ -223,6 +223,11 @@ def compress_snapshot(path: str | Path, *, binary: str,
             "compress_wall_seconds": sum(float(item["metrics"]["wall_seconds"]) for item in records),
             "compress_cpu_seconds": sum(float(item["metrics"]["cpu_seconds"]) for item in records),
             "compress_peak_rss_kib": max(int(item["metrics"]["peak_rss_kib"]) for item in records),
+            "phase_seconds": {
+                phase: (sum(float(item["metrics"][phase + "_seconds"]) for item in records)
+                        if all(phase + "_seconds" in item["metrics"] for item in records) else None)
+                for phase in ("read", "codec", "write", "sync")
+            },
             "started_unix_s": started,
             "completed_unix_s": time.time(),
         }
@@ -306,6 +311,11 @@ def decompress_snapshot(path: str | Path, *, binary: str) -> dict[str, Any] | No
         "decompress_wall_seconds": wall_seconds,
         "decompress_cpu_seconds": sum(float(item["cpu_seconds"]) for item in results),
         "decompress_peak_rss_kib": max((int(item["peak_rss_kib"]) for item in results), default=0),
+        "phase_seconds": {
+            phase: (sum(float(item[phase + "_seconds"]) for item in results)
+                    if results and all(phase + "_seconds" in item for item in results) else None)
+            for phase in ("read", "codec", "write", "sync")
+        },
         "started_unix_s": started,
         "completed_unix_s": time.time(),
         "restored_allocated_bytes": sum(_allocated(Path(record["paths"][0])) for record in document["groups"]),

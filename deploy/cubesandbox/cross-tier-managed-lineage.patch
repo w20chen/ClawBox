@@ -3231,10 +3231,9 @@ index a1e3d57..5de7422 100644
 +}
 diff --git a/Cubelet/services/cubebox/managed_memory_layers.go b/Cubelet/services/cubebox/managed_memory_layers.go
 new file mode 100644
-index 0000000..a13490a
 --- /dev/null
 +++ b/Cubelet/services/cubebox/managed_memory_layers.go
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,445 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +package cubebox
@@ -3249,6 +3248,7 @@ index 0000000..a13490a
 +	"sort"
 +	"strconv"
 +	"strings"
++	"sync"
 +	"syscall"
 +	"time"
 +
@@ -3302,8 +3302,87 @@ index 0000000..a13490a
 +	} `json:"objects"`
 +}
 +
++// Published sidecars are immutable between replacements. Cache only their
++// parsed references, checking file identity and modification/change timestamps
++// on every sweep. Never cache the directory inventory or a deletion decision.
++type managedReferenceStamp struct {
++	device, inode     uint64
++	size              int64
++	modified, changed syscall.Timespec
++}
++
++type managedReferenceRecord struct {
++	stamp managedReferenceStamp
++	paths []string
++}
++
++var managedReferenceCache = struct {
++	sync.Mutex
++	files map[string]managedReferenceRecord
++}{}
++
++func readManagedReferenceRecord(path string, stamp managedReferenceStamp) (managedReferenceRecord, error) {
++	record := managedReferenceRecord{stamp: stamp}
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		return record, err
++	}
++	if strings.HasSuffix(path, ".lineage.json") {
++		var lineage managedMemoryLineage
++		if err := json.Unmarshal(raw, &lineage); err != nil {
++			return record, fmt.Errorf("decode %s: %w", path, err)
++		}
++		if lineage.SchemaVersion != 1 && lineage.SchemaVersion != 2 {
++			return record, fmt.Errorf("unsupported RAM lineage schema %d in %s", lineage.SchemaVersion, path)
++		}
++		for _, layer := range lineage.Layers {
++			if layer.ExternalPath == nil || !layer.Managed {
++				continue
++			}
++			if layer.LayerID == nil || strings.ContainsAny(*layer.LayerID, `/\`) {
++				return record, fmt.Errorf("invalid managed RAM layer identity in %s", path)
++			}
++			record.paths = append(record.paths, filepath.Clean(*layer.ExternalPath))
++		}
++	} else {
++		var manifest managedMemoryCrashRollbackManifest
++		if err := json.Unmarshal(raw, &manifest); err != nil {
++			return record, fmt.Errorf("decode %s: %w", path, err)
++		}
++		for _, object := range manifest.Objects {
++			clean := filepath.Clean(strings.TrimSpace(object.Path))
++			switch object.Category {
++			case "lineage_layer":
++				record.paths = append(record.paths, clean)
++			case "pending_marker":
++				record.paths = append(record.paths, filepath.Join(filepath.Dir(clean), "000000.mem"))
++			}
++		}
++	}
++	return record, nil
++}
++
 +func managedMemoryLayerReferences(roots []string) (map[string]struct{}, error) {
++	managedReferenceCache.Lock()
++	defer managedReferenceCache.Unlock()
 +	references := map[string]struct{}{}
++	current := map[string]managedReferenceRecord{}
++	type pendingRead struct {
++		path   string
++		stamp  managedReferenceStamp
++		stable bool
++		record managedReferenceRecord
++		err    error
++	}
++	pending := []*pendingRead{}
++	collect := func(path string, record managedReferenceRecord, stable bool) {
++		if stable {
++			current[path] = record
++		}
++		for _, referenced := range record.paths {
++			references[referenced] = struct{}{}
++		}
++	}
 +	for _, root := range roots {
 +		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 +			if walkErr != nil {
@@ -3312,60 +3391,24 @@ index 0000000..a13490a
 +				}
 +				return walkErr
 +			}
-+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".lineage.json") {
++			if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".lineage.json") && !strings.HasSuffix(entry.Name(), ".crash-rollback.json")) {
 +				return nil
 +			}
-+			raw, err := os.ReadFile(path)
++			info, err := os.Stat(path)
++			// A concurrent cleanup may remove one file, not the rest of the root.
++			if errors.Is(err, fs.ErrNotExist) {
++				return nil
++			}
 +			if err != nil {
 +				return err
 +			}
-+			var lineage managedMemoryLineage
-+			if err := json.Unmarshal(raw, &lineage); err != nil {
-+				return fmt.Errorf("decode %s: %w", path, err)
-+			}
-+			if lineage.SchemaVersion != 1 && lineage.SchemaVersion != 2 {
-+				return fmt.Errorf("unsupported RAM lineage schema %d in %s", lineage.SchemaVersion, path)
-+			}
-+			for _, layer := range lineage.Layers {
-+				if layer.ExternalPath == nil || !layer.Managed {
-+					continue
-+				}
-+				if layer.LayerID == nil || strings.ContainsAny(*layer.LayerID, `/\`) {
-+					return fmt.Errorf("invalid managed RAM layer identity in %s", path)
-+				}
-+				references[filepath.Clean(*layer.ExternalPath)] = struct{}{}
-+			}
-+			return nil
-+		})
-+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-+			return nil, err
-+		}
-+		err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-+			if walkErr != nil {
-+				if errors.Is(walkErr, fs.ErrNotExist) {
-+					return nil
-+				}
-+				return walkErr
-+			}
-+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".crash-rollback.json") {
-+				return nil
-+			}
-+			raw, err := os.ReadFile(path)
-+			if err != nil {
-+				return err
-+			}
-+			var manifest managedMemoryCrashRollbackManifest
-+			if err := json.Unmarshal(raw, &manifest); err != nil {
-+				return fmt.Errorf("decode %s: %w", path, err)
-+			}
-+			for _, object := range manifest.Objects {
-+				clean := filepath.Clean(strings.TrimSpace(object.Path))
-+				switch object.Category {
-+				case "lineage_layer":
-+					references[clean] = struct{}{}
-+				case "pending_marker":
-+					references[filepath.Join(filepath.Dir(clean), "000000.mem")] = struct{}{}
-+				}
++			stat := info.Sys().(*syscall.Stat_t)
++			stamp := managedReferenceStamp{stat.Dev, stat.Ino, stat.Size, stat.Mtim, stat.Ctim}
++			stable := time.Since(time.Unix(stat.Ctim.Sec, stat.Ctim.Nsec)) >= time.Second
++			if record, ok := managedReferenceCache.files[path]; stable && ok && record.stamp == stamp {
++				collect(path, record, true)
++			} else {
++				pending = append(pending, &pendingRead{path: path, stamp: stamp, stable: stable})
 +			}
 +			return nil
 +		})
@@ -3373,6 +3416,36 @@ index 0000000..a13490a
 +			return nil, err
 +		}
 +	}
++	// Bound first-scan JSON work; normal sweeps only parse changed sidecars.
++	// Workers do no deletion and never mutate the shared reference/cache maps.
++	if len(pending) > 0 {
++		jobs := make(chan *pendingRead)
++		var workers sync.WaitGroup
++		for n := 0; n < 4 && n < len(pending); n++ {
++			workers.Add(1)
++			go func() {
++				defer workers.Done()
++				for job := range jobs {
++					job.record, job.err = readManagedReferenceRecord(job.path, job.stamp)
++				}
++			}()
++		}
++		for _, job := range pending {
++			jobs <- job
++		}
++		close(jobs)
++		workers.Wait()
++		for _, job := range pending {
++			if errors.Is(job.err, fs.ErrNotExist) {
++				continue
++			}
++			if job.err != nil {
++				return nil, job.err
++			}
++			collect(job.path, job.record, job.stable)
++		}
++	}
++	managedReferenceCache.files = current
 +	return references, nil
 +}
 +
@@ -3477,8 +3550,41 @@ index 0000000..a13490a
 +	return removed, nil
 +}
 +
++type managedMemoryGCBatch struct {
++	sync.Mutex
++	completedStart time.Time
++	key            string
++}
++
++var managedMemoryGCRequests managedMemoryGCBatch
++
++func (batch *managedMemoryGCBatch) run(requested time.Time, key string,
++	collect func(time.Time) (managedMemoryLayerGCStats, error)) (managedMemoryLayerGCStats, error) {
++	batch.Lock()
++	defer batch.Unlock()
++	// Cleanup unlinks its references before requesting GC. A successful sweep
++	// begun after this request already covered it, including under concurrency.
++	// A request arriving during that sweep still requires a subsequent sweep.
++	if batch.key == key && batch.completedStart.After(requested) {
++		return managedMemoryLayerGCStats{}, nil
++	}
++	started := time.Now()
++	stats, err := collect(started)
++	if err == nil {
++		batch.completedStart, batch.key = started, key
++	}
++	return stats, err
++}
++
 +func gcManagedMemoryLayers() (managedMemoryLayerGCStats, error) {
-+	return gcManagedMemoryLayersAt(time.Now(), managedMemoryLayerGrace())
++	requested := time.Now()
++	roots := managedMemoryLayerRoots()
++	sort.Strings(roots)
++	grace := managedMemoryLayerGrace()
++	key := strings.Join(roots, "\x00") + fmt.Sprint(grace)
++	return managedMemoryGCRequests.run(requested, key, func(started time.Time) (managedMemoryLayerGCStats, error) {
++		return gcManagedMemoryLayersAt(started, grace)
++	})
 +}
 +
 +// Managed layers are referenced by pathname, so link count alone cannot prove
@@ -4510,10 +4616,9 @@ index 03913bd..6ea3bef 100644
  
  pub fn file_target(file: &std::fs::File) -> String {
 diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_manager.rs
-index 99ba0e3..9f97e59 100644
 --- a/hypervisor/vmm/src/memory_manager.rs
 +++ b/hypervisor/vmm/src/memory_manager.rs
-@@ -37,11 +37,13 @@ use std::fs::{File, OpenOptions};
+@@ -37,11 +37,13 @@
  use std::io::{self, Seek, SeekFrom};
  use std::ops::Deref;
  use std::os::fd::AsFd;
@@ -4527,7 +4632,7 @@ index 99ba0e3..9f97e59 100644
  use tracer::trace_scoped;
  use virtio_devices::BlocksState;
  #[cfg(target_arch = "x86_64")]
-@@ -66,6 +68,57 @@ const DEFAULT_MEMORY_ZONE: &str = "mem0";
+@@ -66,6 +68,55 @@
  
  const SNAPSHOT_FILENAME: &str = "memory-ranges";
  
@@ -4549,10 +4654,11 @@ index 99ba0e3..9f97e59 100644
 +
 +fn cross_tier_parent_allowed(
 +    same_device: bool,
-+    parent_volatile: bool,
 +    cross_tier_enabled: bool,
 +) -> bool {
-+    same_device || (cross_tier_enabled && !parent_volatile)
++    // Lineage::inherit materializes remaining volatile ranges on durable
++    // targets; crossing tiers no longer requires rewriting all guest RAM.
++    same_device || cross_tier_enabled
 +}
 +
 +fn lineage_parent_inheritance_allowed(
@@ -4576,19 +4682,19 @@ index 99ba0e3..9f97e59 100644
 +        return true;
 +    }
 +    let enabled = std::env::var(crate::snapshot_lineage::CROSS_TIER_FLAG).as_deref() == Ok("1");
-+    let parent_volatile = File::open(parent_path)
-+        .and_then(|file| crate::snapshot_lineage::volatile(&file))
-+        .unwrap_or(true);
-+    cross_tier_parent_allowed(false, parent_volatile, enabled)
++    cross_tier_parent_allowed(false, enabled)
 +}
 +
  struct MemorySnapshotFile {
      path: PathBuf,
      external: bool,
-@@ -198,6 +251,35 @@ mod memory_snapshot_file_tests {
-     }
- }
+@@ -195,6 +246,34 @@
  
+         assert_eq!(fs::metadata(&file_path).unwrap().len(), original_len);
+         fs::remove_file(file_path).unwrap();
++    }
++}
++
 +#[cfg(test)]
 +mod lineage_restore_plan_tests {
 +    use super::{cross_tier_parent_allowed, lineage_restore_plan};
@@ -4610,18 +4716,14 @@ index 99ba0e3..9f97e59 100644
 +    }
 +
 +    #[test]
-+    fn cross_tier_policy_allows_cold_source_only_when_enabled() {
-+        assert!(!cross_tier_parent_allowed(false, false, false));
-+        assert!(cross_tier_parent_allowed(false, false, true));
-+        assert!(!cross_tier_parent_allowed(false, true, true));
-+        assert!(cross_tier_parent_allowed(true, true, false));
-+    }
-+}
-+
- #[cfg(target_arch = "x86_64")]
- const X86_64_IRQ_BASE: u32 = 5;
++    fn cross_tier_policy_requires_opt_in() {
++        assert!(!cross_tier_parent_allowed(false, false));
++        assert!(cross_tier_parent_allowed(false, true));
++        assert!(cross_tier_parent_allowed(true, false));
+     }
+ }
  
-@@ -1374,8 +1456,14 @@ impl MemoryManager {
+@@ -1374,8 +1453,14 @@
              let mem_snapshot: MemoryManagerSnapshotData = snapshot
                  .to_state(MEMORY_MANAGER_SNAPSHOT_ID).map_err(Error::Restore)?;
              let layout = Self::snapshot_layout(&mem_snapshot.memory_ranges);
@@ -4636,7 +4738,7 @@ index 99ba0e3..9f97e59 100644
              if require_lineage && lineage.is_none() {
                  return Err(Error::Restore(MigratableError::Restore(anyhow!("missing committed RAM lineage"))));
              }
-@@ -1392,6 +1480,7 @@ impl MemoryManager {
+@@ -1392,6 +1477,7 @@
                  Some(crate::base_cache::open(&memory_file_target.path).map_err(Error::SnapshotOpen)?)
              } else { None };
  
@@ -4644,7 +4746,7 @@ index 99ba0e3..9f97e59 100644
              let mm = MemoryManager::new(
                  vm,
                  config,
-@@ -1405,6 +1494,10 @@ impl MemoryManager {
+@@ -1405,6 +1491,10 @@
                  #[cfg(target_arch = "x86_64")]
                  None,
              )?;
@@ -4655,7 +4757,7 @@ index 99ba0e3..9f97e59 100644
  
              if !fast_restore {
                  info!("restore shared map, fall back to slow restore");
-@@ -1422,16 +1515,94 @@ impl MemoryManager {
+@@ -1422,16 +1512,94 @@
                      .then(|| crate::snapshot_lineage::Lineage::external_base(
                          memory_file_target.path.clone(), layout.clone()))
              });
@@ -4752,7 +4854,7 @@ index 99ba0e3..9f97e59 100644
                          // Validated aligned ranges lie wholly within the mmap we
                          // own. No vCPU/device has resumed; MMU notifier invalidates
                          // any KVM stage-two entries, which rebuild on demand.
-@@ -1439,12 +1610,70 @@ impl MemoryManager {
+@@ -1439,12 +1607,70 @@
                              libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_FIXED,
                              file.as_raw_fd(), range.offset as libc::off_t) };
                          if mapped == libc::MAP_FAILED {
@@ -4824,7 +4926,7 @@ index 99ba0e3..9f97e59 100644
              Ok(mm)
          } else {
              Err(Error::RestoreMissingSourceUrl)
-@@ -3228,21 +3457,35 @@ impl MemoryManager {
+@@ -3228,21 +3454,35 @@
          let file = target.open_for_fresh_write()?;
          let logical_bytes = layout.iter().map(|r| r.length).sum();
          file.set_len(logical_bytes).map_err(io_error)?;
@@ -4851,14 +4953,14 @@ index 99ba0e3..9f97e59 100644
 +            crate::checkpoint_metrics::record_details(
 +                "memory.lineage_parent_rejected", &target_path, 0.0, None, None,
 +                serde_json::json!({
-+                    "reason": "cross_tier_disabled_or_warm_source",
++                    "reason": "cross_tier_disabled",
 +                    "parent_schema_version": lineage.schema_version,
 +                    "parent_layers": lineage.layers.len(),
 +                }),
 +            );
 +            warn!(
 +                "RAM lineage parent rejected for target {}: only same-filesystem parents \
-+                 or COLD->WARM/COLD cross-tier parents with {}=1 are supported",
++                 or cross-tier parents with {}=1 are supported",
 +                target_path, crate::snapshot_lineage::CROSS_TIER_FLAG,
 +            );
 +            None
@@ -4870,7 +4972,7 @@ index 99ba0e3..9f97e59 100644
              // Cubelet allocates just these pages in its storage cgroup under
              // the tmpfs NUMA1 policy before the LOCAL VMM writes them.
              snapshot_lineage::allocate_warm(&target.path, &ranges).map_err(io_error)?;
-@@ -3253,7 +3496,7 @@ impl MemoryManager {
+@@ -3253,7 +3493,7 @@
          let mut cold_bytes_since_discard = 0_u64;
          for r in &ranges {
              self.save_range_to_file(&file, &MemoryRange { gpa: r.gpa, length: r.length }, r.offset)?;
@@ -4879,7 +4981,7 @@ index 99ba0e3..9f97e59 100644
                  cold_bytes_since_discard += r.length;
                  if cold_bytes_since_discard >= 16 * 1024 * 1024 {
                      discard_cold_snapshot_cache(&file).map_err(io_error)?;
-@@ -3261,8 +3504,8 @@ impl MemoryManager {
+@@ -3261,8 +3501,8 @@
                  }
              }
          }
@@ -4891,11 +4993,14 @@ index 99ba0e3..9f97e59 100644
          }
          Ok(())
 diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapshot_lineage.rs
-index 1a46939..05cb86d 100644
 --- a/hypervisor/vmm/src/snapshot_lineage.rs
 +++ b/hypervisor/vmm/src/snapshot_lineage.rs
-@@ -10,6 +10,12 @@ use std::collections::HashSet;
- use std::os::unix::fs::MetadataExt;
+@@ -7,9 +7,15 @@
+ use std::fs::{self, File, OpenOptions};
+ use std::io::{self, Write};
+ use std::collections::HashSet;
+-use std::os::unix::fs::MetadataExt;
++use std::os::unix::fs::{FileExt, MetadataExt};
  use std::os::unix::io::AsRawFd;
  use std::path::{Path, PathBuf};
 +use std::sync::atomic::{AtomicU64, Ordering};
@@ -4907,7 +5012,7 @@ index 1a46939..05cb86d 100644
  
  #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
  pub struct Range {
-@@ -24,6 +30,14 @@ pub struct Layer {
+@@ -24,6 +30,14 @@
      pub ranges: Vec<Range>,
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub external_path: Option<PathBuf>,
@@ -4922,7 +5027,7 @@ index 1a46939..05cb86d 100644
  }
  
  impl Layer {
-@@ -46,6 +60,8 @@ pub struct Lineage {
+@@ -46,6 +60,8 @@
      pub reclaimed_bytes: u64,
      pub full_base: bool,
      pub layers: Vec<Layer>,
@@ -4931,7 +5036,7 @@ index 1a46939..05cb86d 100644
  }
  
  pub fn sidecar(path: &Path) -> PathBuf {
-@@ -60,6 +76,152 @@ pub fn layer_dir(path: &Path) -> PathBuf {
+@@ -60,8 +76,176 @@
      name.into()
  }
  
@@ -5083,8 +5188,32 @@ index 1a46939..05cb86d 100644
 +
  fn invalid(message: &str) -> io::Error {
      io::Error::new(io::ErrorKind::InvalidData, message)
++}
++
++// A durable successor must own SSD copies of its remaining tmpfs ranges.
++// Copy only the ranges still selected by the lineage, without inspecting page
++// contents. Durable external layers keep their existing shared identities.
++fn copy_layer_ranges(source: &File, target: &Path, ranges: &[Range]) -> io::Result<u64> {
++    let output = OpenOptions::new().write(true).create_new(true).open(target)?;
++    output.set_len(source.metadata()?.len())?;
++    let mut buffer = vec![0_u8; 1024 * 1024];
++    let mut copied = 0;
++    for range in ranges {
++        let mut offset = range.offset;
++        let end = range_end(range)?;
++        while offset < end {
++            let length = (end - offset).min(buffer.len() as u64) as usize;
++            source.read_exact_at(&mut buffer[..length], offset)?;
++            output.write_all_at(&buffer[..length], offset)?;
++            offset += length as u64;
++            copied += length as u64;
++        }
++    }
++    Ok(copied)
  }
-@@ -172,7 +334,10 @@ impl Lineage {
+ 
+ fn range_end(range: &Range) -> io::Result<u64> {
+@@ -172,7 +356,10 @@
              Err(e) => return Err(e),
          };
          let lineage: Self = serde_json::from_reader(std::io::BufReader::new(file))?;
@@ -5096,7 +5225,7 @@ index 1a46939..05cb86d 100644
              || lineage.logical_bytes != layout.iter().map(|r| r.length).sum::<u64>()
              || page_size == 0
          {
-@@ -183,12 +348,12 @@ impl Lineage {
+@@ -183,12 +370,12 @@
              if layer.name != format!("{:06}.mem", index) {
                  return Err(invalid("invalid RAM layer name"));
              }
@@ -5115,7 +5244,7 @@ index 1a46939..05cb86d 100644
              if !metadata.is_file() || metadata.len() != lineage.logical_bytes {
                  return Err(invalid("missing or truncated RAM layer"));
              }
-@@ -223,7 +388,9 @@ impl Lineage {
+@@ -223,7 +410,9 @@
              reclaimed_bytes: 0, full_base: false,
              layers: vec![Layer {
                  name: "000000.mem".into(), ranges, external_path: Some(path),
@@ -5125,21 +5254,45 @@ index 1a46939..05cb86d 100644
          }
      }
  
-@@ -237,6 +404,7 @@ impl Lineage {
+@@ -237,7 +426,12 @@
      {
          fs::create_dir(layer_dir(path))?;
          let mut layers = Vec::new();
 +        let mut takeover_markers = Vec::new();
++        let mut copied_bytes = 0;
++        let mut copied_ranges = 0;
++        let promotion_started = std::time::Instant::now();
          if let Some((parent_path, parent)) = parent {
++            let durable_target = !volatile(&File::open(layer_dir(path))?)?;
              // Canonicalize both new and legacy parents newest-to-oldest. Each
              // inherited layer contains only bytes not supplied by a newer
-@@ -254,20 +422,57 @@ impl Lineage {
+             // parent layer or this checkpoint.
+@@ -254,20 +448,77 @@
              retained.reverse();
              for (index, (layer, ranges)) in retained.into_iter().enumerate() {
                  let name = format!("{:06}.mem", index);
 -                if layer.external_path.is_none() {
 -                    fs::hard_link(layer.file_path(parent_path), layer_dir(path).join(&name))?;
 +                let source = layer.file_path(parent_path);
++                if durable_target {
++                    let input = File::open(&source)?;
++                    if volatile(&input)? {
++                        copied_bytes += copy_layer_ranges(
++                            &input, &layer_dir(path).join(&name), &ranges)?;
++                        copied_ranges += ranges.len();
++                        layers.push(Layer {
++                            name, ranges, external_path: None, layer_id: None,
++                            managed: false,
++                        });
++                        continue;
++                    }
+                 }
+-                layers.push(Layer {
+-                    name,
+-                    ranges,
+-                    external_path: layer.external_path.clone(),
+-                });
+-            }
 +                if let Some(external) = &layer.external_path {
 +                    validate_external_layer(layer, index)?;
 +                    layers.push(Layer {
@@ -5175,14 +5328,9 @@ index 1a46939..05cb86d 100644
 +                        });
 +                    }
 +                    Err(error) => return Err(error),
-                 }
--                layers.push(Layer {
--                    name,
--                    ranges,
--                    external_path: layer.external_path.clone(),
--                });
-             }
-         }
++                }
++            }
++        }
 +        let schema_version = if std::env::var(CROSS_TIER_FLAG).as_deref() == Ok("1")
 +            || parent.is_some_and(|(_, lineage)| lineage.schema_version == LINEAGE_SCHEMA_VERSION)
 +        {
@@ -5190,16 +5338,32 @@ index 1a46939..05cb86d 100644
 +        } else {
 +            LEGACY_LINEAGE_SCHEMA_VERSION
 +        };
++        if copied_ranges > 0 {
++            crate::checkpoint_metrics::record(
++                "memory.promote_volatile_layers", &path.to_string_lossy(),
++                promotion_started.elapsed().as_secs_f64(), Some(copied_bytes),
++                Some(copied_ranges as u64),
++            );
+         }
          Ok(Self {
 -            schema_version: 1, logical_bytes, allocated_bytes: 0,
+-            dirty_bytes: None, transferred_bytes: 0, effective_private_bytes: 0,
 +            schema_version, logical_bytes, allocated_bytes: 0,
-             dirty_bytes: None, transferred_bytes: 0, effective_private_bytes: 0,
++            dirty_bytes: None, transferred_bytes: copied_bytes, effective_private_bytes: 0,
              reclaimed_bytes: 0, full_base: parent.is_none(), layers,
 +            takeover_markers,
          })
      }
  
-@@ -281,7 +486,9 @@ impl Lineage {
+@@ -276,12 +527,15 @@
+     pub fn publish(mut self, path: &Path, ranges: Vec<Range>, durable: bool)
+         -> io::Result<()>
+     {
+-        self.transferred_bytes = ranges.iter().map(|r| r.length).sum();
+-        self.dirty_bytes = if self.full_base { None } else { Some(self.transferred_bytes) };
++        let dirty_bytes = ranges.iter().map(|r| r.length).sum::<u64>();
++        self.transferred_bytes += dirty_bytes;
++        self.dirty_bytes = if self.full_base { None } else { Some(dirty_bytes) };
          if !ranges.is_empty() {
              let name = format!("{:06}.mem", self.layers.len());
              fs::hard_link(path, layer_dir(path).join(&name))?;
@@ -5210,15 +5374,21 @@ index 1a46939..05cb86d 100644
          }
          let mut inodes = HashSet::new();
          for layer in &self.layers {
-@@ -297,6 +504,7 @@ impl Lineage {
+@@ -297,6 +551,13 @@
              if durable { file.sync_all()?; }
          }
          let target = sidecar(path);
-+        let _root_locks = acquire_managed_root_locks(&self.takeover_markers)?;
++        // GC scans both tiers under these locks. Protect references to existing
++        // managed layers too: otherwise it can scan the new tier before publish
++        // and the old tier after parent cleanup, missing both owners.
++        let mut publication_paths = self.takeover_markers.clone();
++        publication_paths.extend(self.layers.iter().filter(|layer| layer.managed)
++            .filter_map(|layer| layer.external_path.clone()));
++        let _root_locks = acquire_managed_root_locks(&publication_paths)?;
          let temporary = target.with_extension("json.pending");
          let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
          file.write_all(&serde_json::to_vec(&self)?)?;
-@@ -306,6 +514,9 @@ impl Lineage {
+@@ -306,6 +567,9 @@
          }
          fs::rename(temporary, target)?;
          if durable { File::open(path.parent().ok_or_else(|| invalid("no parent"))?)?.sync_all()?; }
@@ -5228,7 +5398,7 @@ index 1a46939..05cb86d 100644
          Ok(())
      }
  }
-@@ -314,7 +525,11 @@ impl Lineage {
+@@ -314,7 +578,11 @@
  mod tests {
      use super::*;
      use std::os::unix::fs::FileExt;
@@ -5240,19 +5410,105 @@ index 1a46939..05cb86d 100644
  
      struct Directory(PathBuf);
      impl Directory {
-@@ -330,6 +545,8 @@ mod tests {
-         fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+@@ -328,6 +596,93 @@
      }
- 
+     impl Drop for Directory {
+         fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
++    }
++
 +    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 +
++    #[test]
++    fn existing_managed_reference_publication_waits_for_gc_without_takeover() {
++        let directory = Directory::new();
++        let root = directory.0.join("layers");
++        let layer_path = root.join("existing").join("000000.mem");
++        fs::create_dir_all(layer_path.parent().unwrap()).unwrap();
++        fs::write(&layer_path, vec![0x42; 4096]).unwrap();
++        let target = directory.0.join("child.mem");
++        File::create(&target).unwrap().set_len(4096).unwrap();
++        fs::create_dir(layer_dir(&target)).unwrap();
++        let lineage = Lineage {
++            schema_version: LINEAGE_SCHEMA_VERSION, logical_bytes: 4096,
++            allocated_bytes: 0, dirty_bytes: Some(0), transferred_bytes: 0,
++            effective_private_bytes: 0, reclaimed_bytes: 0, full_base: false,
++            layers: vec![Layer {
++                name: "000000.mem".into(), ranges: vec![Range { gpa: 0x40000000, offset: 0, length: 4096 }],
++                external_path: Some(layer_path), layer_id: Some("existing".into()), managed: true,
++            }],
++            takeover_markers: vec![],
++        };
++        let lock = ManagedRootLock::acquire(&root).unwrap();
++        let (send, receive) = mpsc::channel();
++        let published = target.clone();
++        let worker = thread::spawn(move || { send.send(lineage.publish(&published, vec![], true)).unwrap(); });
++        assert!(receive.recv_timeout(Duration::from_millis(100)).is_err());
++        assert!(!sidecar(&target).exists());
++        drop(lock);
++        receive.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
++        worker.join().unwrap();
++        assert!(sidecar(&target).exists());
++    }
++
++    #[test]
++    fn warm_to_cold_copies_only_retained_ranges_and_keeps_ssd_base_shared() {
++        let _guard = TEST_ENV_LOCK.lock().unwrap();
++        let cold = Directory::new();
++        let warm = Directory(Path::new("/dev/shm").join(format!(
++            "cube-lineage-promote-{}", std::process::id())));
++        fs::create_dir(&warm.0).unwrap();
++        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
++        let size = 4 * page;
++        let range = |n, count| Range {
++            gpa: 0x40000000 + n * page, offset: n * page, length: count * page,
++        };
++        let layout = vec![range(0, 4)];
++        let base_path = cold.0.join("base.mem");
++        fs::write(&base_path, vec![0x5a; size as usize]).unwrap();
++        let base_inode = base_path.metadata().unwrap().ino();
++        let base = Lineage::external_base(base_path.clone(), layout.clone());
++        let parent_path = warm.0.join("parent.mem");
++        let file = File::create(&parent_path).unwrap();
++        assert!(volatile(&file).unwrap());
++        file.set_len(size).unwrap();
++        file.write_all_at(&vec![0; page as usize], page).unwrap();
++        file.write_all_at(&vec![0x42; page as usize], 2 * page).unwrap();
++        Lineage::inherit(&parent_path, Some((&base_path, &base)), size, &[range(1, 2)])
++            .unwrap().publish(&parent_path, vec![range(1, 2)], false).unwrap();
++        let parent = Lineage::load(&parent_path, &layout, page).unwrap().unwrap();
++        let child_path = cold.0.join("child.mem");
++        let file = File::create(&child_path).unwrap();
++        assert!(!volatile(&file).unwrap());
++        file.set_len(size).unwrap();
++        file.write_all_at(&vec![0x43; page as usize], 2 * page).unwrap();
++        Lineage::inherit(&child_path, Some((&parent_path, &parent)), size, &[range(2, 1)])
++            .unwrap().publish(&child_path, vec![range(2, 1)], true).unwrap();
++        drop(warm); // The durable child must survive loss of the entire tmpfs parent.
++        let child = Lineage::load(&child_path, &layout, page).unwrap().unwrap();
++        assert!(!child.full_base);
++        assert_eq!(child.dirty_bytes, Some(page));
++        assert_eq!(child.transferred_bytes, 2 * page);
++        assert_eq!(child.layers[0].file_path(&child_path).metadata().unwrap().ino(), base_inode);
++        let mut restored = vec![0xff; size as usize];
++        for layer in &child.layers {
++            let file = File::open(layer.file_path(&child_path)).unwrap();
++            assert!(!volatile(&file).unwrap());
++            for r in &layer.ranges {
++                file.read_exact_at(&mut restored[r.offset as usize..(r.offset + r.length) as usize], r.offset).unwrap();
++            }
++        }
++        let mut expected = vec![0x5a; size as usize];
++        expected[page as usize..2 * page as usize].fill(0);
++        expected[2 * page as usize..3 * page as usize].fill(0x43);
++        assert_eq!(restored, expected);
+     }
+ 
      #[test]
-     fn zero_dirty_pages_override_base_and_survive_parent_deletion() {
-         let directory = Directory::new();
-@@ -464,4 +681,190 @@ mod tests {
+@@ -464,4 +819,190 @@
          assert_eq!(child.transferred_bytes, 0);
          assert_eq!(child.dirty_bytes, Some(0));
      }
+-}
 +
 +    #[test]
 +    fn inferred_tier_root_matches_the_go_managed_layer_directory() {
@@ -5439,7 +5695,7 @@ index 1a46939..05cb86d 100644
 +        assert!(restored[2 * page as usize..].iter().all(|byte| *byte == 0x5a));
 +
 +    }
- }
++}
 diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
 index 71449b4..df8bedf 100644
 --- a/sdk/python/cubesandbox/sandbox.py
@@ -5496,3 +5752,139 @@ index 56815bb..4e8d583 100644
  # ── GET /sandboxes ────────────────────────────────────────────────────────────
  
  class TestListSandboxesV1:
+diff --git a/Cubelet/services/cubebox/managed_reference_cache_test.go b/Cubelet/services/cubebox/managed_reference_cache_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/managed_reference_cache_test.go
+@@ -0,0 +1,83 @@
++package cubebox
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestManagedReferenceCacheTracksReplacementChangeAndRemoval(t *testing.T) {
++	for _, suffix := range []string{".lineage.json", ".crash-rollback.json"} {
++		t.Run(suffix, func(t *testing.T) {
++			root := t.TempDir()
++			path := filepath.Join(root, "snapshot"+suffix)
++			encode := func(name string) []byte {
++				var doc interface{}
++				if suffix == ".lineage.json" {
++					doc = map[string]interface{}{"schema_version": 2, "layers": []map[string]interface{}{{"external_path": name, "layer_id": "layer", "managed": true}}}
++				} else {
++					doc = map[string]interface{}{"objects": []map[string]string{{"path": name, "category": "lineage_layer"}}}
++				}
++				raw, err := json.Marshal(doc)
++				if err != nil {
++					t.Fatal(err)
++				}
++				return raw
++			}
++			put := func(target string, raw []byte) {
++				if err := os.WriteFile(target, raw, 0600); err != nil {
++					t.Fatal(err)
++				}
++			}
++			check := func(want string) {
++				refs, err := managedMemoryLayerReferences([]string{root})
++				if err != nil {
++					t.Fatal(err)
++				}
++				if want == "" {
++					if len(refs) != 0 {
++						t.Fatalf("stale references: %v", refs)
++					}
++					return
++				}
++				if _, ok := refs[want]; !ok || len(refs) != 1 {
++					t.Fatalf("references=%v want only %s", refs, want)
++				}
++			}
++			put(path, encode("/first"))
++			time.Sleep(1100 * time.Millisecond)
++			check("/first")
++			check("/first")
++			info, err := os.Stat(path)
++			if err != nil {
++				t.Fatal(err)
++			}
++			// Same-size atomic replacement with restored mtime must invalidate.
++			put(path+".next", encode("/other"))
++			if err := os.Chtimes(path+".next", info.ModTime(), info.ModTime()); err != nil {
++				t.Fatal(err)
++			}
++			if err := os.Rename(path+".next", path); err != nil {
++				t.Fatal(err)
++			}
++			check("/other")
++			// Same-inode modification with restored mtime must invalidate too.
++			time.Sleep(time.Millisecond)
++			put(path, encode("/third"))
++			if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
++				t.Fatal(err)
++			}
++			check("/third")
++			put(path, []byte("{"))
++			if _, err := managedMemoryLayerReferences([]string{root}); err == nil {
++				t.Fatal("cached reference hid malformed replacement")
++			}
++			if err := os.Remove(path); err != nil {
++				t.Fatal(err)
++			}
++			check("")
++		})
++	}
++}
+diff --git a/Cubelet/services/cubebox/managed_gc_batch_test.go b/Cubelet/services/cubebox/managed_gc_batch_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/managed_gc_batch_test.go
+@@ -0,0 +1,43 @@
++package cubebox
++
++import (
++	"errors"
++	"testing"
++	"time"
++)
++
++func TestManagedGCBatchOnlyReusesSweepStartedAfterRequest(t *testing.T) {
++	var batch managedMemoryGCBatch
++	calls := 0
++	fail := false
++	collect := func(time.Time) (managedMemoryLayerGCStats, error) {
++		calls++
++		if fail {
++			return managedMemoryLayerGCStats{}, errors.New("cannot read lineage")
++		}
++		return managedMemoryLayerGCStats{Deleted: 1}, nil
++	}
++	oldRequest := time.Now().Add(-time.Second)
++	if _, err := batch.run(oldRequest, "roots-a", collect); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := batch.run(oldRequest, "roots-a", collect); err != nil || calls != 1 {
++		t.Fatalf("older queued cleanup was not covered: calls=%d err=%v", calls, err)
++	}
++	// References removed after a sweep began must never reuse its result.
++	if _, err := batch.run(time.Now(), "roots-a", collect); err != nil || calls != 2 {
++		t.Fatalf("new cleanup skipped a required sweep: calls=%d err=%v", calls, err)
++	}
++	if _, err := batch.run(oldRequest, "roots-b", collect); err != nil || calls != 3 {
++		t.Fatalf("root change reused unrelated sweep: calls=%d err=%v", calls, err)
++	}
++	fail = true
++	request := time.Now()
++	if _, err := batch.run(request, "roots-b", collect); err == nil {
++		t.Fatal("GC error lost")
++	}
++	fail = false
++	if _, err := batch.run(request, "roots-b", collect); err != nil || calls != 5 {
++		t.Fatalf("failed sweep was reused: calls=%d err=%v", calls, err)
++	}
++}
