@@ -172,6 +172,7 @@ def configure_experiment(
     random_seed: int | None = None,
     arm_timeout_seconds: int | None = None,
     command_timeout_seconds: int | None = None,
+    dependency_install_concurrency: int | None = None,
     memory_sample_interval_seconds: float | None = None,
     stabilization_seconds: float | None = None,
     time_scale: float | None = None,
@@ -218,6 +219,10 @@ def configure_experiment(
     runtime = _mapping(root.get("runtime"), name="runtime")
     tool = _mapping(root.get("sandbox"), name="sandbox")
     execution = _mapping(root.get("execution"), name="execution")
+    # Configured experiments are ungated by default even when BASE is a
+    # historical high-concurrency spec that saved a positive package gate.
+    # Users who need to protect a constrained package path must opt in again.
+    execution["dependency_install_concurrency"] = dependency_install_concurrency
     resources = _mapping(root.get("resources"), name="resources")
     if host_profile is not None:
         # A selected host replaces the topology, including explicit absence of

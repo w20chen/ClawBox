@@ -547,6 +547,11 @@ def parser() -> argparse.ArgumentParser:
     configure.add_argument("--random-seed", type=int)
     configure.add_argument("--arm-timeout-seconds", type=int)
     configure.add_argument("--command-timeout-seconds", type=int)
+    configure.add_argument(
+        "--dependency-install-concurrency", type=int,
+        help=("positive arm-wide apt/pip command limit; omitted means unlimited "
+              "and clears a saved gate from BASE"),
+    )
     configure.add_argument("--time-scale", type=float)
     configure.add_argument("--inference-backend", choices=("replay", "api", "serving_sim"))
     configure.add_argument("--serving-sim-catalog-manifest", help="prepared CPU/GPU trace bundle manifest")
@@ -1207,6 +1212,9 @@ def main(argv: list[str] | None = None) -> int:
                 random_seed=args.random_seed,
                 arm_timeout_seconds=args.arm_timeout_seconds,
                 command_timeout_seconds=args.command_timeout_seconds,
+                dependency_install_concurrency=(
+                    args.dependency_install_concurrency
+                ),
                 time_scale=args.time_scale,
                 inference_backend=args.inference_backend,
                 serving_sim_catalog_manifest=args.serving_sim_catalog_manifest,

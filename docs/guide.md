@@ -464,6 +464,12 @@ For a target rate of `lambda` sessions/second and `N > 1` sessions, use an
 expected window of `(N - 1) / lambda` seconds. Set the arm timeout beyond arrival
 and execution time. The default arm timeout is 3600 seconds.
 
+`experiment configure` leaves dependency installation unlimited by writing
+`execution.dependency_install_concurrency: null`, even if the base YAML saved an
+older positive gate. Use `--dependency-install-concurrency N` only for an
+intentional package-path protection experiment; a small bound can serialize a
+large replay independently of VM or Tool admission.
+
 For a corpus scan, set `workload.session_assignment: unique`, set
 `execution.concurrency_levels` to the number of cases, and set
 `execution.max_active_sessions: 32` to run at most 32 live VM pairs at once.

@@ -89,7 +89,7 @@ therefore preserves the experiment's verified templates.
 | Resources | `--pool-memory-gib`, `--emergency-free-memory-gib`, `--checkpoint-headroom-gib`, `--warm-root`, `--warm-memory-gib`, `--cold-root` |
 | Placement/control | `--placement-policy`, `--session-compute-nodes` (comma-separated IDs), `--runtime-poll-interval-seconds`, `--memory-scheduling` |
 | Snapshots/evidence | `--snapshot-mechanism full-copy\|incremental-cow`, `--snapshot-storage tiered\|warm-only`, `--template-base-sharing-artifact` |
-| Scheduling | `--concurrency` (comma-separated levels), `--arrival-schedule burst\|fixed_stagger\|poisson`, `--stagger-seconds`, `--poisson-arrival-window-fraction`, `--poisson-arrival-window-seconds`, `--random-seed` |
+| Scheduling | `--concurrency` (comma-separated levels), `--arrival-schedule burst\|fixed_stagger\|poisson`, `--stagger-seconds`, `--poisson-arrival-window-fraction`, `--poisson-arrival-window-seconds`, `--random-seed`, `--dependency-install-concurrency` (positive integer) |
 | Deadlines | `--arm-timeout-seconds`, `--command-timeout-seconds` |
 | Inference | `--inference-backend replay\|api\|serving_sim`, `--model`, `--base-url`, `--api-key-env`, `--time-scale`, `--serving-sim-catalog-manifest` |
 | Launch immediately | `--launch`, with `--run-id`, `--qualification-concurrency`, `--force-qualify`, `--detach` |
@@ -97,6 +97,13 @@ therefore preserves the experiment's verified templates.
 Schema-4 `--set` accepts mechanism groups and `conditions.FIELD`. Other fields
 are edited in YAML. Arm overrides take precedence and are reported by
 `configure` when they replace an explicit common setting.
+
+Newly configured experiments always write
+`execution.dependency_install_concurrency: null`, including when `BASE` saved a
+historical positive gate. This leaves apt/pip commands unlimited. Pass
+`--dependency-install-concurrency N` only when an outbound package path needs a
+measured positive limit. Either choice requires a new run ID; it does not
+require host apply, image rebuild, or retraining.
 
 `sudo bash scripts/clawbox-pypi-cache {start|status|stop}` manages the host PyPI
 cache. Docker and curl are required. `start` waits for its HTTP status endpoint;

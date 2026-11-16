@@ -536,6 +536,11 @@ def configure_design(raw, options):
     m = Mechanisms.model_validate(raw.get('mechanisms', {})).model_dump(mode='json')
     evidence = raw.setdefault('evidence', {})
     execution = raw.setdefault('execution', {})
+    # ``configure`` deliberately resets historical package-install gates.
+    # A positive CLI value is the only way a newly configured design keeps one.
+    execution['dependency_install_concurrency'] = options.get(
+        'dependency_install_concurrency'
+    )
     measurement = raw.setdefault('measurement', {})
     conditions = raw.setdefault('conditions', {})
     if options.get('prediction_mode') is not None:

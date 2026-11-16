@@ -493,6 +493,44 @@ def test_configure_refuses_to_replace_existing_output(tmp_path, capsys) -> None:
     assert "--force" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("recipe", [None, "custom"])
+def test_configure_clears_saved_dependency_install_gate_by_default(
+    tmp_path, capsys, recipe,
+) -> None:
+    base = yaml.safe_load(
+        Path("examples/experiments/getting-started.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    base["execution"]["dependency_install_concurrency"] = 8
+    source = tmp_path / "gate-8.yaml"
+    source.write_text(yaml.safe_dump(base), encoding="utf-8")
+    output = tmp_path / f"ungated-{recipe or 'schema3'}.yaml"
+    options = ["--recipe", recipe] if recipe else []
+
+    assert cli.main([
+        "experiment", "configure", str(source), str(output), *options,
+    ]) == 0
+    capsys.readouterr()
+    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
+    assert configured["execution"]["dependency_install_concurrency"] is None
+
+
+def test_configure_can_explicitly_enable_dependency_install_gate(
+    tmp_path, capsys,
+) -> None:
+    output = tmp_path / "gate-17.yaml"
+
+    assert cli.main([
+        "experiment", "configure",
+        "examples/experiments/getting-started.yaml", str(output),
+        "--dependency-install-concurrency", "17",
+    ]) == 0
+    capsys.readouterr()
+    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
+    assert configured["execution"]["dependency_install_concurrency"] == 17
+
+
 def test_configure_uses_the_setup_host_profile(tmp_path, capsys) -> None:
     digest_a = "sha256:" + "a" * 64
     digest_b = "sha256:" + "b" * 64
