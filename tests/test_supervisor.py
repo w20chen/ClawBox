@@ -67,6 +67,57 @@ def test_snapshot_cleanup_is_limited_to_journal_owner(tmp_path: Path) -> None:
     assert (cold / "layers").is_dir()
 
 
+def test_cleanup_run_uses_single_cold_root_for_legacy_arm_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    artifact = run_root / "attempts" / "attempt" / "legacy-arm"
+    artifact.mkdir(parents=True)
+    cold = tmp_path / "cold"
+    (cold / "owned-sandbox").mkdir(parents=True)
+    journal = OwnedSandboxJournal(artifact / "owned-sandboxes.jsonl")
+    owner = Ownership("run", "attempt", "task", "experiment", "session", "policy")
+    journal.record("owned-sandbox", owner)
+    atomic_json(run_root / "run-state.json", {
+        "schema_version": 1,
+        "run_id": "run",
+        "state": "failed",
+        "arms": {"legacy-arm": {
+            "task_uid": "task", "artifact_root": str(artifact),
+        }},
+    })
+    (run_root / "experiment.yaml").write_text("placeholder", encoding="utf-8")
+
+    class _Arm:
+        arm_id = "current-arm"
+        resources = type("Resources", (), {"cold_snapshot_root": str(cold)})()
+
+    class _Spec:
+        resources = type("Resources", (), {"snapshot_scheduling_storage": None})()
+
+    class _SuccessfulCleanupProcess:
+        pid = 123
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def wait(self, timeout: float) -> int:
+            return 0
+
+    monkeypatch.setattr("clawbox.experiments.supervisor.load_experiment", lambda path: _Spec())
+    monkeypatch.setattr("clawbox.experiments.supervisor.expand_matrix", lambda spec: (_Arm(),))
+    monkeypatch.setattr("clawbox.experiments.supervisor.subprocess.Popen", _SuccessfulCleanupProcess)
+
+    from clawbox.experiments.supervisor import cleanup_run
+    cleanup_run(run_root)
+
+    assert not (cold / "owned-sandbox").exists()
+    state = json.loads((run_root / "run-state.json").read_text(encoding="utf-8"))
+    assert state["arms"]["legacy-arm"]["cold_snapshot_cleanup"] == {
+        "journal_sandboxes": 1, "removed_directories": 1,
+    }
+
+
 @pytest.mark.parametrize('worker', [_ResultWorkerSupervisor, _BrokenWorkerSupervisor, _HangingWorkerSupervisor])
 @pytest.mark.parametrize('finalize_ok', [True, False])
 def test_owned_gpu_finalizes_on_success_failure_and_timeout(tmp_path, monkeypatch, worker, finalize_ok):

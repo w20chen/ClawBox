@@ -689,10 +689,12 @@ def cleanup_run(
             for arm in expand_matrix(load_experiment(run_root / "experiment.yaml"))
             if arm.resources.cold_snapshot_root
         }
+        unique_cleanup_cold_roots = set(cleanup_cold_roots.values())
     except Exception:
         # The existing spec-validation block below reports this as a cleanup
         # failure; sandbox destruction must still be attempted first.
         cleanup_cold_roots = {}
+        unique_cleanup_cold_roots = set()
     for arm_id, arm in state.get("arms", {}).items():
         task_uid = arm.get("task_uid")
         artifact_root = arm.get("artifact_root")
@@ -720,6 +722,11 @@ def cleanup_run(
             if return_code:
                 raise RuntimeError(f"cleanup process exited with status {return_code}")
             cold_root = cleanup_cold_roots.get(arm_id)
+            # Older frozen runs can expand to a different arm ID after a
+            # spec-model change.  A single configured root is unambiguous;
+            # never guess when the frozen experiment names multiple roots.
+            if cold_root is None and len(unique_cleanup_cold_roots) == 1:
+                cold_root = next(iter(unique_cleanup_cold_roots))
             if cold_root is not None:
                 arm["cold_snapshot_cleanup"] = cleanup_owned_snapshot_directories(
                     artifact_path / "owned-sandboxes.jsonl", str(task_uid), cold_root,
