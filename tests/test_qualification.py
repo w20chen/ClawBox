@@ -401,7 +401,15 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
             "qualification_max_parallel_sessions"
         ],
         "qualified_session_count": max(qualified.execution.concurrency_levels),
-        "qualified_case_ids": [case.case_id for case in load_workload_cases(spec.workload)],
+        "qualified_case_ids": [
+            case.case_id for case in load_workload_cases(qualified.workload)
+        ],
+        "source_case_count": len(load_workload_cases(spec.workload)),
+        "qualified_simulator_cluster_count": qualified.inference.configuration.get(
+            'serving_sim_launch', {}).get('cluster_count'),
+        "source_case_ids_digest": qualification_module._case_ids_digest(
+            load_workload_cases(spec.workload)
+        ),
         "target_concurrency": max(spec.execution.concurrency_levels),
         "scope": "capability_smoke",
         "policy_names": [policy.name for policy in qualified.policies],
@@ -597,6 +605,117 @@ def test_default_gate_uses_create_limit_without_repeating_cases():
     ] == 2
     assert qualified.execution.concurrency_levels == (3,)
     assert session_worker_count(expand_matrix(qualified)[0]) == 2
+
+
+def test_default_gate_samples_large_corpus_deterministically(tmp_path):
+    spec = load_experiment(EXAMPLE)
+    case = spec.workload.cases[0]
+    cases = tuple(
+        case.model_copy(update={"case_id": f"qualification-case-{index:02d}"})
+        for index in range(20)
+    )
+    spec = spec.model_copy(update={
+        "workload": spec.workload.model_copy(update={"cases": cases}),
+        "execution": spec.execution.model_copy(update={
+            "concurrency_levels": (1280,), "sandbox_create_concurrency": 32,
+        }),
+    })
+
+    qualified = qualification_spec(spec)
+
+    selected = [case.case_id for case in qualified.workload.cases]
+    assert len(selected) == 16
+    assert selected[0] == "qualification-case-00"
+    assert selected[-1] == "qualification-case-19"
+    assert len(set(selected)) == 16
+    assert qualified.execution.concurrency_levels == (16,)
+    assert qualified.inference.configuration[
+        "qualification_max_parallel_sessions"
+    ] == 16
+    path = tmp_path / 'sampled.json'
+    receipt = _receipt(spec)
+    path.write_text(json.dumps(receipt))
+    assert validate_receipt(spec, path)['source_case_count'] == 20
+    receipt['qualified_case_ids'] = receipt['qualified_case_ids'][:-1]
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match='qualified_case_ids'):
+        validate_receipt(spec, path)
+
+
+def test_single_case_sample_serializes_round_robin_source():
+    from clawbox.experiments.spec import ExperimentSpec
+    from clawbox.experiments.configure import dump_experiment
+    from clawbox.experiments.spec_types import SessionAssignment
+
+    spec = load_experiment(EXAMPLE)
+    cases = tuple(spec.workload.cases[0].model_copy(update={'case_id': f'case-{i}'})
+                  for i in range(2))
+    spec = spec.model_copy(update={
+        'workload': spec.workload.model_copy(update={
+            'cases': cases, 'session_assignment': SessionAssignment.ROUND_ROBIN}),
+        'inference': spec.inference.model_copy(update={'configuration': {
+            **spec.inference.configuration, 'qualification_case_limit': 1}}),
+    })
+    qualified = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(qualification_spec(spec))))
+    assert len(qualified.workload.cases) == 1
+    assert qualified.workload.session_assignment is SessionAssignment.SINGLE_CASE
+
+
+def test_serving_sim_qualification_uses_one_cluster_by_default():
+    from clawbox.experiments.spec import InferenceBackend
+
+    spec = load_experiment(EXAMPLE)
+    configuration = {
+        **spec.inference.configuration,
+        "serving_sim_launch": {
+            "cluster_count": 16,
+            "cores": 8,
+            "cpu_affinity": list(range(240, 248)),
+        },
+    }
+    spec = spec.model_copy(update={
+        "inference": spec.inference.model_copy(update={
+            "backend": InferenceBackend.SERVING_SIM,
+            "configuration": configuration,
+        }),
+    })
+
+    qualified = qualification_spec(spec)
+
+    assert qualified.inference.configuration["serving_sim_launch"]["cluster_count"] == 1
+    assert spec.inference.configuration["serving_sim_launch"]["cluster_count"] == 16
+
+
+def test_qualification_limits_are_configurable():
+    from clawbox.experiments.spec import InferenceBackend
+
+    spec = load_experiment(EXAMPLE)
+    case = spec.workload.cases[0]
+    cases = tuple(
+        case.model_copy(update={"case_id": f"qualification-case-{index}"})
+        for index in range(12)
+    )
+    configuration = {
+        **spec.inference.configuration,
+        "qualification_case_limit": 5,
+        "qualification_simulator_cluster_count": 2,
+        "serving_sim_launch": {"cluster_count": 16},
+    }
+    spec = spec.model_copy(update={
+        "workload": spec.workload.model_copy(update={"cases": cases}),
+        "inference": spec.inference.model_copy(update={
+            "backend": InferenceBackend.SERVING_SIM,
+            "configuration": configuration,
+        }),
+    })
+
+    qualified = qualification_spec(spec, concurrency=16)
+
+    assert len(qualified.workload.cases) == 5
+    assert qualified.inference.configuration[
+        "qualification_max_parallel_sessions"
+    ] == 16
+    assert qualified.inference.configuration["serving_sim_launch"]["cluster_count"] == 2
 
 
 def test_zero_qualification_concurrency_is_rejected():

@@ -171,6 +171,11 @@ class InferenceSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def no_llm_duration_policy(self):
+        for name in ('qualification_case_limit', 'qualification_simulator_cluster_count'):
+            if name in self.configuration:
+                value = self.configuration[name]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError(f'{name} must be a positive integer')
         forbidden = {"model_wait_prediction_seconds", "model_wait_prediction_source",
                      "oracle_model_wait_seconds", "oracle_model_wait_source"}
         if forbidden.intersection(self.configuration):

@@ -697,11 +697,21 @@ verified obsolete templates, or edit `resources.cubelet_storage_root` and the
 measured `resources.cube_cow_headroom_per_vm_mib`; either edit requires a new
 run ID but no image rebuild.
 
-Qualification executes a real Tool call for every case and checks required
-templates and capabilities. Its default worker bound is the smallest of target
-concurrency, creation concurrency, and case count. Use
-`--qualification-concurrency N` to change that bound. Qualification establishes
-capability and case coverage; formal runs measure performance at target load.
+Qualification executes the first model step and its real Tool calls for up to
+16 cases, selected at evenly spaced positions in workload order (including both
+ends). It validates all input cases and keeps the required snapshot, placement,
+borrowing and template-sharing probes. This sample proves basic capability,
+not execution of every template or performance at target load. Its default
+worker bound is the smallest of target concurrency, creation concurrency and
+sample count. Use `--qualification-concurrency N` to change simultaneous sessions.
+Set `inference.configuration.qualification_case_limit` to change sample size;
+set it at least as large as the corpus to execute every case. Managed simulator
+qualification uses one cluster by default; set
+`inference.configuration.qualification_simulator_cluster_count` to test more
+(capped by the formal cluster count). Formal startup still verifies every
+configured cluster before admitting VMs. These options require a matching new
+receipt and a new run ID when editing a frozen spec, but no host apply, image
+rebuild or retraining. Full-corpus template-sharing proofs remain reusable.
 For custom Tool images, set `inference.configuration.openclaw_tool_home` to the
 Tool user's home (default `/root`) so shell commands read the intended Git and
 Conda settings. Replay requires the current Runtime image patch to avoid
@@ -734,8 +744,8 @@ retraining, and template requalification are unnecessary.
 
 An explicit `--qualification FILE` must pass the receipt coverage checks. Omit it
 for automatic receipt management, or use `--force-qualify` to replace it. Receipt
-reuse checks implementation, input hashes, image identities, target node, case
-coverage, policy names, and required probe evidence. Re-registering the same
+reuse checks implementation, input hashes, image identities, target node, source
+case inventory, sampled case coverage, policy names, and required probe evidence. Re-registering the same
 Runtime image can reuse its receipt; Tool sharing proofs bind exact templates.
 Changing only offered concurrency or arrival timing does not require repeating
 the capability smoke; `launch` decides whether to
@@ -1209,6 +1219,7 @@ clusters instead of changing one cluster's topology. For example, 16 independent
       topology: 8A
       cluster_count: 16
       routing: sticky_balanced_by_case
+      startup_timeout_seconds: 600
 ```
 
 `base_url` is the first of 16 consecutive local ports. `cores` is the total real
@@ -1216,8 +1227,10 @@ CPU budget for the pool: cluster 0 uses the first CPU, cluster 1 the second, and
 clusters wrap round-robin when `cluster_count` exceeds `cores`. The topology is
 still per cluster; do not replace the pool with one `16x8A` topology. Cases are
 sorted deterministically, each unique trace is assigned to one cluster, and all
-rollouts of that trace remain there. For the 80-base Full1280 workload this gives
-five base traces, or 80 rollout sessions, per cluster. All signal streams are
+rollouts of that trace remain there. An explicitly grouped 80-base × 16-rollout
+workload gives five base traces per cluster. `concurrency: 1280` alone does not
+select that grouping: round-robin assignment repeats the configured corpus.
+All signal streams are
 consumed and logged with `cluster_id`; one failed stream or incomplete native
 close invalidates the arm.
 
@@ -1227,7 +1240,24 @@ practical starting reserve is 32--48 GiB (warmed processes account for roughly
 20 GiB before workload growth). Changing `cluster_count`, routing, ports, or CPU
 placement requires qualification and a new run ID. It does not require host
 apply, VM image rebuild or retraining unless the reserved host CPU/service limits
-themselves change.
+themselves change. Multi-cluster cold startup may need a larger
+`startup_timeout_seconds` (600 seconds in the example); this deadline is outside
+workload execution.
+
+Reserve the listener ports against automatic ephemeral source-port allocation
+before starting the pool, especially on hosts whose ephemeral range begins below
+the simulator port. From the checkout on the Linux host:
+
+```bash
+python3 scripts/configure-simulator-ports.py --base-port 18096 --cluster-count 16
+sudo python3 scripts/configure-simulator-ports.py --base-port 18096 --cluster-count 16 --apply
+```
+
+The first command previews the merged range. Apply preserves existing reserved
+ports, updates the live sysctl and saves `/etc/sysctl.d/99-clawbox-simulator-ports.conf`
+for reboot. Repeat after changing the range. Reservations prevent automatic source
+port allocation, not another service explicitly binding those ports. No image
+rebuild or retraining is needed. The pool still checks that its ports are free.
 
 Both `persistence: final` and `persistence: native` retain the current simulator's
 incremental input flushes and step-memory release; summaries are written at

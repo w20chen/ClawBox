@@ -859,6 +859,8 @@ Live API inference still has no complete supported qualification path. Fields be
 | `model`, `base_url` | Explicit configuration or saved environment | Provider model and endpoint |
 | `api_key_env` | `OPENCLAW_API_KEY` | Name of the host environment variable holding the credential |
 | `time_scale` | 1.0 | Nonnegative multiplier on replayed model delays |
+| `qualification_case_limit` | 16 cases | Positive integer; maximum distinct real-VM smoke cases, evenly sampled in workload order including the endpoints. All source inputs are still validated and receipt-bound. Increase to the corpus size for full execution coverage. Does not change formal workload size. |
+| `qualification_simulator_cluster_count` | 1 cluster | Positive integer; managed simulator clusters used by qualification, capped by formal `serving_sim_launch.cluster_count`. A single-cluster smoke does not prove cross-cluster routing or capacity. Formal startup checks every configured cluster before VM admission. |
 | `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; configure its `workload.json` with `--workload-manifest`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
 | `serving_sim_topology_digest` | Unset | Expected `topology_digest` returned by the ClawBox adapter's `/v1/clawbox/simulator/info`. Set this to reject a changed topology during matched comparisons; when unset, the actual digest is recorded without an equality requirement. |
 | `serving_sim_diagnostic_interval_seconds` | 1.0 seconds | Positive finite interval for client process/FD/event-loop samples, and managed server samples. Request diagnostics retain stages and exception chains without extra prompt/response copies. |
@@ -871,6 +873,15 @@ Live API inference still has no complete supported qualification path. Fields be
 | `openclaw_exec_yield_ms` | Unset | Optional integer from 10 to 120000 milliseconds for background-capable OpenClaw exec calls. Synchronous replay recordings disable automatic background execution; see [workloads](workloads.md). |
 | `openclaw_tool_home` | `/root` | Absolute home directory inside the Tool VM. OpenClaw shell commands use it to find the image's Git and Conda configuration. Change for a custom Tool user; takes effect with a new run ID, without host apply or retraining. |
 | `clawtune_config`, `clawtune_root` | Unset | Reuse a ClawTune model configuration and source root |
+
+Qualification limit changes require a matching receipt and a new run ID when
+editing a frozen specification; no host apply, image rebuild or retraining.
+Required native snapshot/NUMA probes and input validation remain enabled.
+Use `python3 scripts/configure-simulator-ports.py --base-port PORT --cluster-count N`
+on the Linux host to preview port reservations (`N` defaults to 1).
+Add `sudo` and `--apply` to merge live reservations, verify readback and persist
+them for reboot. This host-only setting needs no guest rebuild or retraining;
+repeat it when changing the simulator listener range.
 
 `inference.configuration.serving_sim_launch` fields:
 

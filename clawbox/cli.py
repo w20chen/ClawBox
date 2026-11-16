@@ -325,7 +325,7 @@ def parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="verify services, templates, memory pool and WARM storage")
     doctor.add_argument("spec", type=Path)
     doctor.add_argument("--probe-vm", action="store_true")
-    qualify = sub.add_parser("qualify", help="run a short real-VM gate at target concurrency")
+    qualify = sub.add_parser("qualify", help="run a bounded real-VM capability smoke")
     qualify.add_argument("spec", type=Path)
     qualify.add_argument("--concurrency", type=int)
     qualify.add_argument("--receipt", type=Path)
@@ -350,7 +350,7 @@ def parser() -> argparse.ArgumentParser:
     launch.add_argument("--run-id")
     launch.add_argument("--qualification", type=Path)
     launch.add_argument("--qualification-concurrency", type=int,
-                        help="bound the real-VM capability smoke (default: the smallest of target concurrency, sandbox-create concurrency, and case count); covers every case, does not prove target density")
+                        help="bound simultaneous smoke sessions (default: minimum of target concurrency, sandbox-create concurrency, and sampled case count); samples up to qualification_case_limit cases, does not prove target density")
     launch.add_argument("--force-qualify", action="store_true")
     launch.add_argument("--detach", action="store_true")
     importer = sub.add_parser("import-trace", help="convert a supported research trace to replay schema 6")

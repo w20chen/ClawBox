@@ -33,13 +33,15 @@ from .spec import (
     ExperimentSpec, InferenceBackend, ReclamationPolicy, canonical_json,
     expand_matrix, load_workload_cases, resolve_case_sandbox, spec_digest,
 )
-from .spec_types import AdmissionPolicy, ArrivalSchedule, EvictionPolicy, SnapshotTier
+from .spec_types import AdmissionPolicy, ArrivalSchedule, EvictionPolicy, SessionAssignment, SnapshotTier
 from .supervisor import ExperimentSupervisor, process_is_alive, process_identity, terminate_process_tree
 from .worker import atomic_json, session_case_for, session_worker_count
 
 
-QUALIFICATION_SCHEMA_VERSION = 24
+QUALIFICATION_SCHEMA_VERSION = 25
 _TEMPLATE_PROBE_TRANSIENT_RETRY_LIMIT = 2
+_DEFAULT_QUALIFICATION_CASE_LIMIT = 16
+_DEFAULT_QUALIFICATION_SIMULATOR_CLUSTER_COUNT = 1
 
 
 def _native_probe_domain(spec: ExperimentSpec, node) -> PriorityDomain | None:
@@ -1164,10 +1166,41 @@ def live_borrow_roundtrip_test(
     return {**result, "artifact_root": str(artifact_root)}
 
 
+def _qualification_configuration_int(
+    configuration: dict[str, Any], key: str, default: int,
+) -> int:
+    value = configuration.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{key} must be a positive integer")
+    return value
+
+
+def _qualification_cases(cases: list[Any] | tuple[Any, ...], *, limit: int) -> tuple[Any, ...]:
+    """Select a stable corpus-spanning smoke instead of replaying the corpus."""
+    if len(cases) <= limit:
+        return tuple(cases)
+    if limit == 1:
+        return (cases[0],)
+    # Include both ends and spread the remaining probes over the source order.
+    # Input validation and the receipt manifest still cover every source case.
+    indexes = [index * (len(cases) - 1) // (limit - 1) for index in range(limit)]
+    return tuple(cases[index] for index in indexes)
+
+
+def _case_ids_digest(cases: list[Any] | tuple[Any, ...]) -> str:
+    return hashlib.sha256(canonical_json([case.case_id for case in cases]).encode()).hexdigest()
+
+
 def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) -> ExperimentSpec:
     if spec.inference.backend not in {InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}:
         raise ValueError("qualification requires inference.backend=replay or serving_sim")
-    cases = load_workload_cases(spec.workload)
+    source_cases = load_workload_cases(spec.workload)
+    case_limit = _qualification_configuration_int(
+        spec.inference.configuration,
+        "qualification_case_limit",
+        _DEFAULT_QUALIFICATION_CASE_LIMIT,
+    )
+    cases = _qualification_cases(source_cases, limit=case_limit)
     level = (
         concurrency
         if concurrency is not None
@@ -1179,25 +1212,38 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
     )
     if level < 1:
         raise ValueError("qualification concurrency must be positive")
+    configuration = {
+        **spec.inference.configuration,
+        # Qualification proves that representative environments can launch and
+        # execute their first native Tool call. Replaying the full corpus adds a
+        # second workload run but does not strengthen this capability proof.
+        **({"time_scale": 0.0} if spec.inference.backend is InferenceBackend.REPLAY else {}),
+        "max_model_steps": 1,
+        "qualification_max_parallel_sessions": level,
+    }
+    if spec.inference.backend is InferenceBackend.SERVING_SIM:
+        launch = configuration.get("serving_sim_launch")
+        if launch is not None:
+            cluster_limit = _qualification_configuration_int(
+                configuration,
+                "qualification_simulator_cluster_count",
+                _DEFAULT_QUALIFICATION_SIMULATOR_CLUSTER_COUNT,
+            )
+            configured_clusters = int(launch.get("cluster_count", 1))
+            configuration["serving_sim_launch"] = {
+                **launch,
+                "cluster_count": min(configured_clusters, cluster_limit),
+            }
     inference = spec.inference.model_copy(update={
-        "configuration": {
-            **spec.inference.configuration,
-            # Qualification proves that each environment can launch and
-            # execute its first native Tool call.  Replaying the recorded LLM
-            # delay before that call adds hours for a heterogeneous corpus but
-            # does not strengthen the capability proof.  Formal runs retain
-            # the configured time scale from the source spec.
-            **({"time_scale": 0.0} if spec.inference.backend is InferenceBackend.REPLAY else {}),
-            "max_model_steps": 1,
-            "qualification_max_parallel_sessions": level,
-        },
+        "configuration": configuration,
     })
     workload = spec.workload.model_copy(update={
         "cases": tuple(cases), "repetitions": 1, "rollouts_per_case": 1,
+        **({"session_assignment": SessionAssignment.SINGLE_CASE} if len(cases) == 1 else {}),
     })
     execution_updates = {
-        # One session per case proves heterogeneous coverage. The worker-pool
-        # bound above limits how many of those sessions are live at once.
+        # Run each selected case once unless an explicit parallel bound asks
+        # for more sessions. This does not prove full-corpus or target density.
         "concurrency_levels": (max(level, len(cases)),),
         "randomized_order": False,
         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
@@ -1785,7 +1831,11 @@ def qualify(
             qualified.inference.configuration["qualification_max_parallel_sessions"]
         ),
         "qualified_session_count": max(qualified.execution.concurrency_levels),
-        "qualified_case_ids": [case.case_id for case in load_workload_cases(spec.workload)],
+        "qualified_case_ids": [case.case_id for case in load_workload_cases(qualified.workload)],
+        "qualified_simulator_cluster_count": qualified.inference.configuration.get(
+            'serving_sim_launch', {}).get('cluster_count'),
+        "source_case_count": len(load_workload_cases(spec.workload)),
+        "source_case_ids_digest": _case_ids_digest(load_workload_cases(spec.workload)),
         "target_concurrency": max(spec.execution.concurrency_levels),
         "scope": "capability_smoke",
         "policy_names": [policy.name for policy in qualified.policies],
@@ -1848,14 +1898,23 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
     if spec.execution.tool_placement is not None and not receipt.get('tool_placement_test', {}).get('passed'):
         mismatches.append('tool_placement_test')
     # Concurrency is the maximum simultaneous smoke size, not the number of
-    # covered cases or evidence of target performance. Separate receipt fields
-    # prove that one qualification session executed for every workload case.
+    # sampled cases or evidence of target performance. Bind both the complete
+    # source case inventory and the exact deterministic real-VM sample.
     if receipt.get("concurrency", 0) < 1:
         mismatches.append("concurrency")
-    cases = load_workload_cases(spec.workload)
-    if receipt.get("qualified_session_count", 0) < len(cases):
+    source_cases = load_workload_cases(spec.workload)
+    qualified = qualification_spec(spec)
+    qualified_cases = load_workload_cases(qualified.workload)
+    expected_clusters = qualified.inference.configuration.get('serving_sim_launch', {}).get('cluster_count')
+    if receipt.get('qualified_simulator_cluster_count') != expected_clusters:
+        mismatches.append('qualified_simulator_cluster_count')
+    if receipt.get("source_case_count") != len(source_cases):
+        mismatches.append("source_case_count")
+    if receipt.get("source_case_ids_digest") != _case_ids_digest(source_cases):
+        mismatches.append("source_case_ids_digest")
+    if receipt.get("qualified_session_count", 0) < len(qualified_cases):
         mismatches.append("qualified_session_count")
-    if receipt.get("qualified_case_ids") != [case.case_id for case in cases]:
+    if receipt.get("qualified_case_ids") != [case.case_id for case in qualified_cases]:
         mismatches.append("qualified_case_ids")
     if receipt.get("policy_names") != [policy.name for policy in spec.policies]:
         mismatches.append("policy_names")
