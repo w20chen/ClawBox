@@ -1173,6 +1173,8 @@ inference:
       cpu_affinity: [240, 241, 242, 243]
       cores: 4
       topology: 8A
+      cluster_count: 1
+      routing: sticky_balanced_by_case
       persistence: final
       nofile: 65536
       startup_timeout_seconds: 180
@@ -1182,14 +1184,50 @@ inference:
 With `serving_sim_launch`, run `clawbox experiment qualify` and then
 `clawbox experiment run` as below; skip the manual `serve` commands and manual
 shutdown. Each qualification/formal arm gets a fresh service and output under
-its `gpu-service/` artifact directory. CPU failure and timeout still close that
-service and check its final reports. Inspect `gpu-service/process.json` and
-`gpu-service/service.log` on failure. Use `clawbox experiment abort RUN_ID` for a
+its `gpu-service/` artifact directory. CPU failure and timeout still close every
+service and check every final report. A single cluster keeps
+`gpu-service/output` and `gpu-service/service.log`; a multi-cluster pool uses
+`gpu-service/clusters/000/`, `001/`, and so on. Inspect the aggregate
+`gpu-service/process.json` plus the affected cluster log on failure. Use
+`clawbox experiment abort RUN_ID` for a
 running experiment and `clawbox experiment destroy RUN_ID` after an
 interruption; preserve failed evidence and use a new run ID, since a partially
 consumed GPU service cannot resume. After reboot, restore and verify the saved
 host configuration before starting the new run. External services remain
 manually managed when `serving_sim_launch` is absent.
+
+To approximate an effectively unconstrained LLM tier, launch independent native
+clusters instead of changing one cluster's topology. For example, 16 independent
+`8A` clusters expose 128 A-role engines:
+
+```yaml
+    base_url: http://127.0.0.1:18096
+    serving_sim_launch:
+      # Keep the path/cache fields from the managed example above.
+      cpu_affinity: [240, 241, 242, 243, 244, 245, 246, 247]
+      cores: 8
+      topology: 8A
+      cluster_count: 16
+      routing: sticky_balanced_by_case
+```
+
+`base_url` is the first of 16 consecutive local ports. `cores` is the total real
+CPU budget for the pool: cluster 0 uses the first CPU, cluster 1 the second, and
+clusters wrap round-robin when `cluster_count` exceeds `cores`. The topology is
+still per cluster; do not replace the pool with one `16x8A` topology. Cases are
+sorted deterministically, each unique trace is assigned to one cluster, and all
+rollouts of that trace remain there. For the 80-base Full1280 workload this gives
+five base traces, or 80 rollout sessions, per cluster. All signal streams are
+consumed and logged with `cluster_id`; one failed stream or incomplete native
+close invalidates the arm.
+
+Before using 16 clusters, reserve the CPU set outside VM compute CPUs, verify all
+16 ports are unused, and leave memory for independent simulator processes. A
+practical starting reserve is 32--48 GiB (warmed processes account for roughly
+20 GiB before workload growth). Changing `cluster_count`, routing, ports, or CPU
+placement requires qualification and a new run ID. It does not require host
+apply, VM image rebuild or retraining unless the reserved host CPU/service limits
+themselves change.
 
 Both `persistence: final` and `persistence: native` retain the current simulator's
 incremental input flushes and step-memory release; summaries are written at
@@ -1205,7 +1243,9 @@ summary of repeated queued updates; result metrics retain accepted and suppresse
 counts. Every queued estimate still updates scheduling state. Retained records
 include virtual/scheduled/emitted/received times and callback duration. Join CPU
 `serving-sim/ARM_ID/requests.jsonl` and `observations.jsonl` with the managed GPU's
-`output/clawbox-diagnostics.jsonl` by request ID (and signal sequence for signals).
+`output/clawbox-diagnostics.jsonl`, or each multi-cluster
+`clusters/NNN/output/clawbox-diagnostics.jsonl`, by `cluster_id` and request ID
+(and signal sequence for signals).
 Unix timestamps are seconds; `monotonic_ns` is nanoseconds on the same host.
 Server `first_sse_emitted` and `done_emitted` mark handoff to the HTTP stream;
 compare them with client `times.first_sse` and `times.done`. These deltas include

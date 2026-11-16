@@ -19,7 +19,9 @@ from trace_fixtures import llm_spans, write_spans
 
 from clawbox.experiments.model_gateway import SessionGatewayState, ManagedModelGateway
 from clawbox.experiments.policy import PolicyCoordinator, PolicyEventExecutor
-from clawbox.experiments.serving_sim_client import ServingSimClient
+from clawbox.experiments.serving_sim_client import (
+    ServingSimClient, assign_trace_clusters, serving_sim_bases,
+)
 from clawbox.experiments.spec import PolicySpec
 from clawbox.experiments.spec_types import EvictionPolicy
 
@@ -163,6 +165,31 @@ def complete(client, callback=None, timeout=3):
         call_id=0, payload={"messages": [{"role": "user", "content": "real prompt"}],
                             "tools": [{"type": "function", "function": {"name": "exec"}}]},
         on_signal=callback, timeout_s=timeout)
+
+
+def test_managed_cluster_urls_use_consecutive_ports():
+    assert serving_sim_bases({
+        'base_url': 'http://127.0.0.1:18096/v1',
+        'serving_sim_launch': {'cluster_count': 3},
+    }) == [
+        'http://127.0.0.1:18096',
+        'http://127.0.0.1:18097',
+        'http://127.0.0.1:18098',
+    ]
+
+
+def test_unique_traces_are_sticky_and_balanced_in_case_order():
+    bindings = {
+        'case-d': {'trace_id': 'trace-shared'},
+        'case-b': {'trace_id': 'trace-b'},
+        'case-a': {'trace_id': 'trace-shared'},
+        'case-c': {'trace_id': 'trace-c'},
+    }
+    assert assign_trace_clusters(bindings, 2) == {
+        'trace-shared': 0,
+        'trace-b': 1,
+        'trace-c': 0,
+    }
 
 
 @pytest.mark.parametrize("count", [None, True, 1])

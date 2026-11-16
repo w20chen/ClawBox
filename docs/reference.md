@@ -877,8 +877,10 @@ Live API inference still has no complete supported qualification path. Fields be
 | Field | Default / requirement | Meaning |
 | --- | --- | --- |
 | `sim_root`, `venv`, `trace_catalog` | Required absolute Linux paths | Verified unmodified GPU source, existing simulator environment, and GPU-side catalog. CPU scheduling does not parse the catalog. |
-| `cpu_affinity`, `cores` | Required | Distinct real logical CPU IDs and their count; must be outside configured VM compute CPU sets and within supervisor affinity. |
-| `topology` | Required | Native simulated GPU topology, e.g. `8A`; separate from real CPU budget. |
+| `cpu_affinity`, `cores` | Required | Distinct real logical CPU IDs and their count; this is the total real CPU budget across all clusters. IDs must be outside configured VM compute CPU sets and within supervisor affinity. With multiple clusters, each process gets one CPU and assignments wrap round-robin. |
+| `topology` | Required | Native simulated GPU topology for each independent cluster, e.g. `8A`; separate from real CPU budget. |
+| `cluster_count` | `1` | Number of independent simulator clusters. Managed clusters use consecutive ports beginning at `base_url`; the entire range must fit below 65536 and be unused. Use multiple `8A` clusters to add capacity, not one enlarged topology. |
+| `routing` | `sticky_balanced_by_case` | The only supported pool route. Sorted cases assign each unique trace round-robin once; all sessions and Tool audits for that trace remain on the same cluster. |
 | `persistence` | `final` | `native` or `final`; current sim-release uses the same native incremental-input flushing and shutdown-only final summaries for both. ClawBox verifies successful native close. |
 | `nofile` | 65536 descriptors | Minimum process soft limit. A lower hard limit fails with a remedy; configure the host/service limit before retrying. |
 | `startup_timeout_seconds` | 180 seconds | Positive finite readiness deadline; startup failure is recorded and owned resources are closed. |
@@ -889,7 +891,9 @@ Live API inference still has no complete supported qualification path. Fields be
 
 Managed launch requires explicit `base_url`, `model` and optional `api_key_env`,
 using local HTTP on `127.0.0.1` or `localhost`; `clawtune_config` cannot override
-that endpoint. Existing listeners/output directories are never adopted. The
+that endpoint. With `cluster_count > 1`, `base_url` names cluster 0 and the
+remaining clusters use consecutive ports. Existing listeners/output directories
+are never adopted. The
 launcher also exposes `--nofile` (65536) and
 `--diagnostic-interval-seconds` (1.0 seconds) for manual services. A finalized
 report is distinct from timing validity: inspect native `validity.json` and
@@ -907,9 +911,10 @@ not experiment YAML. A selected `clawtune_config` supplies the endpoint, model,
 and credential in preference to direct provider fields. Model-wait prediction/oracle settings are unsupported;
 checkpoint decisions use actual outstanding model requests.
 
-For `serving_sim`, `base_url` points to one fresh simulator service, with virtual
-clock speed `k=1`. `time_scale` must be absent or 1; recorded delays are not added
-to simulator latency. Use a dedicated `api_key_env` such as `CLAWBOX_SIM_API_KEY`;
+For `serving_sim`, `base_url` points to one fresh simulator service or the first
+service in a managed pool. Every cluster uses virtual clock speed `k=1`.
+`time_scale` must be absent or 1; recorded delays are not added to simulator
+latency. Use a dedicated `api_key_env` such as `CLAWBOX_SIM_API_KEY`;
 it may be unset when the simulator has no authentication. A provider-specific
 `clawtune_config` must be removed to use the explicit simulator endpoint.
 Launch it with `python3 -m clawbox.integrations.serving_sim` from the ClawBox checkout,
@@ -925,8 +930,10 @@ Native GPU scheduling and filtered signal APIs remain unchanged.
 The adapter targets sim-release `ae5c94517a32fe735ce93a62efe2748587f39cdf`.
 It explicitly uses `prompt_source=actual`: prefill and KV state depend on the
 Agent's actual messages. Trace-prompt replay, accelerated warm-up and
-`serve-many` are not exposed by this integration. Retain `k=1` and one fresh
-cluster per arm; do not interpret upstream trace-prompt capacity measurements
+`serve-many` are not exposed by this integration. Retain `k=1` and fresh
+independent cluster state per arm. Managed pools start all clusters before
+waiting for readiness, consume every cluster's signals, and require every
+cluster to finalize. Do not interpret upstream trace-prompt capacity measurements
 as capacity measurements of this actual-prompt workflow.
 
 `prepare-serving-sim` requires the original format-5 source, its adapted CPU trace,

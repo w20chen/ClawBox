@@ -3,8 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from clawbox.experiments.spec import InferenceSpec
-from clawbox.experiments.serving_sim_process import ServingSimProcess
+from clawbox.experiments.spec import InferenceSpec, ServingSimLaunchSpec
+from clawbox.experiments.serving_sim_process import (
+    ServingSimProcess, serving_sim_cluster_layouts,
+)
 
 
 def configuration():
@@ -29,6 +31,83 @@ def test_managed_service_cannot_adopt_remote_or_mismatched_endpoint(base):
     config['base_url'] = base
     with pytest.raises(ValueError):
         InferenceSpec(backend='serving_sim', configuration=config)
+
+
+def test_cluster_port_range_must_fit():
+    config = configuration()
+    config['base_url'] = 'http://127.0.0.1:65530'
+    config['serving_sim_launch']['cluster_count'] = 16
+    with pytest.raises(ValueError, match='ports exceed'):
+        InferenceSpec(backend='serving_sim', configuration=config)
+
+
+def test_cluster_layouts_use_independent_ports_and_round_robin_cpus(tmp_path):
+    config = configuration()
+    config['serving_sim_launch'].update(
+        cluster_count=16, cores=8, cpu_affinity=list(range(240, 248)),
+    )
+    spec = InferenceSpec(backend='serving_sim', configuration=config)
+    launch = spec.configuration['serving_sim_launch']
+    layouts = serving_sim_cluster_layouts(
+        config, ServingSimLaunchSpec.model_validate(launch),
+        tmp_path / 'gpu-service',
+    )
+    assert [row['port'] for row in layouts] == list(range(8000, 8016))
+    assert [row['cpu_affinity'] for row in layouts] == [
+        [cpu] for cpu in list(range(240, 248)) * 2
+    ]
+    assert {row['cores'] for row in layouts} == {1}
+    assert layouts[0]['output'] == tmp_path / 'gpu-service/clusters/000/output'
+    assert layouts[-1]['log'] == tmp_path / 'gpu-service/clusters/015/service.log'
+
+
+def test_single_cluster_keeps_the_existing_cpu_and_artifact_layout(tmp_path):
+    service = ServingSimProcess(configuration(), tmp_path)
+    layout = service.layouts[0]
+    assert layout['port'] == 8000
+    assert layout['cpu_affinity'] == [240, 241, 242, 243]
+    assert layout['cores'] == 4
+    assert layout['output'] == tmp_path / 'gpu-service/output'
+
+
+@pytest.mark.parametrize('invalid_cluster', [None, 1])
+def test_multi_cluster_stop_requires_and_aggregates_every_final_report(
+    tmp_path, invalid_cluster,
+):
+    config = configuration()
+    config['serving_sim_launch'].update(
+        cluster_count=2, cores=2, cpu_affinity=[240, 241],
+    )
+    service = ServingSimProcess(config, tmp_path)
+    service.processes = [
+        SimpleNamespace(returncode=0, poll=lambda: 0),
+        SimpleNamespace(returncode=0, poll=lambda: 0),
+    ]
+    service.identities = [None, None]
+    service.logs = [None, None]
+    for index, layout in enumerate(service.layouts):
+        layout['output'].mkdir(parents=True)
+        (layout['output']/'clawbox-persistence.json').write_text(json.dumps(dict(
+            finalized=True, native_close_succeeded=index != invalid_cluster,
+        )))
+        (layout['output']/'validity.json').write_text(
+            '{"prompt_source":"actual","warning_threshold_exceeded":false}'
+        )
+        (layout['output']/'realized.json').write_text('[]')
+        (layout['output']/'realized-inputs.jsonl').touch()
+        (layout['output']/'realized-tokens.bin').touch()
+    result = service.stop()
+    assert result['stopped']
+    if invalid_cluster is None:
+        assert result['finalized']
+        assert result['validity']['cluster_count'] == 2
+        assert result['validity']['prompt_source'] == 'actual'
+        assert len(result['validity']['clusters']) == 2
+    else:
+        assert not result['finalized']
+        assert result['clusters'][0]['finalized']
+        assert not result['clusters'][1]['finalized']
+        assert 'cluster 1' in result['shutdown_error']['chain'][0]['message']
 
 
 def test_stop_refuses_reused_pid_and_preserves_failure_receipt(tmp_path, monkeypatch):

@@ -143,6 +143,8 @@ class ServingSimLaunchSpec(StrictFrozenModel):
     cpu_affinity: tuple[int, ...] = Field(min_length=1)
     cores: int = Field(gt=0)
     topology: str = Field(min_length=1)
+    cluster_count: int = Field(default=1, ge=1)
+    routing: Literal['sticky_balanced_by_case'] = 'sticky_balanced_by_case'
     persistence: Literal['native', 'final'] = 'final'
     nofile: int = Field(default=65536, gt=0)
     startup_timeout_seconds: float = Field(default=180., gt=0, allow_inf_nan=False)
@@ -184,6 +186,15 @@ class InferenceSpec(StrictFrozenModel):
                     or url.username or url.password or url.query or url.fragment
                     or url.path not in ('', '/', '/v1', '/v1/')):
                 raise ValueError('managed serving_sim requires a local http://127.0.0.1:PORT base_url')
+            launch = ServingSimLaunchSpec.model_validate(
+                self.configuration['serving_sim_launch']
+            )
+            if url.port is None:
+                raise ValueError('managed serving_sim requires an explicit base_url port')
+            if url.port + launch.cluster_count - 1 > 65535:
+                raise ValueError(
+                    'serving_sim cluster ports exceed 65535; choose a lower base_url port'
+                )
         interval = self.configuration.get('serving_sim_diagnostic_interval_seconds', 1.)
         if self.configuration.get('serving_sim_diagnostic_detail', 'full') not in ('compact', 'full'):
             raise ValueError('serving_sim_diagnostic_detail must be compact or full')

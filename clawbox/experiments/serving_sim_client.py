@@ -8,11 +8,38 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from clawbox.replay.process_sessions import rebind_process_sessions
 from .serving_sim_diagnostics import Diagnostics, exception_record
+
+
+def serving_sim_bases(configuration: dict) -> list[str]:
+    """Expand one managed base port into the configured independent clusters."""
+    raw = str(configuration["base_url"]).rstrip("/")
+    if raw.endswith("/v1"):
+        raw = raw[:-3]
+    parsed = urlsplit(raw)
+    count = int((configuration.get("serving_sim_launch") or {}).get(
+        "cluster_count", 1,
+    ))
+    port = parsed.port or 80
+    return [
+        urlunsplit((parsed.scheme, f"{parsed.hostname}:{port + index}", "", "", ""))
+        for index in range(count)
+    ]
+
+
+def assign_trace_clusters(case_bindings: dict, cluster_count: int) -> dict[str, int]:
+    """Assign each unique trace once while preserving deterministic case order."""
+    assignments = {}
+    for case_id in sorted(case_bindings):
+        trace_id = case_bindings[case_id]['trace_id']
+        if trace_id not in assignments:
+            assignments[trace_id] = len(assignments) % cluster_count
+    return assignments
 
 
 class _Message:
@@ -70,9 +97,8 @@ async def sse_events(response):
 class ServingSimClient:
     def __init__(self, configuration: dict, credential: str, output: Path):
         self.configuration = configuration
-        self.base = str(configuration["base_url"]).rstrip("/")
-        if self.base.endswith("/v1"):
-            self.base = self.base[:-3]
+        self.bases = serving_sim_bases(configuration)
+        self.base = self.bases[0]
         self.credential, self.output = credential, output
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, name="serving-sim", daemon=True)
@@ -104,61 +130,120 @@ class ServingSimClient:
             # racing that close (the native load client uses the same 2 s bound).
             limits=httpx.Limits(max_connections=None, max_keepalive_connections=32,
                 keepalive_expiry=float(self.configuration.get('serving_sim_keepalive_expiry_seconds', 2.))))
-        sent = time.time()
-        response = await self.client.get(self.base + "/v1/clawbox/simulator/info", timeout=20)
-        received = time.time()
-        response.raise_for_status()
-        self.info = response.json()
-        if self.info.get('adapter_protocol') != 2:
-            raise ValueError('serving_sim requires ClawBox adapter protocol 2; restart with the current ClawBox launcher')
-        self.clock_offset_s = ((sent + received) / 2 - float(self.info["server_wall_time"]))
-        self.clock_uncertainty_s = max(0., received - sent) / 2
-        self.info["client_clock_alignment"] = dict(offset_s=self.clock_offset_s,
-            uncertainty_s=self.clock_uncertainty_s, method="HTTP request midpoint")
-        if not self.info.get("ready") or self.info.get("clock", {}).get("k") != 1:
-            raise ValueError("serving_sim requires a ready service with k=1 for real CPU execution")
-        if self.info.get('prompt_source') != 'actual':
-            raise ValueError('serving_sim requires actual Agent prompts; restart with the current ClawBox launcher')
-        if type(self.info.get("accepted_requests")) is not int or self.info["accepted_requests"] != 0:
-            raise ValueError("simulator already contains requests; restart it with a new output directory for this arm")
-        expected_topology = self.configuration.get("serving_sim_topology_digest")
-        if expected_topology is not None and self.info.get("topology_digest") != expected_topology:
-            raise ValueError("simulator topology differs from inference.configuration.serving_sim_topology_digest")
         from .serving_sim_inputs import load_serving_sim_manifest
         manifest = load_serving_sim_manifest(Path(self.configuration["serving_sim_catalog_manifest"]), verify=True)
-        if self.info.get("catalog_digest") != manifest["catalog"]["catalog_digest"]:
-            raise ValueError("simulator catalog differs from serving_sim_catalog_manifest; start the matching catalog")
         self.case_bindings = {row['case_id']: row for row in manifest['cases']}
-        for row in self.case_bindings.values():
-            actual = self.info.get('traces', {}).get(row['trace_id'], {})
-            if any(actual.get(k) != row[k] for k in ('model_calls', 'missing_reasoning_calls')):
-                raise ValueError(f"{row['case_id']}: simulator trace counts differ from the CPU manifest; prepare a new bundle")
-        self.epoch = self.info["service_id"]
-        (self.output / "service.json").write_text(json.dumps(self.info, indent=2), encoding="utf-8")
+        self.infos = []
+        self.clock_offsets_s = []
+        self.clock_uncertainties_s = []
+        expected_topology = self.configuration.get("serving_sim_topology_digest")
+        for cluster_id, base in enumerate(self.bases):
+            sent = time.time()
+            response = await self.client.get(
+                base + "/v1/clawbox/simulator/info", timeout=20,
+            )
+            received = time.time()
+            response.raise_for_status()
+            info = response.json()
+            if info.get('adapter_protocol') != 2:
+                raise ValueError(
+                    f'serving_sim cluster {cluster_id} requires ClawBox adapter protocol 2'
+                )
+            offset = (sent + received) / 2 - float(info["server_wall_time"])
+            uncertainty = max(0., received - sent) / 2
+            info["client_clock_alignment"] = dict(
+                offset_s=offset, uncertainty_s=uncertainty,
+                method="HTTP request midpoint",
+            )
+            if not info.get("ready") or info.get("clock", {}).get("k") != 1:
+                raise ValueError(
+                    f"serving_sim cluster {cluster_id} requires a ready k=1 service"
+                )
+            if info.get('prompt_source') != 'actual':
+                raise ValueError(
+                    f'serving_sim cluster {cluster_id} requires actual Agent prompts'
+                )
+            if type(info.get("accepted_requests")) is not int or info["accepted_requests"] != 0:
+                raise ValueError(
+                    f"serving_sim cluster {cluster_id} already contains requests; "
+                    "restart it with a new output directory for this arm"
+                )
+            if expected_topology is not None and info.get("topology_digest") != expected_topology:
+                raise ValueError(
+                    f"serving_sim cluster {cluster_id} topology differs from the experiment"
+                )
+            if info.get("catalog_digest") != manifest["catalog"]["catalog_digest"]:
+                raise ValueError(
+                    f"serving_sim cluster {cluster_id} catalog differs from the CPU manifest"
+                )
+            for row in self.case_bindings.values():
+                actual = info.get('traces', {}).get(row['trace_id'], {})
+                if any(actual.get(k) != row[k]
+                       for k in ('model_calls', 'missing_reasoning_calls')):
+                    raise ValueError(
+                        f"{row['case_id']}: simulator cluster {cluster_id} trace counts "
+                        "differ from the CPU manifest; prepare a new bundle"
+                    )
+            self.infos.append(info)
+            self.clock_offsets_s.append(offset)
+            self.clock_uncertainties_s.append(uncertainty)
+        self.info = self.infos[0]
+        self.clock_offset_s = self.clock_offsets_s[0]
+        self.clock_uncertainty_s = self.clock_uncertainties_s[0]
+        self.epochs = [info["service_id"] for info in self.infos]
+        self.epoch = self.epochs[0]
+        self.trace_clusters = assign_trace_clusters(
+            self.case_bindings, len(self.bases),
+        )
+        service_document = (
+            self.info if len(self.infos) == 1 else {
+                "adapter": "clawbox-pool",
+                "cluster_count": len(self.infos),
+                "routing": "sticky_balanced_by_case",
+                "clusters": [
+                    {**info, "cluster_id": index, "base_url": self.bases[index]}
+                    for index, info in enumerate(self.infos)
+                ],
+            }
+        )
+        (self.output / "service.json").write_text(
+            json.dumps(service_document, indent=2), encoding="utf-8",
+        )
         self.signal_log = (self.output / "observations.jsonl").open("a", encoding="utf-8")
-        self.signal_ready = asyncio.Event()
-        self.signal_task = asyncio.create_task(self._signals())
-        await asyncio.wait_for(self.signal_ready.wait(), 20)
+        self.signal_ready = [asyncio.Event() for _ in self.bases]
+        self.signal_tasks = [
+            asyncio.create_task(self._signals(cluster_id))
+            for cluster_id in range(len(self.bases))
+        ]
+        self.signal_task = self.signal_tasks[0]
+        await asyncio.wait_for(asyncio.gather(*(
+            ready.wait() for ready in self.signal_ready
+        )), 20)
         self.check()
 
-    async def _signals(self):
+    async def _signals(self, cluster_id: int):
+        base = self.bases[cluster_id]
+        info = self.infos[cluster_id]
+        epoch = self.epochs[cluster_id]
         try:
-            cursor = self.info["signals"]["head"]
-            async with self.client.stream("GET", self.base + "/request-signals/clawbox/events",
+            cursor = info["signals"]["head"]
+            async with self.client.stream("GET", base + "/request-signals/clawbox/events",
                     params={"after": cursor}) as response:
                 response.raise_for_status()
-                self.signal_ready.set()
+                self.signal_ready[cluster_id].set()
                 async for kind, identity, data in sse_events(response):
                     if kind == "gap":
                         raise RuntimeError("simulator signal history has a gap; the signal-driven arm cannot continue")
                     record = json.loads(data)
-                    if not identity.startswith(self.epoch + ":"):
+                    if not identity.startswith(epoch + ":"):
                         raise RuntimeError("simulator signal epoch changed")
                     received = time.time()
-                    record.update(signal_sequence=int(identity.rsplit(":", 1)[1]),
+                    record.update(cluster_id=cluster_id,
+                                  signal_sequence=int(identity.rsplit(":", 1)[1]),
                                   received_unix_s=received,
                                   signal_age_seconds=max(0., received - float(record["wall_t"])
-                                      - self.clock_offset_s + self.clock_uncertainty_s))
+                                      - self.clock_offsets_s[cluster_id]
+                                      + self.clock_uncertainties_s[cluster_id]))
                     binding = self.callbacks.get(record.get("request_id"))
                     callback_started = time.monotonic()
                     try:
@@ -175,7 +260,7 @@ class ServingSimClient:
                             "_clawbox_queued_observations_suppressed", 0,
                         )
                         logged = ({k: record[k] for k in (
-                            'event', 'session_id', 'request_id', 'engine_id', 'role', 'source',
+                            'event', 'session_id', 'request_id', 'cluster_id', 'engine_id', 'role', 'source',
                             'signal_sequence', 't', 'wall_t', 'queued_since', 'est_wait_s', 'layer',
                             'adapter_emit_unix_s', 'received_unix_s', 'signal_age_seconds', 'callback_seconds')
                             if k in record} if self.compact_diagnostics else record)
@@ -191,11 +276,13 @@ class ServingSimClient:
             raise
         except Exception as exc:
             self.error = exc
-            self.diagnostics.write('signal_failure', error=exception_record(exc))
+            self.diagnostics.write(
+                'signal_failure', cluster_id=cluster_id, error=exception_record(exc),
+            )
             for task in list(self.requests.values()):
                 task.cancel()
         finally:
-            self.signal_ready.set()
+            self.signal_ready[cluster_id].set()
 
     def check(self):
         if self.error is not None:
@@ -225,11 +312,16 @@ class ServingSimClient:
         self.callbacks[rid] = sid, on_signal
         self.requests[rid] = asyncio.current_task()
         expected = dict(trace_id=trace_id, call_id=call_id)
+        cluster_id = self.trace_clusters.get(trace_id)
+        if cluster_id is None:
+            raise RuntimeError(f"serving_sim trace has no cluster assignment: {trace_id}")
+        base = self.bases[cluster_id]
         forwarded = {**payload, "stream": True, "session_id": sid, "request_id": rid,
                      "replay": expected, "model": self.configuration["model"]}
         message, finished, done, first = _Message(), False, False, None
         mapping = None
         diagnostic = dict(session_id=sid, request_id=rid, trace_id=trace_id, call_id=call_id,
+                          cluster_id=cluster_id,
                           stage='submit', times={'submit': time.time()})
         self.diagnostics.write('request_submitted', **diagnostic)
         def stage(name):
@@ -237,7 +329,7 @@ class ServingSimClient:
             diagnostic['times'][name] = time.time()
         try:
             async with asyncio.timeout(timeout_s):
-                async with self.client.stream("POST", self.base + "/v1/chat/completions", json=forwarded) as response:
+                async with self.client.stream("POST", base + "/v1/chat/completions", json=forwarded) as response:
                     stage('response_headers')
                     diagnostic['http_status'] = response.status_code
                     if response.status_code != 200:
@@ -295,6 +387,7 @@ class ServingSimClient:
                         raise RuntimeError('simulator output lacks ClawBox identity metadata')
             self.check()
             self.signal_log.write(json.dumps(dict(event="chat_complete", session_id=sid, request_id=rid,
+                cluster_id=cluster_id,
                 first_output=first, received_unix_s=time.time(), replay=expected,
                 finish_virtual_s=chunk.get("t"), usage=chunk.get("usage"),
                 finish_reason=chunk["choices"][0]["finish_reason"])) + "\n")
@@ -334,11 +427,15 @@ class ServingSimClient:
 
     def validate_tool_outcomes(self, *, session_id, trace_id, spans, reported_failures):
         self.check()
+        cluster_id = self.trace_clusters.get(trace_id)
+        if cluster_id is None:
+            raise RuntimeError(f"serving_sim trace has no cluster assignment: {trace_id}")
         failed = [s for s in spans if s.get('session_id') == session_id
                   and (s.get('status', {}).get('code') != 'ok'
                        or (s.get('output') or {}).get('exit_code') not in (None, 0))]
         async def validate():
-            response = await self.client.post(self.base + '/v1/clawbox/simulator/tool-outcomes',
+            response = await self.client.post(
+                self.bases[cluster_id] + '/v1/clawbox/simulator/tool-outcomes',
                 json=dict(session_id=session_id, trace_id=trace_id, spans=failed,
                           reported_failures=reported_failures), timeout=60)
             response.raise_for_status()
@@ -356,7 +453,9 @@ class ServingSimClient:
     async def _close(self):
         self.stopping = True
         tasks = list(self.requests.values())
-        if hasattr(self, "signal_task"):
+        if hasattr(self, "signal_tasks"):
+            tasks.extend(self.signal_tasks)
+        elif hasattr(self, "signal_task"):
             tasks.append(self.signal_task)
         if hasattr(self, 'sample_task'):
             tasks.append(self.sample_task)
