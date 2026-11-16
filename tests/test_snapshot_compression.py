@@ -12,6 +12,7 @@ from clawbox.cube.snapshot_compression import (
     decompress_snapshot,
     is_compressed,
     read_compressed_snapshot_metadata,
+    remove_compressed_snapshot,
 )
 from clawbox.cube import snapshot_compression as compression_module
 from clawbox.cube.snapshot import read_snapshot_metadata
@@ -143,6 +144,182 @@ def test_page_container_roundtrip_preserves_lineage_and_shared_base(tmp_path: Pa
     assert _digest(snapshot) == original_digest
     assert external.stat().st_ino == external_inode
     assert _digest(external) == external_digest
+
+
+def test_cold_successor_reuses_compressed_parent_layers(tmp_path: Path):
+    binary = _build_helper(tmp_path)
+    first = tmp_path / "cold" / "runtime-g1.mem"
+    first.parent.mkdir()
+    first_layers = Path(str(first) + ".layers")
+    first_layers.mkdir()
+    first_delta = first_layers / "000001.mem"
+    first_delta.write_bytes(b"A" * (2 * 1024 * 1024))
+    os.link(first_delta, first)
+    Path(str(first) + ".lineage.json").write_text(json.dumps({
+        "schema_version": 2,
+        "layers": [{"name": "000001.mem", "external_path": None}],
+    }))
+    compress_snapshot(
+        first, binary=str(binary),
+        native_snapshot_metrics={"lineage_snapshot_id": "run/runtime/g1"},
+    )
+
+    restored = decompress_snapshot(
+        first, binary=str(binary), retain_for_reuse=True,
+    )
+
+    assert restored is not None
+    reuse_manifest = Path(restored["reuse_manifest_path"])
+    assert reuse_manifest.is_file()
+    assert not is_compressed(first)
+    assert first_delta.read_bytes() == b"A" * (2 * 1024 * 1024)
+
+    second = tmp_path / "cold" / "runtime-g2.mem"
+    second_layers = Path(str(second) + ".layers")
+    second_layers.mkdir()
+    inherited = second_layers / "000001.mem"
+    inherited.write_bytes(first_delta.read_bytes())  # native may publish a new inode
+    second_delta = second_layers / "000002.mem"
+    second_delta.write_bytes(b"B" * 4096)
+    os.link(second_delta, second)
+    Path(str(second) + ".lineage.json").write_text(json.dumps({
+        "schema_version": 2,
+        "layers": [
+            {"name": "000001.mem", "external_path": None},
+            {"name": "000002.mem", "external_path": None},
+        ],
+    }))
+
+    compressed = compress_snapshot(
+        second, binary=str(binary), reusable_manifest=reuse_manifest,
+        native_snapshot_metrics={
+            "lineage_snapshot_id": "run/runtime/g2",
+            "lineage_parent_snapshot_id": "run/runtime/g1",
+        },
+    )
+
+    assert compressed["reused_group_count"] == 1
+    assert compressed["fresh_group_count"] == 1
+    assert compressed["reuse_manifest_consumed"] is True
+    assert not reuse_manifest.exists()
+    assert not first.exists() and not first_delta.exists()
+    manifest = json.loads(
+        Path(str(second) + ".zstd-pages.json").read_text()
+    )
+    by_layer = {record["layer_name"]: record for record in manifest["groups"]}
+    assert by_layer["000001.mem"]["reused_compressed_parent"] is True
+    assert by_layer["000001.mem"]["metrics"]["codec_seconds"] == 0
+    assert by_layer["000002.mem"]["reused_compressed_parent"] is False
+
+    assert decompress_snapshot(second, binary=str(binary)) is not None
+    assert inherited.read_bytes() == b"A" * (2 * 1024 * 1024)
+    assert second_delta.read_bytes() == b"B" * 4096
+    assert os.path.samefile(second, second_delta)
+
+
+def test_cold_successor_does_not_reuse_a_different_parent(tmp_path: Path):
+    binary = _build_helper(tmp_path)
+    first = tmp_path / "cold" / "runtime-g1.mem"
+    first.parent.mkdir()
+    first_layers = Path(str(first) + ".layers")
+    first_layers.mkdir()
+    first_delta = first_layers / "000001.mem"
+    first_delta.write_bytes(b"A" * (2 * 1024 * 1024))
+    os.link(first_delta, first)
+    compress_snapshot(
+        first, binary=str(binary),
+        native_snapshot_metrics={"lineage_snapshot_id": "run/runtime/g1"},
+    )
+    restored = decompress_snapshot(
+        first, binary=str(binary), retain_for_reuse=True,
+    )
+    assert restored is not None
+    reuse_manifest = Path(restored["reuse_manifest_path"])
+
+    second = tmp_path / "cold" / "runtime-g2.mem"
+    second_layers = Path(str(second) + ".layers")
+    second_layers.mkdir()
+    second_delta = second_layers / "000001.mem"
+    second_delta.write_bytes(first_delta.read_bytes())
+    os.link(second_delta, second)
+
+    compressed = compress_snapshot(
+        second, binary=str(binary), reusable_manifest=reuse_manifest,
+        native_snapshot_metrics={
+            "lineage_snapshot_id": "run/runtime/g2",
+            "lineage_parent_snapshot_id": "run/runtime/not-g1",
+        },
+    )
+
+    assert compressed["reused_group_count"] == 0
+    assert compressed["fresh_group_count"] == 1
+    assert compressed["reuse_manifest_consumed"] is True
+    manifest = json.loads(
+        Path(str(second) + ".zstd-pages.json").read_text()
+    )
+    assert manifest["groups"][0]["reused_compressed_parent"] is False
+    assert manifest["groups"][0]["metrics"]["codec_seconds"] > 0
+    assert not reuse_manifest.exists()
+    assert not first.exists() and not first_delta.exists()
+
+    assert decompress_snapshot(second, binary=str(binary)) is not None
+    assert second_delta.read_bytes() == b"A" * (2 * 1024 * 1024)
+    assert os.path.samefile(second, second_delta)
+
+
+def test_clone_container_copies_on_cross_device_link(
+    tmp_path: Path, monkeypatch,
+):
+    source = tmp_path / "parent.zpg"
+    destination = tmp_path / "successor.zpg"
+    source.write_bytes(os.urandom(8192))
+    source.chmod(0o640)
+
+    def cross_device_link(_source, _destination):
+        raise OSError(compression_module.errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(compression_module.os, "link", cross_device_link)
+
+    method, wall_seconds, cpu_seconds = compression_module._clone_container(
+        source, destination,
+    )
+
+    assert method == "copy"
+    assert destination.read_bytes() == source.read_bytes()
+    assert destination.stat().st_mode & 0o777 == source.stat().st_mode & 0o777
+    assert wall_seconds >= 0
+    assert cpu_seconds >= 0
+
+
+def test_remove_retained_compression_reuse_state(tmp_path: Path):
+    binary = _build_helper(tmp_path)
+    snapshot = tmp_path / "cold" / "runtime-g1.mem"
+    snapshot.parent.mkdir()
+    layers = Path(str(snapshot) + ".layers")
+    layers.mkdir()
+    delta = layers / "000001.mem"
+    delta.write_bytes(b"A" * (2 * 1024 * 1024))
+    os.link(delta, snapshot)
+    compress_snapshot(
+        snapshot, binary=str(binary),
+        native_snapshot_metrics={"lineage_snapshot_id": "run/runtime/g1"},
+    )
+    restored = decompress_snapshot(
+        snapshot, binary=str(binary), retain_for_reuse=True,
+    )
+    assert restored is not None
+    reuse_manifest = Path(restored["reuse_manifest_path"])
+    document = json.loads(reuse_manifest.read_text())
+    containers = [Path(record["container"]) for record in document["groups"]]
+    container_directory = Path(document["container_directory"])
+
+    remove_compressed_snapshot(snapshot)
+
+    assert not snapshot.exists()
+    assert not delta.exists()
+    assert not reuse_manifest.exists()
+    assert not container_directory.exists()
+    assert not any(container.exists() for container in containers)
 
 
 def test_incompressible_chunk_stays_in_zstd_format(tmp_path: Path):

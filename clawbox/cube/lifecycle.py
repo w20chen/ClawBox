@@ -119,6 +119,7 @@ class CubeSandboxLifecycle:
         self.storage_domain_root = storage_domain_root
         self.peer_control_socket = peer_control_socket
         self._replica_memory_path: str | None = None
+        self._compression_reuse_manifest: str | None = None
         self._peer_retired_warm_paths: set[str] = set()
         self.ownership = ownership
         self.allow_internet_access = allow_internet_access
@@ -577,7 +578,12 @@ class CubeSandboxLifecycle:
                             compression = compress_snapshot(
                                 path, binary=self.snapshot_compression_binary,
                                 native_snapshot_metrics=native_manifest,
+                                **({
+                                    "reusable_manifest": self._compression_reuse_manifest,
+                                } if self._compression_reuse_manifest else {}),
                             )
+                            if compression.get("reuse_manifest_consumed"):
+                                self._compression_reuse_manifest = None
                             compression_after = self._observe_physical()
                         manifest = {
                             **apply_compression_accounting(native_manifest, compression),
@@ -690,7 +696,12 @@ class CubeSandboxLifecycle:
                                 compression = compress_snapshot(
                                     path, binary=self.snapshot_compression_binary,
                                     native_snapshot_metrics=native_manifest,
+                                    **({
+                                        "reusable_manifest": self._compression_reuse_manifest,
+                                    } if self._compression_reuse_manifest else {}),
                                 )
+                                if compression.get("reuse_manifest_consumed"):
+                                    self._compression_reuse_manifest = None
                                 compression_after = self._observe_physical()
                             manifest = {
                                 **apply_compression_accounting(native_manifest, compression),
@@ -871,7 +882,8 @@ class CubeSandboxLifecycle:
                 manifest.get("raw_allocated_bytes") or manifest["allocated_bytes"]
             ),
             "expansion_allocated_bytes": int(
-                compression.get("baseline_allocated_bytes") or 0
+                compression.get("decompression_allocated_bytes")
+                or compression.get("baseline_allocated_bytes") or 0
             ),
             "owned_logical_bytes": int(manifest.get("owned_logical_bytes") or 0),
             "owned_allocated_bytes": int(manifest.get("owned_allocated_bytes") or 0),
@@ -1123,7 +1135,16 @@ class CubeSandboxLifecycle:
                             decompression_before = self._observe_physical()
                             decompression = decompress_snapshot(
                                 compressed_path, binary=self.snapshot_compression_binary,
+                                **({"retain_for_reuse": True} if (
+                                    self.snapshot_mechanism == "incremental-cow"
+                                    and self._snapshot_tier is SnapshotTier.COLD
+                                ) else {}),
                             )
+                            if (decompression is not None
+                                    and decompression.get("reuse_manifest_path")):
+                                self._compression_reuse_manifest = str(
+                                    decompression["reuse_manifest_path"]
+                                )
                             decompression_after = self._observe_physical()
                         self._capture_storage(
                             storage_observations, "after_decompress",
@@ -1493,6 +1514,7 @@ class CubeSandboxLifecycle:
                         self.snapshot_pool.abort(key)
                     self._pending_snapshot_keys.clear()
                 self._snapshot_key = None
+                self._compression_reuse_manifest = None
                 self.sandbox = None
                 self.sandbox_id = None
                 self._state = SandboxState.CLOSED

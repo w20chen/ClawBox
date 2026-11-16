@@ -1,6 +1,7 @@
 """Lossless sparse-chunk Zstd storage for native Cube RAM snapshot layers."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 
 SUFFIX = ".zstd-pages.json"
 DIRECTORY_SUFFIX = ".zstd-pages"
+REUSE_SUFFIX = ".zstd-pages.reuse.json"
 
 
 def _allocated(path: Path, stat: os.stat_result | None = None) -> int:
@@ -110,8 +112,88 @@ def compression_manifest(path: str | Path) -> Path:
     return Path(str(path) + SUFFIX)
 
 
+def compression_reuse_manifest(path: str | Path) -> Path:
+    return Path(str(path) + REUSE_SUFFIX)
+
+
 def is_compressed(path: str | Path) -> bool:
     return compression_manifest(path).is_file()
+
+
+def _layer_name(paths: list[Path]) -> str | None:
+    names = {
+        path.name for path in paths
+        if path.parent.name.endswith(".layers") and path.suffix == ".mem"
+    }
+    return next(iter(names)) if len(names) == 1 else None
+
+
+def _reuse_records(
+    manifest: str | Path | None,
+    native_snapshot_metrics: dict[str, Any] | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+    if manifest is None:
+        return {}, None
+    path = Path(manifest)
+    if not path.is_file():
+        return {}, None
+    document = json.loads(path.read_text(encoding="utf-8"))
+    parent = (native_snapshot_metrics or {}).get("lineage_parent_snapshot_id")
+    source = (document.get("native_snapshot_metrics") or {}).get(
+        "lineage_snapshot_id"
+    )
+    # A retained container is safe only for the exact logical parent. Layer
+    # names are stable inside one native lineage, but are not globally unique.
+    if not isinstance(parent, str) or not parent or parent != source:
+        return {}, document
+    records: dict[str, dict[str, Any]] = {}
+    for record in document.get("groups") or []:
+        name = _layer_name([Path(item) for item in record.get("paths") or []])
+        container = Path(str(record.get("container") or ""))
+        if name and name not in records and container.is_file():
+            records[name] = record
+    return records, document
+
+
+def _clone_container(source: Path, destination: Path) -> tuple[str, float, float]:
+    started_wall = time.monotonic()
+    started_cpu = time.process_time()
+    destination.unlink(missing_ok=True)
+    method = "hardlink"
+    try:
+        os.link(source, destination)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        method = "copy"
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream, length=8 * 1024 * 1024)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+        os.chmod(destination, source.stat().st_mode & 0o777)
+    return method, time.monotonic() - started_wall, time.process_time() - started_cpu
+
+
+def _retire_reuse_document(path: Path, document: dict[str, Any]) -> None:
+    # The successor manifest is durable before this runs. Its containers are
+    # independent copies or hardlinks, so predecessor raw aliases and retained
+    # containers can now be released without changing successor identity.
+    for record in document.get("groups") or []:
+        for raw in record.get("paths") or []:
+            Path(raw).unlink(missing_ok=True)
+        container = record.get("container")
+        if container:
+            Path(container).unlink(missing_ok=True)
+    directory = document.get("container_directory")
+    if directory:
+        shutil.rmtree(directory, ignore_errors=True)
+    else:
+        snapshot_path = document.get("snapshot_path")
+        if snapshot_path:
+            shutil.rmtree(
+                Path(str(snapshot_path) + DIRECTORY_SUFFIX), ignore_errors=True,
+            )
+    path.unlink(missing_ok=True)
 
 
 def read_compressed_snapshot_metadata(path: str | Path) -> dict[str, Any] | None:
@@ -161,8 +243,11 @@ def _refresh_manifest_accounting(
     return refreshed
 
 
-def compress_snapshot(path: str | Path, *, binary: str,
-                      native_snapshot_metrics: dict[str, Any] | None = None) -> dict[str, Any]:
+def compress_snapshot(
+    path: str | Path, *, binary: str,
+    native_snapshot_metrics: dict[str, Any] | None = None,
+    reusable_manifest: str | Path | None = None,
+) -> dict[str, Any]:
     snapshot = Path(path)
     manifest_path = compression_manifest(snapshot)
     if manifest_path.exists():
@@ -173,6 +258,10 @@ def compress_snapshot(path: str | Path, *, binary: str,
     groups, shared_skipped = _owned_groups(snapshot)
     if not groups:
         raise RuntimeError(f"snapshot has no exclusively owned RAM layer to compress: {snapshot}")
+    reusable_path = Path(reusable_manifest) if reusable_manifest is not None else None
+    reusable, reuse_document = _reuse_records(
+        reusable_path, native_snapshot_metrics,
+    )
     container_dir = Path(str(snapshot) + DIRECTORY_SUFFIX)
     container_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
     records: list[dict[str, Any]] = []
@@ -182,13 +271,46 @@ def compress_snapshot(path: str | Path, *, binary: str,
             source = paths[0]
             container = container_dir / f"{index:06d}.zpg"
             temporary = Path(str(container) + ".tmp")
-            metrics = _run(binary, "compress", source, temporary)
+            layer_name = _layer_name(paths)
+            reused = reusable.get(layer_name) if layer_name else None
+            if reused is None:
+                metrics = _run(binary, "compress", source, temporary)
+                reuse_method = None
+                decompression_allocated = int(metrics["input_allocated_bytes"])
+            else:
+                reuse_method, wall_seconds, cpu_seconds = _clone_container(
+                    Path(reused["container"]), temporary,
+                )
+                metrics = dict(reused["metrics"])
+                decompression_allocated = int(
+                    metrics.get("decompression_allocated_bytes")
+                    or metrics.get("source_input_allocated_bytes")
+                    or metrics.get("input_allocated_bytes")
+                    or 0
+                )
+                metrics.update({
+                    "input_allocated_bytes": _allocated(source),
+                    "output_allocated_bytes": _allocated(temporary),
+                    "wall_seconds": wall_seconds,
+                    "cpu_seconds": cpu_seconds,
+                    "read_seconds": 0.0,
+                    "codec_seconds": 0.0,
+                    "write_seconds": wall_seconds if reuse_method == "copy" else 0.0,
+                    "sync_seconds": 0.0,
+                    "peak_rss_kib": 0,
+                    "reused_compressed_parent": True,
+                    "reuse_method": reuse_method,
+                    "source_input_allocated_bytes": decompression_allocated,
+                    "decompression_allocated_bytes": decompression_allocated,
+                })
             os.replace(temporary, container)
             records.append({
                 "paths": [str(item) for item in paths],
                 "mode": source.stat().st_mode & 0o777,
                 "container": str(container),
                 "metrics": metrics,
+                "layer_name": layer_name,
+                "reused_compressed_parent": reused is not None,
             })
         raw_unique: dict[tuple[int, int], int] = {}
         raw_candidates = [snapshot]
@@ -204,7 +326,15 @@ def compress_snapshot(path: str | Path, *, binary: str,
             stat = path.stat()
             raw_unique[(stat.st_dev, stat.st_ino)] = _allocated(path, stat)
         baseline = sum(int(item["metrics"]["input_allocated_bytes"]) for item in records)
+        decompression_allocated = sum(int(
+            item["metrics"].get("decompression_allocated_bytes")
+            or item["metrics"].get("source_input_allocated_bytes")
+            or item["metrics"]["input_allocated_bytes"]
+        ) for item in records)
         containers = sum(_allocated(Path(item["container"])) for item in records)
+        reused_records = [
+            item for item in records if item["reused_compressed_parent"]
+        ]
         aggregate = {
             "algorithm": "zstd-page",
             "zstd_level": 1,
@@ -213,7 +343,17 @@ def compress_snapshot(path: str | Path, *, binary: str,
             "shared_allocated_bytes_skipped": shared_skipped,
             "raw_native_allocated_bytes": sum(raw_unique.values()),
             "baseline_allocated_bytes": baseline,
+            "decompression_allocated_bytes": decompression_allocated,
             "compressed_container_allocated_bytes": containers,
+            "fresh_group_count": len(records) - len(reused_records),
+            "reused_group_count": len(reused_records),
+            "reused_input_allocated_bytes": sum(
+                int(item["metrics"]["input_allocated_bytes"])
+                for item in reused_records
+            ),
+            "reused_container_allocated_bytes": sum(
+                _allocated(Path(item["container"])) for item in reused_records
+            ),
             "hole_chunks": sum(int(item["metrics"]["hole_chunks"]) for item in records),
             "zstd_chunks": sum(int(item["metrics"]["zstd_chunks"]) for item in records),
             "chunk_count": sum(int(item["metrics"]["chunk_count"]) for item in records),
@@ -230,6 +370,7 @@ def compress_snapshot(path: str | Path, *, binary: str,
             },
             "started_unix_s": started,
             "completed_unix_s": time.time(),
+            "reuse_manifest_consumed": reuse_document is not None,
         }
         raw_native_metrics = dict(native_snapshot_metrics or {})
         aggregate = _refresh_manifest_accounting(aggregate, 0)
@@ -265,6 +406,8 @@ def compress_snapshot(path: str | Path, *, binary: str,
         for record in records:
             for raw in record["paths"]:
                 Path(raw).unlink(missing_ok=True)
+        if reusable_path is not None and reuse_document is not None:
+            _retire_reuse_document(reusable_path, reuse_document)
         return aggregate
     except Exception:
         for record in records:
@@ -274,7 +417,9 @@ def compress_snapshot(path: str | Path, *, binary: str,
         raise
 
 
-def decompress_snapshot(path: str | Path, *, binary: str) -> dict[str, Any] | None:
+def decompress_snapshot(
+    path: str | Path, *, binary: str, retain_for_reuse: bool = False,
+) -> dict[str, Any] | None:
     snapshot = Path(path)
     manifest_path = compression_manifest(snapshot)
     if not manifest_path.exists():
@@ -299,10 +444,25 @@ def decompress_snapshot(path: str | Path, *, binary: str) -> dict[str, Any] | No
                 os.link(canonical, alias)
         if not all(path.exists() and os.path.samefile(canonical, path) for path in paths):
             raise RuntimeError(f"snapshot decompression did not restore hardlink identity: {snapshot}")
-    for record in document["groups"]:
-        Path(record["container"]).unlink(missing_ok=True)
-    shutil.rmtree(Path(str(snapshot) + DIRECTORY_SUFFIX), ignore_errors=True)
-    manifest_path.unlink(missing_ok=True)
+    reuse_path = None
+    if retain_for_reuse:
+        reuse_path = compression_reuse_manifest(snapshot)
+        if reuse_path.exists():
+            raise RuntimeError(
+                f"snapshot already has retained compression reuse state: {snapshot}"
+            )
+        document["container_directory"] = str(
+            Path(str(snapshot) + DIRECTORY_SUFFIX)
+        )
+        document["retained_for_reuse"] = True
+        document["retained_unix_s"] = time.time()
+        _atomic_json(reuse_path, document)
+        manifest_path.unlink()
+    else:
+        for record in document["groups"]:
+            Path(record["container"]).unlink(missing_ok=True)
+        shutil.rmtree(Path(str(snapshot) + DIRECTORY_SUFFIX), ignore_errors=True)
+        manifest_path.unlink(missing_ok=True)
     wall_seconds = sum(float(item["wall_seconds"]) for item in results)
     logical_bytes = int(document["metrics"].get("logical_bytes") or 0)
     return {
@@ -323,15 +483,25 @@ def decompress_snapshot(path: str | Path, *, binary: str) -> dict[str, Any] | No
             logical_bytes / 1048576 / wall_seconds if wall_seconds else 0.0
         ),
         "compression_metrics": document["metrics"],
+        "reuse_manifest_path": str(reuse_path) if reuse_path is not None else None,
     }
 
 
 def remove_compressed_snapshot(path: str | Path) -> None:
     manifest = compression_manifest(path)
+    reuse_manifest = compression_reuse_manifest(path)
     directory = Path(str(path) + DIRECTORY_SUFFIX)
-    if manifest.exists():
-        document = json.loads(manifest.read_text(encoding="utf-8"))
+    document = None
+    for candidate in (manifest, reuse_manifest):
+        if candidate.exists():
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+            break
+    if document is not None:
         for record in document.get("groups") or []:
+            for raw in record.get("paths") or []:
+                if reuse_manifest.exists():
+                    Path(raw).unlink(missing_ok=True)
             Path(record["container"]).unlink(missing_ok=True)
     shutil.rmtree(directory, ignore_errors=True)
     manifest.unlink(missing_ok=True)
+    reuse_manifest.unlink(missing_ok=True)
