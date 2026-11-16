@@ -369,14 +369,35 @@ class CubeSandboxClient:
         return sandbox
 
     def get_sandbox_state(self, sandbox_or_id: Any) -> str | None:
-        if not isinstance(sandbox_or_id, str):
-            getter = getattr(sandbox_or_id, "get_info", None)
-            if callable(getter):
+        transient_handle = None
+        if isinstance(sandbox_or_id, str):
+            sandbox_id = sandbox_or_id
+            # CubeAPI's v2 inventory has a bounded default page and the SDK
+            # does not consume nextToken. Under Full1280, scanning that page
+            # can report a live paused sandbox as missing and skip placement
+            # reconciliation forever. Query the exact identity instead.
+            handle = self._handles.get(sandbox_id)
+            if handle is None:
+                try:
+                    handle = self._sandbox_class(
+                        {"sandboxID": sandbox_id}, self._config,
+                    )
+                    transient_handle = handle
+                except (TypeError, ValueError):
+                    handle = None
+        else:
+            handle = sandbox_or_id
+            sandbox_id = self.sandbox_id(sandbox_or_id)
+        getter = getattr(handle, "get_info", None)
+        if callable(getter):
+            try:
                 info = getter()
                 return str(info.get("state", "")).lower() or None
-            sandbox_id = self.sandbox_id(sandbox_or_id)
-        else:
-            sandbox_id = sandbox_or_id
+            finally:
+                if transient_handle is not None:
+                    close = getattr(transient_handle, "close", None)
+                    if callable(close):
+                        close()
         for info in self._sandbox_class.list_v2(**self._sdk_kwargs()):
             if self._info_id(info) == sandbox_id:
                 return str(info.get("state", "")).lower() or None

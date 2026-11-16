@@ -564,6 +564,26 @@ def test_cube_client_reads_state_from_existing_handle_without_full_inventory() -
     assert client.get_sandbox_state(DirectInfoSandbox({"sandboxID": "sb-direct"})) == "paused"
 
 
+def test_cube_client_reads_state_by_id_without_page_limited_inventory() -> None:
+    class DirectInfoSandbox(_Sandbox):
+        closed = 0
+
+        @classmethod
+        def list_v2(cls, **kwargs):
+            raise AssertionError("state lookup must not scan a bounded inventory page")
+
+        def get_info(self):
+            return {"state": "PAUSED"}
+
+        def close(self):
+            type(self).closed += 1
+
+    client = CubeSandboxClient(sandbox_class=DirectInfoSandbox)
+
+    assert client.get_sandbox_state("sb-direct") == "paused"
+    assert DirectInfoSandbox.closed == 1
+
+
 def test_lifecycle_refreshes_runtime_network_only_for_a_new_endpoint_host() -> None:
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)
@@ -1131,6 +1151,13 @@ def test_connect_republishes_assigned_capability_only_while_remote_is_paused(
     class InterruptedResumeSandbox(_Sandbox):
         connect_calls = 0
 
+        def get_info(self):
+            return {"state": self.state}
+
+        @classmethod
+        def list_v2(cls, **kwargs):
+            pytest.fail("resume reconciliation must query the exact sandbox identity")
+
         @classmethod
         def connect(cls, sandbox_id, **kwargs):
             cls.connect_calls += 1
@@ -1141,13 +1168,13 @@ def test_connect_republishes_assigned_capability_only_while_remote_is_paused(
             return super().connect(sandbox_id, **kwargs)
 
     monkeypatch.setattr("clawbox.cube.api_retry.time.sleep", lambda _seconds: None)
-    InterruptedResumeSandbox.items = {
-        "sb-paused": InterruptedResumeSandbox({
-            "sandboxID": "sb-paused", "state": "paused",
-        }),
-    }
+    paused = InterruptedResumeSandbox({
+        "sandboxID": "sb-paused", "state": "paused",
+    })
+    InterruptedResumeSandbox.items = {"sb-paused": paused}
     refreshed = []
     client = CubeSandboxClient(sandbox_class=InterruptedResumeSandbox)
+    client._handles["sb-paused"] = paused
 
     sandbox = client.connect_sandbox(
         "sb-paused", refresh_placement=lambda: refreshed.append(True),
