@@ -289,22 +289,54 @@ class CubeSandboxClient:
 
     def connect_sandbox(self, sandbox_id: str, *,
                         snapshot_mechanism: str = "incremental-cow",
-                        storage_domain: str | None = None) -> Any:
+                        storage_domain: str | None = None,
+                        refresh_placement: Callable[[], None] | None = None) -> Any:
         # Resuming the same immutable sandbox ID is idempotent. CubeMaster can
         # transiently reject or drop HTTP requests during a large restore
         # wave, so retry the control-plane transport without creating a new VM.
-        with span('native.connect_with_retries'):
-            sandbox = retry_with_backoff(
-                lambda: self._sandbox_class.connect(
+        #
+        # Native placement capabilities are single-use for each resume attempt.
+        # Cube can publish the assigned cgroup and then fail while the sandbox
+        # is still Paused.  A blind retry then receives 130562 forever.  Only
+        # republish the same capability after Cube's authoritative state still
+        # says Paused; never clear the assignment of a Running sandbox whose
+        # successful response may merely have been lost.
+        last_error: BaseException | None = None
+
+        def connect() -> Any:
+            nonlocal last_error
+            try:
+                return self._sandbox_class.connect(
                     sandbox_id, **self._sdk_kwargs(),
                     **({"storage_domain": storage_domain} if storage_domain else {}),
                     **({"snapshot_mechanism": snapshot_mechanism}
                        if snapshot_mechanism != "full-copy" else {}),
-                ),
+                )
+            except Exception as exc:
+                last_error = exc
+                raise
+
+        def reconcile_placement() -> None:
+            if (refresh_placement is None
+                    or getattr(last_error, "status_code", None) != 130562):
+                return
+            try:
+                state = self.get_sandbox_state(sandbox_id)
+            except Exception:
+                # Preserve the original connect failure and let the next
+                # bounded idempotent retry perform another read.
+                return
+            if state == "paused":
+                refresh_placement()
+
+        with span('native.connect_with_retries'):
+            sandbox = retry_with_backoff(
+                connect,
                 label=f"resume sandbox {sandbox_id}",
                 attempts=10,
                 initial_delay_s=0.25,
                 max_delay_s=2.0,
+                before_retry=reconcile_placement,
             )
         self._handles[sandbox_id] = sandbox
         return sandbox

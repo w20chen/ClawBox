@@ -1163,6 +1163,7 @@ class CubeSandboxLifecycle:
                         self.sandbox_id,
                         snapshot_mechanism=self.snapshot_mechanism,
                         **({"storage_domain": self.storage_domain} if self.storage_domain else {}),
+                        refresh_placement=self.prepare_cgroup,
                     )
                 verified = None
                 if self.verify_cgroup is not None:

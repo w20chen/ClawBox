@@ -1122,6 +1122,78 @@ def test_restore_failure_after_remote_resume_does_not_mark_vm_swapped(tmp_path) 
     assert not _Sandbox.items
 
 
+def test_connect_republishes_assigned_capability_only_while_remote_is_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AssignedCapabilityError(RuntimeError):
+        status_code = 130562
+
+    class InterruptedResumeSandbox(_Sandbox):
+        connect_calls = 0
+
+        @classmethod
+        def connect(cls, sandbox_id, **kwargs):
+            cls.connect_calls += 1
+            if cls.connect_calls == 1:
+                raise RequestsConnectionError("first resume response lost")
+            if cls.connect_calls == 2:
+                raise AssignedCapabilityError("placement capability is already assigned")
+            return super().connect(sandbox_id, **kwargs)
+
+    monkeypatch.setattr("clawbox.cube.api_retry.time.sleep", lambda _seconds: None)
+    InterruptedResumeSandbox.items = {
+        "sb-paused": InterruptedResumeSandbox({
+            "sandboxID": "sb-paused", "state": "paused",
+        }),
+    }
+    refreshed = []
+    client = CubeSandboxClient(sandbox_class=InterruptedResumeSandbox)
+
+    sandbox = client.connect_sandbox(
+        "sb-paused", refresh_placement=lambda: refreshed.append(True),
+    )
+
+    assert sandbox.state == "running"
+    assert InterruptedResumeSandbox.connect_calls == 3
+    assert refreshed == [True]
+
+
+def test_connect_never_republishes_capability_for_running_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AssignedCapabilityError(RuntimeError):
+        status_code = 130562
+
+    class ReconciledResumeSandbox(_Sandbox):
+        connect_calls = 0
+
+        @classmethod
+        def connect(cls, sandbox_id, **kwargs):
+            cls.connect_calls += 1
+            item = cls.items[sandbox_id]
+            if cls.connect_calls == 1:
+                item.state = "running"
+                raise AssignedCapabilityError("placement capability is already assigned")
+            return item
+
+    monkeypatch.setattr("clawbox.cube.api_retry.time.sleep", lambda _seconds: None)
+    ReconciledResumeSandbox.items = {
+        "sb-running": ReconciledResumeSandbox({
+            "sandboxID": "sb-running", "state": "paused",
+        }),
+    }
+    refreshed = []
+    client = CubeSandboxClient(sandbox_class=ReconciledResumeSandbox)
+
+    sandbox = client.connect_sandbox(
+        "sb-running", refresh_placement=lambda: refreshed.append(True),
+    )
+
+    assert sandbox.state == "running"
+    assert ReconciledResumeSandbox.connect_calls == 2
+    assert refreshed == []
+
+
 def test_failed_warm_manifest_retains_inflight_capacity_until_destroy():
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)
