@@ -518,7 +518,12 @@ def worker_prewarm_environment():
         vm.resident = True
 
     environment = dict(Any=Any, time=time, shlex=__import__("shlex"),
-        EvictionPolicy=EvictionPolicy, arm=SimpleNamespace(policy=policy),
+        EvictionPolicy=EvictionPolicy,
+        arm=SimpleNamespace(
+            policy=policy,
+            resources=SimpleNamespace(lifecycle_reservation_mib=lambda memory_mib: memory_mib),
+            sandbox=SimpleNamespace(memory_mib=4),
+        ),
         coordinator=coordinator, session_id="session", runtime_snapshot_enabled=True,
         runtime_lifecycle=runtime, lifecycle=tool, session_binding=None,
         runtime_executor=object(), RELAY_CHECKPOINT_URL="http://127.0.0.1:8766/checkpoint",
@@ -530,6 +535,7 @@ def worker_prewarm_environment():
         self=SimpleNamespace(_restore_with_one_victim=restore),
         prepare_restored_tool=lambda **kwargs: tool_ready.append(kwargs), tool_ready=tool_ready,
         events=SimpleNamespace(write=events.append), policy_events=executor,
+        arm_cancel=None,
         pause_for_model_wait=lambda _event: None)
     source = Path(__file__).resolve().parents[1] / "clawbox/experiments/worker.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
@@ -596,6 +602,32 @@ def test_worker_tool_prewarm_readiness_failure_is_not_reported_ready():
         executor.check()
     assert str(failure.value.__cause__) == "Tool bridge unavailable"
     assert restored == ["runtime", "tool"]
+    assert not any(event["event"] == "gpu_pair_prewarm_ready" for event in events)
+
+
+def test_worker_gpu_prewarm_defers_tool_when_restore_admission_is_blocked():
+    env, restored, events, executor = worker_prewarm_environment()
+    env["coordinator"].restore_queue_observation = lambda _sid, _amount: {
+        "blocked": True,
+        "reasons": ["configured_memory_budget"],
+        "queued_requests": 15,
+        "progress_prefix_local_bytes": 4 * 1024 * 1024,
+        "progress_prefix_total_bytes": 4 * 1024 * 1024,
+    }
+    try:
+        env["on_model_signal"]({"session_id": "session", "request_id": "request",
+                                "event": "first_token", "role": "A",
+                                "source": "simulator", "t": 2.})
+    finally:
+        executor.close()
+    executor.check()
+    assert restored == ["runtime"]
+    assert env["runtime_lifecycle"].resident
+    assert not env["lifecycle"].resident
+    deferred = [event for event in events if event["event"] == "gpu_tool_prewarm_deferred"]
+    assert len(deferred) == 1
+    assert deferred[0]["runtime_ready"] is True
+    assert deferred[0]["admission"]["reasons"] == ["configured_memory_budget"]
     assert not any(event["event"] == "gpu_pair_prewarm_ready" for event in events)
 
 

@@ -38,11 +38,19 @@ def test_policy_events_coalesce_to_running_and_one_trailing_scan():
 def test_coalesced_policy_event_failure_is_reported_to_arm_health():
     from clawbox.experiments.policy import PolicyEventExecutor
 
-    executor = PolicyEventExecutor(workers=1)
+    failures = []
+    executor = PolicyEventExecutor(workers=1, on_failure=failures.append)
     done = executor.submit_coalesced(
-        "pressure", lambda: (_ for _ in ()).throw(ValueError("broken pressure")),
+        ("pressure", object()),
+        lambda: (_ for _ in ()).throw(ValueError("broken pressure")),
     )
     done.result(timeout=1)
+    assert len(failures) == 1
+    assert failures[0]["operation"].endswith("<lambda>")
+    assert failures[0]["key"] == ["pressure", "object"]
+    assert failures[0]["error_type"] == "ValueError"
+    assert failures[0]["error"] == "broken pressure"
+    assert "ValueError: broken pressure" in failures[0]["traceback"]
     with pytest.raises(RuntimeError, match="coalesced policy event failed") as raised:
         executor.check()
     assert isinstance(raised.value.__cause__, ValueError)

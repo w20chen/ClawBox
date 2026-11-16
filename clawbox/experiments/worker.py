@@ -2735,7 +2735,12 @@ class ExperimentWorker:
                 publish_memory_sample, name="memory-sample-reporter",
             )
             sampler.sample_hook = queue_memory_sample
-        policy_events = PolicyEventExecutor(workers=policy_event_workers(arm))
+        policy_events = PolicyEventExecutor(
+            workers=policy_event_workers(arm),
+            on_failure=lambda failure: events.write({
+                "event": "policy_executor_failed", **failure,
+            }),
+        )
         watermark_controller = next(iter(domains.values())).controller
         create_limit = self._sandbox_create_limit(
             arm.concurrency, arm.execution.sandbox_create_concurrency,
@@ -4064,6 +4069,8 @@ class ExperimentWorker:
                 and arm.policy.runtime_snapshot
             )
             def pause_for_model_wait(event: dict[str, Any]) -> None:
+                if arm_cancel is not None and arm_cancel.is_set():
+                    return
                 try:
                     # Recheck live pressure; the queued event may be stale.
                     # Candidate selection/claim shares the Tool admission lock.
@@ -4177,11 +4184,15 @@ class ExperimentWorker:
                     )
 
             def prewarm_pair_from_gpu(event: dict[str, Any]) -> None:
+                if arm_cancel is not None and arm_cancel.is_set():
+                    return
                 request_id = str(event["request_id"])
                 trigger = str(event["event"])
                 operation = f"gpu_{trigger}"
                 # Do not hold wait_lock while an already-claimed checkpoint finishes.
                 if not coordinator.wait_for_gpu_prewarm(session_id, request_id):
+                    return
+                if arm_cancel is not None and arm_cancel.is_set():
                     return
                 with wait_lock:
                     with generated_model_requests_lock:
@@ -4196,6 +4207,25 @@ class ExperimentWorker:
                     # peer placement is enabled. Tool then uses that domain.
                     restore_runtime_for_model_wait_locked(event, phase=operation)
                     if not lifecycle.resident:
+                        reservation_mib = arm.resources.lifecycle_reservation_mib(
+                            arm.sandbox.memory_mib
+                        )
+                        admission = coordinator.restore_queue_observation(
+                            session_id, reservation_mib,
+                        )
+                        if admission["blocked"]:
+                            events.write({
+                                "event": "gpu_tool_prewarm_deferred",
+                                "session_id": session_id,
+                                "request_id": request_id,
+                                "source": event.get("source"),
+                                "trigger": trigger,
+                                "reason": "restore_admission_blocked",
+                                "runtime_ready": runtime_lifecycle.resident,
+                                "tool_ready": False,
+                                "admission": admission,
+                            })
+                            return
                         started = time.time()
                         self._restore_with_one_victim(
                             arm, session_id, lifecycle, coordinator, events, role="tool",
@@ -4212,6 +4242,8 @@ class ExperimentWorker:
                                   "trigger": trigger, "gpu_virtual_time": event.get("t")})
 
             def on_model_signal(event: dict[str, Any]) -> None:
+                if arm_cancel is not None and arm_cancel.is_set():
+                    return
                 if arm.policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE:
                     return
                 decision = coordinator.observe_gpu_signal(session_id, str(event["request_id"]), event)

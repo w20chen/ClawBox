@@ -4,6 +4,7 @@ from .control_timing import timed_lock, operation, span
 
 import math
 import time
+import traceback
 from collections import Counter, deque
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
@@ -91,13 +92,15 @@ def checkpoint_reservations(lifecycles, tier):
 class PolicyEventExecutor:
     """Per-arm executor with a single-flight edge-triggered work path."""
 
-    def __init__(self, *, workers: int = 4) -> None:
+    def __init__(self, *, workers: int = 4,
+                 on_failure: Callable[[dict[str, object]], None] | None = None) -> None:
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, workers), thread_name_prefix="policy-event"
         )
         self._lock = Lock()
         self._coalesced: dict[object, dict[str, object]] = {}
         self._failures: list[BaseException] = []
+        self._on_failure = on_failure
         self.submitted_count = 0
         self.coalesced_count = 0
         self.executed_count = 0
@@ -140,14 +143,35 @@ class PolicyEventExecutor:
             try:
                 operation(*args, **kwargs)  # type: ignore[operator]
             except BaseException as exc:
+                failure = {
+                    "operation": getattr(operation, "__qualname__", type(operation).__name__),
+                    "key": self._diagnostic_key(key),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "traceback": "".join(traceback.format_exception(exc))[-16384:],
+                }
                 with self._lock:
                     self._failures.append(exc)
+                if self._on_failure is not None:
+                    try:
+                        self._on_failure(failure)
+                    except Exception:
+                        # Diagnostics must not replace the original policy error.
+                        pass
             with self._lock:
                 state = self._coalesced[key]
                 if state["dirty"]:
                     continue
                 del self._coalesced[key]
                 return
+
+    @classmethod
+    def _diagnostic_key(cls, key: object) -> object:
+        if isinstance(key, tuple):
+            return [cls._diagnostic_key(item) for item in key]
+        if key is None or isinstance(key, (str, int, float, bool)):
+            return key
+        return type(key).__name__
 
     def check(self) -> None:
         with self._lock:
