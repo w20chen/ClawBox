@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -642,6 +643,35 @@ def cleanup_owned_sandboxes(
         cleanup_priority_domains(directory)
 
 
+def cleanup_owned_snapshot_directories(
+    journal: Path, task_uid: str, cold_root: Path,
+) -> dict[str, int]:
+    """Remove only COLD snapshot directories named by this run's journal."""
+    sandbox_ids = OwnedSandboxJournal(journal).sandbox_ids(task_uid=task_uid)
+    if not cold_root.exists():
+        return {"journal_sandboxes": len(sandbox_ids), "removed_directories": 0}
+    root = cold_root.resolve(strict=True)
+    targets: list[Path] = []
+    for sandbox_id in sandbox_ids:
+        if not sandbox_id or Path(sandbox_id).name != sandbox_id or sandbox_id in {".", ".."}:
+            raise RuntimeError(f"unsafe sandbox ID in cleanup journal: {sandbox_id!r}")
+        candidate = root / sandbox_id
+        if not candidate.exists():
+            continue
+        if candidate.is_symlink():
+            raise RuntimeError(f"snapshot cleanup target is a symlink: {candidate}")
+        target = candidate.resolve(strict=True)
+        if target.parent != root or not target.is_dir():
+            raise RuntimeError(f"snapshot cleanup target escaped COLD root: {candidate}")
+        targets.append(target)
+    for target in targets:
+        shutil.rmtree(target)
+    return {
+        "journal_sandboxes": len(sandbox_ids),
+        "removed_directories": len(targets),
+    }
+
+
 def cleanup_run(
     run_root: Path, *, cleanup_workers: int = 8,
     cleanup_timeout_seconds: float = 180.0,
@@ -653,6 +683,16 @@ def cleanup_run(
     state = read_run_state(run_root)
     failures: list[str] = []
     cleaned: list[str] = []
+    try:
+        cleanup_cold_roots = {
+            arm.arm_id: Path(arm.resources.cold_snapshot_root)
+            for arm in expand_matrix(load_experiment(run_root / "experiment.yaml"))
+            if arm.resources.cold_snapshot_root
+        }
+    except Exception:
+        # The existing spec-validation block below reports this as a cleanup
+        # failure; sandbox destruction must still be attempted first.
+        cleanup_cold_roots = {}
     for arm_id, arm in state.get("arms", {}).items():
         task_uid = arm.get("task_uid")
         artifact_root = arm.get("artifact_root")
@@ -679,6 +719,11 @@ def cleanup_run(
                     ) from exc
             if return_code:
                 raise RuntimeError(f"cleanup process exited with status {return_code}")
+            cold_root = cleanup_cold_roots.get(arm_id)
+            if cold_root is not None:
+                arm["cold_snapshot_cleanup"] = cleanup_owned_snapshot_directories(
+                    artifact_path / "owned-sandboxes.jsonl", str(task_uid), cold_root,
+                )
             cleaned.append(arm_id)
             arm["cleanup_verified"] = True
             arm["cleanup_error"] = None

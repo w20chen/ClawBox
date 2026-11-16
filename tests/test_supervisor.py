@@ -5,9 +5,12 @@ import sys
 import pytest
 from pathlib import Path
 
+from clawbox.cube import OwnedSandboxJournal, Ownership
 from clawbox.experiments.results import ResultEnvelope, RunStatus, utcnow
 from clawbox.experiments.spec import expand_matrix, load_experiment
-from clawbox.experiments.supervisor import ExperimentSupervisor, status_for_run
+from clawbox.experiments.supervisor import (
+    ExperimentSupervisor, cleanup_owned_snapshot_directories, status_for_run,
+)
 from clawbox.experiments.worker import atomic_json, atomic_marker
 
 
@@ -41,6 +44,27 @@ class _ResultWorkerSupervisor(_NoCubeSupervisor):
         atomic_json(child, result.model_dump(mode="json"))
         atomic_marker(child.with_suffix(".complete"), arm.spec_digest)
         return [sys.executable, "-c", "pass"]
+
+
+def test_snapshot_cleanup_is_limited_to_journal_owner(tmp_path: Path) -> None:
+    journal = OwnedSandboxJournal(tmp_path / "owned.jsonl")
+    owner = Ownership("run", "attempt", "task", "experiment", "session", "policy")
+    other = Ownership("run", "attempt", "other", "experiment", "session", "policy")
+    journal.record("owned-sandbox", owner)
+    journal.record("other-sandbox", other)
+    cold = tmp_path / "cold"
+    (cold / "owned-sandbox").mkdir(parents=True)
+    (cold / "owned-sandbox" / "runtime-g1.mem").write_bytes(b"owned")
+    (cold / "other-sandbox").mkdir()
+    (cold / "other-sandbox" / "tool-g1.mem").write_bytes(b"other")
+    (cold / "layers").mkdir()
+
+    result = cleanup_owned_snapshot_directories(journal.path, "task", cold)
+
+    assert result == {"journal_sandboxes": 1, "removed_directories": 1}
+    assert not (cold / "owned-sandbox").exists()
+    assert (cold / "other-sandbox" / "tool-g1.mem").read_bytes() == b"other"
+    assert (cold / "layers").is_dir()
 
 
 @pytest.mark.parametrize('worker', [_ResultWorkerSupervisor, _BrokenWorkerSupervisor, _HangingWorkerSupervisor])
