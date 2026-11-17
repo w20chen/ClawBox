@@ -135,22 +135,23 @@ deadline 模式使用：
 
 新增功能必须在现有 experiment schema 内有公开配置，更新 [操作指南](guide.md) 与 [选项参考](reference.md)，提供可按顺序执行的命令。首次交付默认关闭，不把研究功能自动开启到普通实验。
 
-### 拟新增配置
+### 已实现的通用配置
 
-建议归入 `execution.snapshot_page_management`，以下名称和默认值是设计起点，尚未被当前代码支持：
+配置归入 `execution.snapshot_page_management`。候选来源不依赖任务、case、role 或离线热图；它仅使用即将恢复的 VM 当前权威 lineage 和物理范围共享关系：
 
 | 字段 | 初始默认/要求 | 单位与用途 |
 | --- | --- | --- |
-| `mode` | `off` | `off / immediate / gpu_event / gpu_deadline`；缺少完整响应预测不能启用 deadline |
-| `hotset_manifest` | `null` | 文件路径和摘要；指定模板/role/观测来源，未知页保持 unknown |
+| `mode` | `gpu_event` | 接受 GPU 事件后准备；删除整个配置块即关闭 |
+| `candidate_source` | `shared_lineage` | 从新到旧解析页版本，按共享 waiter 数和新增读取字节排序 |
 | `prefetch_budget_mib` | 启用时显式填写 | 全局推测性准备额度，来自已有 DRAM 余量，不能从机器总容量猜测 |
 | `per_vm_prefetch_mib` | 32 | 每 VM 候选页字节上限，单次小验证后冻结 |
 | `max_inflight_mib` | 128 | 全局在途 I/O 上限，实际值不超过剩余预算 |
 | `io_workers` | 2 | 后台 I/O 并发数，不占满 demand 通道 |
-| `prefetch_bandwidth_mib_s` | 64 | 全局限速初值，需记录实际带宽和平台影响 |
-| `max_ranges_per_vm` | 256 | 限制碎片和系统调用数量；范围截断单独计数 |
-| `deadline_margin_seconds` | 0.2 | 仅 deadline 模式使用的初始余量，不能拿它代替准备服务时间 |
-| `signal_max_age_seconds` | 沿用现有有效期配置 | 事件过期后失效推测性计划，避免重复定义不同的有效期 |
+| `candidate_chunk_kib` | 128 | 物理候选粒度；同分时以稳定散列均匀覆盖，不固定取文件前缀 |
+| `batch_window_milliseconds` | 25 | 收集同时即将恢复的 waiter；到期或达到 worker 数立即决策 |
+| `prefetch_bandwidth_mib_s` | 256 | 全局限速，需记录实际带宽和平台影响 |
+| `max_ranges_per_vm` | 512 | 限制碎片和系统调用数量；范围截断单独计数 |
+| `signal_max_age_seconds` | 5 | 事件过期后拒绝推测性准备 |
 
 以上数字是保守的原型上限，不是已验证最优参数。第一组对照前冻结一次，避免每次小调参都重跑 Full1280。Python 策略变化通常不需 guest 镜像重建；原生 helper/patch 改动需对应 host 组件构建安装和能力验证；所有性能对照均使用新 run ID。
 

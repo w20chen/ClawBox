@@ -421,15 +421,19 @@ class SnapshotPageProfileSpec(StrictFrozenModel):
 
 
 class SnapshotPageManagementSpec(StrictFrozenModel):
-    """GPU-triggered preparation of a frozen, profiled snapshot hotset."""
+    """GPU-triggered preparation of task-independent shared lineage pages."""
 
     mode: Literal["gpu_event"] = "gpu_event"
-    hotset_manifest: str = Field(min_length=1)
+    candidate_source: Literal["shared_lineage"] = "shared_lineage"
     trigger_event: Literal["queued", "prefill_start"] = "prefill_start"
     prefetch_budget_mib: int = Field(ge=1)
     per_vm_prefetch_mib: int = Field(default=32, ge=1)
     max_inflight_mib: int = Field(default=128, ge=1)
     io_workers: int = Field(default=2, ge=1, le=32)
+    candidate_chunk_kib: int = Field(default=128, ge=4, le=4096)
+    batch_window_milliseconds: float = Field(
+        default=25.0, ge=0, le=1000, allow_inf_nan=False,
+    )
     prefetch_bandwidth_mib_s: float = Field(
         default=256.0, gt=0, allow_inf_nan=False,
     )
@@ -440,9 +444,10 @@ class SnapshotPageManagementSpec(StrictFrozenModel):
 
     @model_validator(mode="after")
     def valid_budgets(self):
-        path = PurePosixPath(self.hotset_manifest)
-        if not path.is_absolute() or ".." in path.parts:
-            raise ValueError("snapshot_page_management.hotset_manifest must be absolute")
+        if self.candidate_chunk_kib % 4 or self.candidate_chunk_kib & (self.candidate_chunk_kib - 1):
+            raise ValueError(
+                "snapshot_page_management.candidate_chunk_kib must be a 4 KiB-aligned power of two"
+            )
         if self.per_vm_prefetch_mib > self.max_inflight_mib:
             raise ValueError(
                 "snapshot_page_management.per_vm_prefetch_mib exceeds max_inflight_mib"

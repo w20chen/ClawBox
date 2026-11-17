@@ -1,15 +1,14 @@
-"""Bounded GPU-triggered prefetch of profiled snapshot GPA ranges.
+"""Task-independent, GPU-triggered preparation of shared snapshot pages.
 
-The hotset contains only guest-physical ranges.  At preparation time those
-ranges are resolved through the current native lineage, so the read always
-targets the authoritative inode and offset for that snapshot generation.
-Linux remains responsible for page-cache sharing and replacement.
+Candidates come only from the current immutable RAM lineage. A short batch
+collects COLD snapshots that are about to be restored, resolves each GPA to its
+newest owning layer, and reads physical ranges in descending shared-benefit per
+new byte. Linux still owns page-cache residency and replacement.
 """
-
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
@@ -18,15 +17,8 @@ from threading import Condition, Event, Lock
 import time
 from typing import Any, Callable, Mapping
 
-
 MIB = 1024 * 1024
-
-
-@dataclass(frozen=True, slots=True)
-class HotRange:
-    gpa: int
-    length: int
-    score: float
+PAGE = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,38 +26,27 @@ class FileRange:
     path: Path
     offset: int
     length: int
-    score: float
     layer_index: int
 
 
-def _load_hotset(path: Path) -> tuple[dict[str, tuple[HotRange, ...]], str]:
-    raw = path.read_bytes()
-    try:
-        document = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid snapshot hotset manifest {path}: {exc}") from exc
-    if document.get("schema_version") != 1 or document.get("page_size") != 4096:
-        raise ValueError("snapshot hotset manifest requires schema_version=1 and page_size=4096")
-    roles = document.get("roles")
-    if not isinstance(roles, Mapping) or set(roles) != {"runtime", "tool"}:
-        raise ValueError("snapshot hotset manifest requires exactly runtime and tool roles")
-    result: dict[str, tuple[HotRange, ...]] = {}
-    for role, values in roles.items():
-        if not isinstance(values, list) or not values:
-            raise ValueError(f"snapshot hotset role {role} must contain ranges")
-        ranges = []
-        for value in values:
-            if not isinstance(value, Mapping):
-                raise ValueError(f"snapshot hotset role {role} contains a non-object range")
-            gpa, length, score = value.get("gpa"), value.get("length"), value.get("score")
-            if (type(gpa) is not int or type(length) is not int
-                    or gpa < 0 or length <= 0 or gpa % 4096 or length % 4096
-                    or isinstance(score, bool) or not isinstance(score, (int, float))
-                    or not 0 <= float(score) <= 1):
-                raise ValueError(f"snapshot hotset role {role} contains an invalid range")
-            ranges.append(HotRange(gpa, length, float(score)))
-        result[str(role)] = tuple(sorted(ranges, key=lambda item: (-item.score, item.gpa)))
-    return result, hashlib.sha256(raw).hexdigest()
+@dataclass(slots=True)
+class _BatchMember:
+    token: int
+    ranges: tuple[FileRange, ...]
+    metrics: dict[str, int]
+    cancel: Event
+    result: dict[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class _Batch:
+    batch_id: int
+    deadline: float
+    members: list[_BatchMember] = field(default_factory=list)
+    sealed: bool = False
+    leader: int | None = None
+    done: bool = False
+    error: BaseException | None = None
 
 
 def _layer_path(snapshot: Path, layer: Mapping[str, Any]) -> Path:
@@ -75,112 +56,169 @@ def _layer_path(snapshot: Path, layer: Mapping[str, Any]) -> Path:
     return Path(str(snapshot) + ".layers") / str(layer["name"])
 
 
-def resolve_hot_ranges(
-    snapshot: Path, hot_ranges: tuple[HotRange, ...], *,
-    byte_budget: int, max_ranges: int,
-) -> tuple[list[FileRange], dict[str, int]]:
-    """Resolve immutable GPA candidates to current lineage file ranges."""
+def _uncovered(start: int, stop: int, covered: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    result = []
+    cursor = start
+    for left, right in covered:
+        if right <= cursor:
+            continue
+        if left >= stop:
+            break
+        if left > cursor:
+            result.append((cursor, min(left, stop)))
+        cursor = max(cursor, right)
+        if cursor >= stop:
+            break
+    if cursor < stop:
+        result.append((cursor, stop))
+    return result
+
+
+def _cover(covered: list[tuple[int, int]], start: int, stop: int) -> None:
+    merged: list[list[int]] = []
+    for left, right in sorted((*covered, (start, stop))):
+        if not merged or left > merged[-1][1]:
+            merged.append([left, right])
+        else:
+            merged[-1][1] = max(merged[-1][1], right)
+    covered[:] = [(left, right) for left, right in merged]
+
+
+def resolve_lineage_ranges(
+    snapshot: Path, *, chunk_bytes: int,
+) -> tuple[tuple[FileRange, ...], dict[str, int]]:
+    """Return only authoritative physical chunks from the current lineage."""
     sidecar = Path(str(snapshot) + ".lineage.json")
     document = json.loads(sidecar.read_text(encoding="utf-8"))
-    if document.get("schema_version") not in {1, 2}:
-        raise RuntimeError(f"invalid native RAM lineage for page prefetch: {sidecar}")
-    fragments: list[FileRange] = []
-    candidate_bytes = sum(item.length for item in hot_ranges)
-    for layer_index, layer in enumerate(document.get("layers") or []):
+    logical = document.get("logical_bytes")
+    layers = document.get("layers")
+    if (document.get("schema_version") not in {1, 2}
+            or type(logical) is not int or logical <= 0
+            or not isinstance(layers, list) or not layers):
+        raise RuntimeError(f"invalid native RAM lineage for page preparation: {sidecar}")
+    if chunk_bytes < PAGE or chunk_bytes % PAGE:
+        raise ValueError("snapshot page candidate chunk must be 4 KiB aligned")
+
+    covered: list[tuple[int, int]] = []
+    authoritative: list[FileRange] = []
+    listed_bytes = 0
+    stale_bytes_excluded = 0
+    for layer_index in range(len(layers) - 1, -1, -1):
+        layer = layers[layer_index]
         if not isinstance(layer, Mapping):
-            continue
+            raise RuntimeError(f"invalid lineage layer in {sidecar}")
         path = _layer_path(snapshot, layer)
         stat = path.stat()
-        logical = int(document.get("logical_bytes") or 0)
-        if path.is_symlink() or logical <= 0 or stat.st_size != logical:
-            raise RuntimeError(f"missing or truncated lineage layer for page prefetch: {path}")
-        owned = sorted(
-            (
-                int(item["gpa"]), int(item["offset"]), int(item["length"])
-            )
-            for item in layer.get("ranges") or []
-            if isinstance(item, Mapping)
-        )
-        for hot in hot_ranges:
-            hot_end = hot.gpa + hot.length
-            for gpa, offset, length in owned:
-                end = gpa + length
-                if end <= hot.gpa:
-                    continue
-                if gpa >= hot_end:
-                    break
-                start = max(gpa, hot.gpa)
-                stop = min(end, hot_end)
-                if start < stop:
-                    fragments.append(FileRange(
-                        path=path,
-                        offset=offset + start - gpa,
-                        length=stop - start,
-                        score=hot.score,
-                        layer_index=layer_index,
-                    ))
+        if path.is_symlink() or stat.st_size != logical:
+            raise RuntimeError(f"missing or truncated lineage layer for page preparation: {path}")
+        owned = []
+        for item in layer.get("ranges") or []:
+            if not isinstance(item, Mapping):
+                raise RuntimeError(f"invalid lineage range in {sidecar}")
+            gpa, offset, length = item.get("gpa"), item.get("offset"), item.get("length")
+            if (type(gpa) is not int or type(offset) is not int or type(length) is not int
+                    or gpa < 0 or offset < 0 or length <= 0
+                    or gpa % PAGE or offset % PAGE or length % PAGE
+                    or gpa + length > logical or offset + length > logical):
+                raise RuntimeError(f"invalid or unaligned lineage range in {sidecar}")
+            owned.append((gpa, offset, length))
+        for gpa, offset, length in sorted(owned):
+            listed_bytes += length
+            current = _uncovered(gpa, gpa + length, covered)
+            stale_bytes_excluded += length - sum(right - left for left, right in current)
+            for left, right in current:
+                authoritative.append(FileRange(
+                    path, offset + left - gpa, right - left, layer_index,
+                ))
+            _cover(covered, gpa, gpa + length)
 
-    # One inode can have several hardlink names.  Keep one canonical read for
-    # each physical file range, then merge adjacent selected ranges.
-    unique: dict[tuple[int, int, int, int], FileRange] = {}
-    for item in fragments:
+    chunks: dict[tuple[int, int, int, int], FileRange] = {}
+    for item in authoritative:
+        position = item.offset
+        stop = item.offset + item.length
         stat = item.path.stat()
-        key = (stat.st_dev, stat.st_ino, item.offset, item.length)
-        previous = unique.get(key)
-        if previous is None or item.score > previous.score:
-            unique[key] = item
-    selected: list[FileRange] = []
-    remaining = byte_budget
-    for item in sorted(unique.values(), key=lambda value: (-value.score, -value.length, value.offset)):
-        if remaining <= 0:
+        while position < stop:
+            boundary = ((position // chunk_bytes) + 1) * chunk_bytes
+            length = min(stop, boundary) - position
+            candidate = FileRange(item.path, position, length, item.layer_index)
+            chunks.setdefault((stat.st_dev, stat.st_ino, position, length), candidate)
+            position += length
+    return tuple(chunks.values()), {
+        "lineage_listed_bytes": listed_bytes,
+        "authoritative_bytes": sum(item.length for item in authoritative),
+        "stale_version_bytes_excluded": stale_bytes_excluded,
+        "authoritative_fragment_count": len(authoritative),
+        "physical_candidate_count": len(chunks),
+        "physical_candidate_bytes": sum(item.length for item in chunks.values()),
+    }
+
+
+def _physical_key(item: FileRange) -> tuple[int, int, int, int]:
+    stat = item.path.stat()
+    return stat.st_dev, stat.st_ino, item.offset, item.length
+
+
+def _stable_order(key: tuple[int, int, int, int]) -> bytes:
+    return hashlib.blake2b(":".join(map(str, key)).encode(), digest_size=16).digest()
+
+
+def _pread(fd: int, amount: int, offset: int) -> bytes:
+    if hasattr(os, "pread"):
+        return os.pread(fd, amount, offset)
+    os.lseek(fd, offset, os.SEEK_SET)
+    return os.read(fd, amount)
+
+
+def select_shared_ranges(
+    members: Mapping[int, tuple[FileRange, ...]], *, byte_budget: int,
+    max_ranges: int,
+) -> tuple[list[tuple[FileRange, tuple[int, ...]]], dict[int, dict[str, int]]]:
+    """Select a task-neutral physical working set for a waiter batch."""
+    candidates: dict[tuple[int, int, int, int], FileRange] = {}
+    waiters: dict[tuple[int, int, int, int], set[int]] = {}
+    for token, ranges in members.items():
+        for item in ranges:
+            key = _physical_key(item)
+            candidates.setdefault(key, item)
+            waiters.setdefault(key, set()).add(token)
+    usage = {token: 0 for token in members}
+    counts = {token: 0 for token in members}
+    selected: list[tuple[FileRange, tuple[int, ...]]] = []
+    ordered = sorted(
+        candidates,
+        key=lambda key: (-len(waiters[key]) / key[3], _stable_order(key)),
+    )
+    for key in ordered:
+        item = candidates[key]
+        beneficiaries = tuple(sorted(
+            token for token in waiters[key]
+            if usage[token] + item.length <= byte_budget and counts[token] < max_ranges
+        ))
+        if not beneficiaries:
+            continue
+        selected.append((item, beneficiaries))
+        for token in beneficiaries:
+            usage[token] += item.length
+            counts[token] += 1
+        if all(usage[token] >= byte_budget or counts[token] >= max_ranges for token in members):
             break
-        length = min(item.length, remaining)
-        length -= length % 4096
-        if length:
-            selected.append(FileRange(
-                item.path, item.offset, length, item.score, item.layer_index,
-            ))
-            remaining -= length
-
-    by_inode: dict[tuple[int, int], list[FileRange]] = {}
-    for item in selected:
-        stat = item.path.stat()
-        by_inode.setdefault((stat.st_dev, stat.st_ino), []).append(item)
-    merged: list[FileRange] = []
-    for values in by_inode.values():
-        values.sort(key=lambda item: item.offset)
-        current = values[0]
-        for item in values[1:]:
-            current_end = current.offset + current.length
-            if item.offset <= current_end:
-                end = max(current_end, item.offset + item.length)
-                current = FileRange(
-                    current.path, current.offset, end - current.offset,
-                    max(current.score, item.score), current.layer_index,
-                )
-            else:
-                merged.append(current)
-                current = item
-        merged.append(current)
-    merged.sort(key=lambda item: (-item.score, -item.length, str(item.path), item.offset))
-    if len(merged) > max_ranges:
-        merged = merged[:max_ranges]
-    return merged, {
-        "hotset_candidate_bytes": candidate_bytes,
-        "resolved_fragment_count": len(fragments),
-        "deduplicated_fragment_count": len(unique),
-        "selected_range_count": len(merged),
-        "selected_bytes": sum(item.length for item in merged),
+    maximum = max((len(tokens) for _item, tokens in selected), default=0)
+    return selected, {
+        token: {
+            "selected_bytes": usage[token],
+            "selected_range_count": counts[token],
+            "max_selected_shared_waiters": maximum,
+        }
+        for token in members
     }
 
 
 class SnapshotPagePrefetchController:
-    """Arm-wide bounded I/O executor used only by the enabled research arm."""
+    """Arm-wide bounded executor for shared-lineage page preparation."""
 
     def __init__(self, spec: Any, *, emit: Callable[[Mapping[str, Any]], None]) -> None:
         self.spec = spec
         self.emit = emit
-        self.hotsets, self.manifest_sha256 = _load_hotset(Path(spec.hotset_manifest))
         self._executor = ThreadPoolExecutor(
             max_workers=spec.io_workers, thread_name_prefix="snapshot-page-prefetch",
         )
@@ -190,9 +228,15 @@ class SnapshotPagePrefetchController:
         self._reserved_bytes = 0
         self._inflight_bytes = 0
         self._closed = False
+        self._closed_event = Event()
         self._error: BaseException | None = None
         self._rate_lock = Lock()
         self._next_io_time = time.monotonic()
+        self._batch_lock = Lock()
+        self._batch_ready = Condition(self._batch_lock)
+        self._open_batch: _Batch | None = None
+        self._next_batch_id = 1
+        self._next_member_token = 1
 
     def submit(
         self, lifecycle: Any, *, session_id: str, case_id: str, role: str,
@@ -210,14 +254,10 @@ class SnapshotPagePrefetchController:
             future = self._executor.submit(
                 self._run, key, lifecycle, cancel,
                 {
-                    "session_id": session_id,
-                    "case_id": case_id,
-                    "role": role,
-                    "request_id": request_id,
-                    "signal": signal.get("event"),
+                    "session_id": session_id, "case_id": case_id, "role": role,
+                    "request_id": request_id, "signal": signal.get("event"),
                     "signal_sequence": signal.get("signal_sequence"),
-                    "signal_age_seconds": float(age),
-                    "queued_unix_s": time.time(),
+                    "signal_age_seconds": float(age), "queued_unix_s": time.time(),
                     "queued_monotonic_s": time.monotonic(),
                 },
             )
@@ -230,7 +270,9 @@ class SnapshotPagePrefetchController:
             if pending is None:
                 return False
             pending[0].set()
-            return True
+        with self._batch_ready:
+            self._batch_ready.notify_all()
+        return True
 
     def _reserve_working_set(self, amount: int, cancel: Event) -> bool:
         with self._budget:
@@ -247,12 +289,12 @@ class SnapshotPagePrefetchController:
             self._reserved_bytes -= amount
             self._budget.notify_all()
 
-    def _reserve_io(self, amount: int, cancel: Event) -> bool:
+    def _reserve_io(self, amount: int) -> bool:
         with self._budget:
-            while (not self._closed and not cancel.is_set()
+            while (not self._closed
                    and self._inflight_bytes + amount > self.spec.max_inflight_mib * MIB):
                 self._budget.wait(timeout=0.05)
-            if self._closed or cancel.is_set():
+            if self._closed:
                 return False
             self._inflight_bytes += amount
             return True
@@ -267,15 +309,12 @@ class SnapshotPagePrefetchController:
         context: dict[str, Any],
     ) -> None:
         reservation = self.spec.per_vm_prefetch_mib * MIB
-        started_wall = time.time()
         started_mono = time.monotonic()
         started_cpu = time.thread_time()
         event: dict[str, Any] = {
-            "event": "snapshot_page_prepare",
-            **context,
-            "manifest_sha256": self.manifest_sha256,
-            "started_unix_s": started_wall,
-            "started_monotonic_s": started_mono,
+            "event": "snapshot_page_prepare", **context,
+            "candidate_source": self.spec.candidate_source,
+            "started_unix_s": time.time(), "started_monotonic_s": started_mono,
         }
         reserved = False
         try:
@@ -296,8 +335,7 @@ class SnapshotPagePrefetchController:
             if reserved:
                 self._release_working_set(reservation)
             event.update(
-                completed_unix_s=time.time(),
-                completed_monotonic_s=time.monotonic(),
+                completed_unix_s=time.time(), completed_monotonic_s=time.monotonic(),
                 service_seconds=time.monotonic() - started_mono,
                 thread_cpu_seconds=time.thread_time() - started_cpu,
             )
@@ -307,19 +345,90 @@ class SnapshotPagePrefetchController:
                 with self._lock:
                     self._pending.pop(key, None)
 
+    def _join_batch(
+        self, ranges: tuple[FileRange, ...], metrics: dict[str, int], cancel: Event,
+    ) -> tuple[_Batch, _BatchMember, bool]:
+        with self._batch_ready:
+            now = time.monotonic()
+            if self._open_batch is None or self._open_batch.sealed:
+                self._open_batch = _Batch(
+                    self._next_batch_id,
+                    now + self.spec.batch_window_milliseconds / 1000,
+                )
+                self._next_batch_id += 1
+            batch = self._open_batch
+            member = _BatchMember(self._next_member_token, ranges, metrics, cancel)
+            self._next_member_token += 1
+            batch.members.append(member)
+            if len(batch.members) >= self.spec.io_workers:
+                batch.sealed = True
+                batch.leader = member.token
+                self._open_batch = None
+                self._batch_ready.notify_all()
+            while not batch.sealed:
+                remaining = batch.deadline - time.monotonic()
+                if remaining <= 0:
+                    batch.sealed = True
+                    batch.leader = member.token
+                    self._open_batch = None
+                    self._batch_ready.notify_all()
+                    break
+                self._batch_ready.wait(timeout=remaining)
+            return batch, member, batch.leader == member.token
+
     def prefetch_snapshot(self, snapshot: Path, role: str, cancel: Event) -> dict[str, Any]:
-        ranges, metrics = resolve_hot_ranges(
-            snapshot, self.hotsets[role],
-            byte_budget=self.spec.per_vm_prefetch_mib * MIB,
+        del role  # Deliberately independent of task and VM role.
+        ranges, metrics = resolve_lineage_ranges(
+            snapshot, chunk_bytes=self.spec.candidate_chunk_kib * 1024,
+        )
+        batch, member, leader = self._join_batch(ranges, metrics, cancel)
+        if leader:
+            try:
+                self._execute_batch(batch)
+            except BaseException as exc:
+                with self._batch_ready:
+                    batch.error = exc
+                    batch.done = True
+                    self._batch_ready.notify_all()
+                raise
+        else:
+            with self._batch_ready:
+                while not batch.done and not cancel.is_set() and not self._closed:
+                    self._batch_ready.wait(timeout=0.01)
+                if not batch.done and cancel.is_set():
+                    return {
+                        **metrics, "batch_id": batch.batch_id,
+                        "batch_waiter_count": len(batch.members),
+                        "selected_bytes": 0, "selected_range_count": 0,
+                        "read_bytes": 0, "physical_read_bytes": 0,
+                        "cancelled_for_demand": True,
+                    }
+        if batch.error is not None:
+            raise batch.error
+        assert member.result is not None
+        return member.result
+
+    def _execute_batch(self, batch: _Batch) -> None:
+        members_by_token = {member.token: member for member in batch.members}
+        active = {
+            member.token: member.ranges for member in batch.members
+            if not member.cancel.is_set()
+        }
+        selected, per_member = select_shared_ranges(
+            active, byte_budget=self.spec.per_vm_prefetch_mib * MIB,
             max_ranges=self.spec.max_ranges_per_vm,
         )
-        read_bytes = 0
-        read_ranges = 0
-        cancelled = False
-        for item in ranges:
-            if cancel.is_set():
-                cancelled = True
-                break
+        read_by_member = {member.token: 0 for member in batch.members}
+        ranges_by_member = {member.token: 0 for member in batch.members}
+        physical_read_bytes = 0
+        physical_read_ranges = 0
+        for item, beneficiaries in selected:
+            current = tuple(
+                token for token in beneficiaries
+                if not members_by_token[token].cancel.is_set()
+            )
+            if not current or self._closed:
+                continue
             fd = os.open(item.path, os.O_RDONLY)
             try:
                 if hasattr(os, "posix_fadvise"):
@@ -329,48 +438,61 @@ class SnapshotPagePrefetchController:
                     )
                 position = item.offset
                 stop = item.offset + item.length
-                while position < stop:
-                    if cancel.is_set():
-                        cancelled = True
-                        break
+                completed = 0
+                while position < stop and not self._closed:
                     amount = min(MIB, stop - position)
-                    if not self._throttle(amount, cancel):
-                        cancelled = True
-                        break
-                    if not self._reserve_io(amount, cancel):
-                        cancelled = True
+                    if not self._throttle(amount) or not self._reserve_io(amount):
                         break
                     try:
-                        data = os.pread(fd, amount, position)
+                        data = _pread(fd, amount, position)
                     finally:
                         self._release_io(amount)
                     if len(data) != amount:
                         raise RuntimeError(
-                            f"short snapshot page prefetch read from {item.path}: "
+                            f"short snapshot page preparation read from {item.path}: "
                             f"expected {amount}, got {len(data)}"
                         )
-                    read_bytes += len(data)
+                    physical_read_bytes += len(data)
+                    completed += len(data)
                     position += len(data)
-                read_ranges += int(position > item.offset)
+                if completed:
+                    physical_read_ranges += 1
+                    for token in current:
+                        read_by_member[token] += completed
+                        ranges_by_member[token] += 1
             finally:
                 os.close(fd)
-            if cancelled:
-                break
-        return {
-            **metrics,
-            "read_bytes": read_bytes,
-            "read_range_count": read_ranges,
-            "cancelled_for_demand": cancelled,
-        }
+        for member in batch.members:
+            chosen = per_member.get(member.token, {
+                "selected_bytes": 0, "selected_range_count": 0,
+                "max_selected_shared_waiters": 0,
+            })
+            member.result = {
+                **member.metrics, **chosen, "batch_id": batch.batch_id,
+                "batch_waiter_count": len(batch.members),
+                "read_bytes": read_by_member[member.token],
+                "read_range_count": ranges_by_member[member.token],
+                "physical_read_bytes": (
+                    physical_read_bytes if member.token == batch.leader else 0
+                ),
+                "physical_read_range_count": (
+                    physical_read_ranges if member.token == batch.leader else 0
+                ),
+                "batch_leader": member.token == batch.leader,
+                "cancelled_for_demand": member.cancel.is_set(),
+            }
+        with self._batch_ready:
+            batch.done = True
+            self._batch_ready.notify_all()
 
-    def _throttle(self, amount: int, cancel: Event) -> bool:
+    def _throttle(self, amount: int) -> bool:
         rate = self.spec.prefetch_bandwidth_mib_s * MIB
         with self._rate_lock:
             now = time.monotonic()
             start = max(now, self._next_io_time)
             self._next_io_time = start + amount / rate
             delay = start - now
-        return not delay or not cancel.wait(delay)
+        return not delay or not self._closed_event.wait(delay)
 
     def check(self) -> None:
         with self._lock:
@@ -381,9 +503,8 @@ class SnapshotPagePrefetchController:
     def metrics(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "manifest_sha256": self.manifest_sha256,
-                "pending": len(self._pending),
-                "reserved_bytes": self._reserved_bytes,
+                "candidate_source": self.spec.candidate_source,
+                "pending": len(self._pending), "reserved_bytes": self._reserved_bytes,
                 "inflight_bytes": self._inflight_bytes,
                 "failed": self._error is not None,
             }
@@ -391,8 +512,16 @@ class SnapshotPagePrefetchController:
     def close(self, *, wait: bool, cancel: bool = False) -> None:
         with self._budget:
             self._closed = True
+            self._closed_event.set()
             if cancel:
                 for event, _future in self._pending.values():
                     event.set()
             self._budget.notify_all()
+        with self._batch_ready:
+            if self._open_batch is not None and not self._open_batch.sealed:
+                self._open_batch.sealed = True
+                if self._open_batch.members:
+                    self._open_batch.leader = self._open_batch.members[-1].token
+                self._open_batch = None
+            self._batch_ready.notify_all()
         self._executor.shutdown(wait=wait, cancel_futures=cancel)

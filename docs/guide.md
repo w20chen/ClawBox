@@ -710,31 +710,40 @@ arrival when the kernel page-idle bitmap or pagemap access is unavailable. The
 result's `page-access` directory contains compressed exact per-page
 `accessed_windows` and `present_windows` arrays plus the lineage/range map.
 
-To run the bounded GPU-event page-preparation experiment, copy a frozen hotset
-manifest onto the experiment host and add:
+To run task-independent GPU-event page preparation, add:
 
 ```yaml
 execution:
   snapshot_page_management:
     mode: gpu_event
-    hotset_manifest: /absolute/path/hotset.json
+    candidate_source: shared_lineage
     trigger_event: prefill_start
     prefetch_budget_mib: 1024
     per_vm_prefetch_mib: 32
     max_inflight_mib: 128
     io_workers: 2
+    candidate_chunk_kib: 128
+    batch_window_milliseconds: 25
     prefetch_bandwidth_mib_s: 256
     max_ranges_per_vm: 512
     signal_max_age_seconds: 5
 ```
 
-The manifest contains guest-physical ranges. Each restore resolves them through
-that VM's current incremental lineage, so COLD/WARM movement and hard-linked
-ancestors do not stale the file mapping. This first version prepares COLD
-snapshots only: it expands the ordinary zstd-page snapshot early, preserves its
-compression-reuse manifest, and reads selected authoritative file ranges into
-the Linux page cache. WARM accounting and lifecycle state remain unchanged;
-demand restore cancels remaining range reads. Use a new run ID. This requires
+No case list, workload name, access profile, or generated hotset is used. The
+controller resolves each VM's current incremental lineage newest-first, removes
+ancestor page versions overwritten by a newer layer, and batches imminent COLD
+restores for 25 ms. Physical ranges are ranked by the number of waiting VMs that
+reference the same device/inode/offset divided by bytes newly read. Equal-value
+ranges use a deterministic hash order, avoiding a file-prefix bias. One physical
+read can therefore prepare all waiters sharing an immutable ancestor, while
+private deltas naturally rank lower.
+
+This mechanism expands the ordinary zstd-page snapshot early, preserves its
+compression-reuse manifest, and reads the bounded selection into the Linux page
+cache. WARM accounting and lifecycle state remain unchanged; demand restore
+cancels that VM's remaining benefit. `per_vm_prefetch_mib` limits bytes selected
+for each waiter; `prefetch_budget_mib` and `max_inflight_mib` bound concurrent
+working set and reads. Use a new run ID. This requires
 `serving_sim`, GPU-aware agent-and-tool snapshot pause, tiered storage,
 incremental-COW, and zstd-page compression, but no image rebuild or host apply.
 Leave the block absent for the baseline and normal experiments.
