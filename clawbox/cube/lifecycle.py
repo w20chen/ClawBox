@@ -477,6 +477,13 @@ class CubeSandboxLifecycle:
                     self.snapshot_pool.abort(key)
                     self._pending_snapshot_keys.discard(key)
 
+    @staticmethod
+    def _is_pause_begin_connection_error(exc: BaseException) -> bool:
+        return (
+            getattr(exc, "status_code", None) == 130400
+            and "begin pause snapshot: invalid connection" in str(exc).lower()
+        )
+
     def checkpoint_and_evict(self, *, tier: SnapshotTier | None = None) -> float | None:
         """Ask CubeSandbox to snapshot the VM and destroy its live runtime.
 
@@ -577,11 +584,33 @@ class CubeSandboxLifecycle:
                         self._warm_paths.add(path)
                     with self._transfer("checkpoint", stage_seconds), self._measure_stage(stage_seconds, "api_checkpoint_s"):
                         pause_attempted = True
-                        manifest = self.client.pause_sandbox(
-                            self.sandbox, tier=tier.value,
-                            memory_snapshot_path=path, generation=self._generation,
-                            snapshot_mechanism=self.snapshot_mechanism,
-                        )
+                        try:
+                            manifest = self.client.pause_sandbox(
+                                self.sandbox, tier=tier.value,
+                                memory_snapshot_path=path, generation=self._generation,
+                                snapshot_mechanism=self.snapshot_mechanism,
+                            )
+                        except Exception as pause_error:
+                            # CubeMaster 130400 at BeginPause means no pause
+                            # was accepted.  Retry this idempotent begin once,
+                            # but only after the exact sandbox still reports
+                            # Running.  Reuse the generation and path so no
+                            # WARM reservation or lineage generation is lost.
+                            try:
+                                retry_state = self.client.get_sandbox_state(self.sandbox)
+                            except Exception:
+                                retry_state = None
+                            if not (
+                                self._is_pause_begin_connection_error(pause_error)
+                                and retry_state == "running"
+                            ):
+                                raise
+                            stage_seconds["pause_begin_retry_count"] = 1.0
+                            manifest = self.client.pause_sandbox(
+                                self.sandbox, tier=tier.value,
+                                memory_snapshot_path=path, generation=self._generation,
+                                snapshot_mechanism=self.snapshot_mechanism,
+                            )
                         pause_completed = True
                     manifest = self._annotate_snapshot_lineage(
                         manifest, key=key, parent=lineage_parent, tier=tier,
@@ -684,7 +713,7 @@ class CubeSandboxLifecycle:
                 # or for a failure after the manifest was already returned.
                 if (
                     pause_attempted and not pause_completed
-                    and getattr(exc, "status_code", None) is None
+                    and getattr(exc, "status_code", None) in {None, 130595}
                     and remote_state == "paused"
                     and key is not None and tier is not None and path is not None
                 ):
@@ -786,6 +815,17 @@ class CubeSandboxLifecycle:
                         # If either half of the proof is absent, retain the
                         # original failure and the conservative UNKNOWN state.
                         pass
+                if (
+                    self._is_pause_begin_connection_error(exc)
+                    and remote_state == "running"
+                    and key is not None
+                ):
+                    if self.snapshot_pool is not None:
+                        self.snapshot_pool.abort(key)
+                    self._pending_snapshot_keys.discard(key)
+                    if path is not None:
+                        self._warm_paths.discard(path)
+                    self._generation -= 1
                 self._state = (before if not pause_attempted or remote_state == "running"
                                else SandboxState.UNKNOWN)
                 self._record(

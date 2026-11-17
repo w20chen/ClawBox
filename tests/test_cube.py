@@ -1064,6 +1064,197 @@ def test_checkpoint_reconciles_lost_response_from_complete_native_snapshot(tmp_p
     lifecycle.close()
 
 
+def test_checkpoint_reconciles_master_metadata_failure_after_completed_pause(tmp_path) -> None:
+    class MasterMetadataFailure(RuntimeError):
+        status_code = 130595
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(65536)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    pause = client.pause_sandbox
+
+    def fail_master_metadata_after_pause(sandbox, **kwargs):
+        pause(sandbox, **kwargs)
+        raise MasterMetadataFailure(
+            "pause ok on cubelet but master meta failed: invalid connection"
+        )
+
+    client.pause_sandbox = fail_master_metadata_after_pause
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+
+    assert lifecycle.state.value == "swapped"
+    assert pool.reserved_bytes == 0
+    assert pool.committed_bytes > 0
+    timing = lifecycle.timings[-1]
+    assert timing["snapshot_metrics"]["control_response_reconciled"] is True
+    lifecycle.restore()
+    snapshot = Path(timing["snapshot_path"])
+    (Path(str(snapshot) + ".layers") / "000000.mem").unlink()
+    Path(str(snapshot) + ".layers").rmdir()
+    Path(str(snapshot) + ".lineage.json").unlink()
+    snapshot.unlink()
+    lifecycle.close()
+
+
+@pytest.mark.parametrize("remote_state", ["running", None])
+def test_checkpoint_does_not_reconcile_master_metadata_failure_without_paused_proof(
+    tmp_path, remote_state,
+) -> None:
+    class MasterMetadataFailure(RuntimeError):
+        status_code = 130595
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(65536)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    client.get_sandbox_state = lambda _sandbox: remote_state
+
+    def fail_master_metadata(_sandbox, **_kwargs):
+        raise MasterMetadataFailure("master metadata failed")
+
+    client.pause_sandbox = fail_master_metadata
+    with pytest.raises(MasterMetadataFailure, match="metadata failed"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycle.state.value == (
+        "running" if remote_state == "running" else "unknown"
+    )
+    assert pool.reserved_bytes == 8192
+
+
+def test_checkpoint_does_not_reconcile_master_metadata_failure_without_snapshot_metadata(
+    tmp_path,
+) -> None:
+    class MasterMetadataFailure(RuntimeError):
+        status_code = 130595
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(65536)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+
+    def fail_without_snapshot(sandbox, **_kwargs):
+        sandbox.state = "paused"
+        raise MasterMetadataFailure("master metadata failed")
+
+    client.pause_sandbox = fail_without_snapshot
+    with pytest.raises(MasterMetadataFailure, match="metadata failed"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycle.state.value == "unknown"
+    assert pool.reserved_bytes == 8192
+
+
+def test_checkpoint_retries_begin_invalid_connection_once_when_still_running(tmp_path) -> None:
+    class BeginFailure(RuntimeError):
+        status_code = 130400
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=WarmSnapshotPool(65536), snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    pause = client.pause_sandbox
+    calls = []
+
+    def fail_once_then_pause(sandbox, **kwargs):
+        calls.append((kwargs["generation"], kwargs["memory_snapshot_path"]))
+        if len(calls) == 1:
+            raise BeginFailure("begin pause snapshot: invalid connection")
+        return pause(sandbox, **kwargs)
+
+    client.pause_sandbox = fail_once_then_pause
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+
+    assert lifecycle.state.value == "swapped"
+    assert len(calls) == 2 and calls[0] == calls[1]
+    timing = lifecycle.timings[-1]
+    assert timing["stage_seconds"]["pause_begin_retry_count"] == 1.0
+    lifecycle.restore()
+    snapshot = Path(timing["snapshot_path"])
+    (Path(str(snapshot) + ".layers") / "000000.mem").unlink()
+    Path(str(snapshot) + ".layers").rmdir()
+    Path(str(snapshot) + ".lineage.json").unlink()
+    snapshot.unlink()
+    lifecycle.close()
+
+
+def test_checkpoint_does_not_retry_begin_failure_when_remote_state_is_not_running(tmp_path) -> None:
+    class BeginFailure(RuntimeError):
+        status_code = 130400
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=WarmSnapshotPool(65536), snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    calls = []
+    client.get_sandbox_state = lambda _sandbox: "paused"
+
+    def fail_begin(_sandbox, **_kwargs):
+        calls.append(1)
+        raise BeginFailure("begin pause snapshot: invalid connection")
+
+    client.pause_sandbox = fail_begin
+    with pytest.raises(BeginFailure):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert calls == [1]
+    assert lifecycle.state.value == "unknown"
+
+
+def test_checkpoint_releases_generation_after_repeated_begin_failure(tmp_path) -> None:
+    class BeginFailure(RuntimeError):
+        status_code = 130400
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(65536)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    calls = []
+
+    def always_fail(_sandbox, **kwargs):
+        calls.append(kwargs["generation"])
+        raise BeginFailure("begin pause snapshot: invalid connection")
+
+    client.pause_sandbox = always_fail
+    with pytest.raises(BeginFailure):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert calls == [1, 1]
+    assert lifecycle.state.value == "running"
+    assert pool.reserved_bytes == 0
+
+
 def test_checkpoint_does_not_reconcile_server_timeout_as_completed_pause(tmp_path) -> None:
     class ServerTimeout(RuntimeError):
         status_code = 408

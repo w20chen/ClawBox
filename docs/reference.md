@@ -301,6 +301,7 @@ VM pool and writes a profile only after checks succeed.
 | `cube_scheduler_overcommit` | `null` | Map actual Cube `InstanceType` to positive `cpu_ratio` and `mem_ratio` |
 | `cube_scheduler_vm_count_ratio` | `null` | Positive VM-count quota multiplier by actual `InstanceType` |
 | `cube_master_log_level` | `null` | Preserve Cube logging; `debug`, `info`, `warn`, or `error`. `warn` avoids verbose inventory logs in large runs. |
+| `cube_master_db_timeout_seconds` | `null` | Preserve Cube's MySQL settings; explicit 5–300 seconds applies both read and write timeouts. Use a reviewed value such as 30 seconds when lifecycle SQL can exceed the upstream 5-second default under high concurrency. Requires idle-host `host apply`, which backs up `conf.yaml` and restarts CubeMaster; use a new run ID. |
 
 Cube's quotas cover configured VM resources and differ from ClawBox's measured
 admission limits. Preflight sums both VMs for each session's assigned case and

@@ -42,6 +42,17 @@ their settings; `null` leaves Cube's target unchanged. Apply a changed target
 on an idle host before launching a new run ID. No image rebuild or retraining
 is required.
 
+For high-concurrency lifecycle runs, set
+`cube_master_db_timeout_seconds: 30` in the reviewed host plan when the
+CubeMaster journal shows MySQL read/write operations crossing its default
+5-second timeout. Run `host check`, then `host apply` while the Cube VM pool is
+idle. Apply backs up `conf.yaml`, changes only the read/write timeouts, restarts
+CubeMaster when needed, and records the value in `host.json`. This prevents an
+already completed pause or restore metadata update from being reported as an
+invalid connection; it does not make slow SQL faster or change experiment CPU,
+memory, workload, templates, or replay timing. Use a new run ID; no image
+rebuild or predictor retraining is required.
+
 For subsequent kunpeng runs, retain the verified creation environment: official
 host kernel `6.6.0-145.1.28.165.oe2403sp1.aarch64`, the patched CubeSandbox IRQ
 route batching and requested legacy IRQFD activation, compatible registered

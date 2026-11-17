@@ -77,6 +77,7 @@ class HostConfig(BaseModel):
     cube_scheduler_overcommit: dict[str, CubeOvercommitRatio] | None = Field(default=None, min_length=1)
     cube_scheduler_vm_count_ratio: dict[str, float] | None = Field(default=None, min_length=1)
     cube_master_log_level: Literal["debug", "info", "warn", "error"] | None = None
+    cube_master_db_timeout_seconds: int | None = Field(default=None, ge=5, le=300)
     snapshot_compression_binary: str = "/usr/local/bin/clawbox-zstd-page-snapshot"
 
     @field_validator("cube_scheduler_vm_count_ratio")
@@ -451,6 +452,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
             values['cube_scheduler_vm_count_ratio'] = profile['cube_scheduler_vm_count_ratio']
         if profile.get('cube_master_log_level') is not None:
             values['cube_master_log_level'] = profile['cube_master_log_level']
+        if profile.get('cube_master_db_timeout_seconds') is not None:
+            values['cube_master_db_timeout_seconds'] = profile['cube_master_db_timeout_seconds']
         for target, source in (("local_gib", "local_memory_capacity_mib"),
                                ("low_gib", "local_memory_low_watermark_mib"),
                                ("high_gib", "local_memory_high_watermark_mib"),
@@ -548,6 +551,13 @@ def check(config: HostConfig) -> dict:
             'requested': config.cube_master_log_level,
             'scope': 'CubeMaster file logs; warnings and errors remain at warn',
         }, 'Verify CubeMaster conf.yaml is readable with sudo, or set cube_master_log_level: null to preserve it.')
+    if config.cube_master_db_timeout_seconds is not None:
+        from .cube_capacity import database_timeouts
+        probe('CubeMaster database I/O timeouts', lambda: {
+            'current': database_timeouts(),
+            'requested_seconds': config.cube_master_db_timeout_seconds,
+            'scope': 'CubeMaster MySQL read and write timeouts',
+        }, 'Verify CubeMaster conf.yaml is readable with sudo, or set cube_master_db_timeout_seconds: null to preserve it.')
     probe("Docker", lambda: _run("docker", "info", "--format", "{{.ServerVersion}}"),
           "Start Docker and enable this user's Docker access; docs/installation.md step 1.")
     for name in ("findmnt", "mount", "numactl", "systemctl"):
@@ -657,6 +667,11 @@ def apply(config: HostConfig, profile: Path) -> dict:
     if config.cube_master_log_level is not None:
         from .cube_capacity import apply_log_level
         restart_cubemaster = apply_log_level(config.cube_master_log_level) or restart_cubemaster
+    if config.cube_master_db_timeout_seconds is not None:
+        from .cube_capacity import apply_database_timeout
+        restart_cubemaster = apply_database_timeout(
+            config.cube_master_db_timeout_seconds
+        ) or restart_cubemaster
     if restart_cubemaster:
         lab.command('sudo', '-n', 'systemctl', 'restart', 'cube-sandbox-cubemaster', timeout=120)
     restart_cubelet = apply_cubelet_tap_pool(config)

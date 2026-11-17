@@ -19,6 +19,8 @@ from clawbox.experiments.host import HostConfig, apply, init_config, load_config
     {"cube_proxy_connect_timeout_seconds": 2},
     {"cube_proxy_connect_timeout_seconds": True},
     {"cubelet_tap_init_num": 0}, {"cubelet_tap_init_num": True},
+    {"cube_master_db_timeout_seconds": 4},
+    {"cube_master_db_timeout_seconds": True},
     {"snapshot_compression_binary": "clawbox-zstd-page-snapshot"},
 ])
 def test_invalid_host_plan_rejected(values):
@@ -214,6 +216,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
         "cube_proxy_connect_timeout_seconds": 30,
         "cubelet_tap_init_num": 1536,
         "cube_master_log_level": "warn",
+        "cube_master_db_timeout_seconds": 30,
     }))
     path = tmp_path / "host.yaml"
     init_config(path, original)
@@ -226,6 +229,26 @@ def test_profile_import_preserves_host_resources(tmp_path):
     assert config.cube_proxy_connect_timeout_seconds == 30
     assert config.cubelet_tap_init_num == 1536
     assert config.cube_master_log_level == "warn"
+    assert config.cube_master_db_timeout_seconds == 30
+
+
+def test_cube_master_database_timeout_is_explicit_and_idempotent(monkeypatch):
+    from clawbox.experiments import cube_capacity, host
+
+    current = {"read_timeout": 5, "write_timeout": 5}
+    writes = []
+
+    def run(*args):
+        writes.append(args)
+        current["read_timeout"] = current["write_timeout"] = int(args[-1])
+        return '{"changed": true}'
+
+    monkeypatch.setattr(cube_capacity, "database_timeouts", lambda: dict(current))
+    monkeypatch.setattr(host, "_run", run)
+    assert cube_capacity.apply_database_timeout(30)
+    assert not cube_capacity.apply_database_timeout(30)
+    assert current == {"read_timeout": 30, "write_timeout": 30}
+    assert len(writes) == 1
 
 
 def test_profile_import_supports_dense_host_without_warm_memory(tmp_path):

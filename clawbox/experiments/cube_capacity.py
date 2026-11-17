@@ -38,6 +38,18 @@ print(json.dumps(level.lower() if isinstance(level,str) else level))
     return json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG)))
 
 
+def database_timeouts() -> dict[str, int | None]:
+    """Read only CubeMaster's MySQL I/O timeouts; never expose credentials."""
+    from .host import _run
+    script = """
+import json,sys,yaml
+data=yaml.safe_load(open(sys.argv[1])) or {}
+db=data.get('instance_db_config') or {}
+print(json.dumps({k:db.get(k) for k in ('read_timeout','write_timeout')}))
+"""
+    return json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG)))
+
+
 def node_capacity(node: str) -> dict:
     url = 'http://127.0.0.1:8089/internal/node?' + urlencode({'host_id': node})
     with build_opener(ProxyHandler({})).open(url, timeout=10) as response:
@@ -207,4 +219,31 @@ print(json.dumps({'changed':changed}))
     result = json.loads(_run('sudo', '-n', sys.executable, '-c', script, str(CONFIG), level))
     if log_level() != level.lower():
         raise RuntimeError('CubeMaster log level was not saved; inspect configuration permissions')
+    return result['changed']
+
+
+def apply_database_timeout(seconds: int) -> bool:
+    """Set persistent MySQL read/write timeouts with a recoverable backup."""
+    from .host import _run
+    expected = {'read_timeout': seconds, 'write_timeout': seconds}
+    if database_timeouts() == expected:
+        return False
+    script = """
+import json,pathlib,shutil,sys,time,yaml
+p=pathlib.Path(sys.argv[1]); desired=int(sys.argv[2])
+data=yaml.safe_load(p.read_text()) or {}; db=data.setdefault('instance_db_config',{})
+changed=any(db.get(k) != desired for k in ('read_timeout','write_timeout'))
+if changed:
+    shutil.copy2(p,p.with_name(p.name+'.pre-clawbox-db-timeout-'+str(time.time_ns())))
+    db['read_timeout']=desired; db['write_timeout']=desired
+    p.write_text(yaml.safe_dump(data,sort_keys=False))
+print(json.dumps({'changed':changed}))
+"""
+    result = json.loads(_run(
+        'sudo', '-n', sys.executable, '-c', script, str(CONFIG), str(seconds),
+    ))
+    if database_timeouts() != expected:
+        raise RuntimeError(
+            'CubeMaster database timeouts were not saved; inspect configuration permissions'
+        )
     return result['changed']
