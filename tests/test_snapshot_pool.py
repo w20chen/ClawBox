@@ -13,6 +13,102 @@ def key(index: int) -> SnapshotKey:
     return SnapshotKey(f"session-{index}", "tool", 1)
 
 
+def test_cold_children_keep_one_physical_warm_charge_until_native_gc(tmp_path):
+    from clawbox.cube.snapshot import _allocated_bytes
+    layer = tmp_path / 'managed.mem'
+    layer.write_bytes(b'x' * 4096)
+    stat = layer.stat()
+    size = _allocated_bytes(layer, stat)
+    identity = f'{stat.st_dev}:{stat.st_ino}'
+    dependency = {'identity': identity, 'path': str(layer), 'allocated_bytes': size}
+    pool = WarmSnapshotPool(size * 3)
+    pool.reserve(key(1), size)
+    pool.commit(key(1), path=str(layer), logical_bytes=4096,
+                allocated_bytes=size, transferred_bytes=size,
+                owned_layer_identities=(identity,))
+    pool.retain_for_vm(key(1))
+    pool.commit_cold_dependencies([dependency], replaces=key(1))
+    assert pool.committed_bytes == pool.accounted_bytes == size
+    assert not pool.snapshot()['manifests']
+    # Another COLD child referencing the same physical layer adds no charge.
+    pool.commit_cold_dependencies([dependency])
+    assert pool.committed_bytes == size
+    with pytest.raises(WarmCapacityError):
+        pool.reserve(key(2), size * 3)
+    # Losing a logical owner alone cannot free physical capacity.
+    pool.commit_cold_dependencies([])
+    pool.refresh_managed_warm_layers()
+    assert pool.committed_bytes == size
+    layer.unlink()  # native GC after the final reference is removed
+    pool.refresh_managed_warm_layers()
+    assert pool.committed_bytes == pool.accounted_bytes == 0
+    pool.reserve(key(2), size * 3)
+
+
+def test_managed_warm_inode_is_not_counted_twice_with_an_owned_alias(tmp_path):
+    from clawbox.cube.snapshot import _allocated_bytes
+    layer = tmp_path / 'managed.mem'
+    layer.write_bytes(b'x' * 4096)
+    stat = layer.stat()
+    size = _allocated_bytes(layer, stat)
+    identity = f'{stat.st_dev}:{stat.st_ino}'
+    dependency = {'identity': identity, 'path': str(layer), 'allocated_bytes': size}
+    pool = WarmSnapshotPool(size * 3)
+    pool.reserve(key(1), size)
+    pool.commit(key(1), path=str(layer), logical_bytes=4096,
+                allocated_bytes=size, transferred_bytes=size,
+                owned_layer_identities=(identity,), managed_warm_layers=(dependency,))
+    assert pool.accounted_bytes == size
+    # Removing the owned alias does not free the managed ancestor.
+    pool.remove(key(1))
+    assert pool.accounted_bytes == size
+
+
+@pytest.mark.skipif(__import__('os').name != 'posix', reason='Linux hole punching')
+def test_shared_page_reclaim_updates_owned_and_managed_warm_capacity(tmp_path):
+    import ctypes
+    import os
+    from clawbox.cube.snapshot import _allocated_bytes
+    page = os.sysconf('SC_PAGE_SIZE')
+    layer = tmp_path / 'shared.mem'
+    layer.write_bytes(b'x' * (4 * page))
+    size = _allocated_bytes(layer)
+    stat = layer.stat()
+    identity = f'{stat.st_dev}:{stat.st_ino}'
+    pool = WarmSnapshotPool(16 * page)
+    for i in (1, 2):
+        pool.reserve(key(i), size)
+        pool.commit(key(i), path=str(layer), logical_bytes=4*page,
+                    allocated_bytes=size, transferred_bytes=size,
+                    owned_layer_identities=(identity,),
+                    owned_layer_files={identity: (str(layer), size)})
+    assert pool.committed_bytes == size
+    pool.commit_cold_dependencies([{'identity': identity, 'path': str(layer), 'allocated_bytes': size}])
+    assert pool.committed_bytes == size
+    libc = ctypes.CDLL(None, use_errno=True)
+    with layer.open('r+b') as stream:
+        assert libc.fallocate(stream.fileno(), 3, ctypes.c_longlong(page), ctypes.c_longlong(3*page)) == 0
+    actual = _allocated_bytes(layer)
+    assert actual == page
+    pool.refresh_managed_warm_layers()
+    assert pool.committed_bytes == pool.accounted_bytes == actual
+    pool.validate_expanded(key(1), actual)
+    # Refreshing physical usage must not bypass the existing growth budget.
+    with layer.open('r+b') as stream:
+        stream.seek(page)
+        stream.write(b'y' * page)
+    with pytest.raises(RuntimeError, match='exceeds runtime reserve'):
+        pool.refresh_managed_warm_layers()
+    with layer.open('r+b') as stream:
+        assert libc.fallocate(stream.fileno(), 3, ctypes.c_longlong(page), ctypes.c_longlong(page)) == 0
+    pool.remove(key(1))
+    pool.remove(key(2))
+    assert pool.committed_bytes == actual
+    layer.unlink()
+    pool.refresh_managed_warm_layers()
+    assert pool.accounted_bytes == 0
+
+
 def test_borrow_headroom_counts_all_shared_occupancy_and_rechecks_at_commit():
     pool = WarmSnapshotPool(100, borrow_capacity_bytes=60,
                             external_shared_live_bytes=10, external_warm_bytes=5)

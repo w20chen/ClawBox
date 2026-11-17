@@ -906,6 +906,72 @@ def test_incremental_lifecycle_events_expose_compact_cross_tier_lineage(tmp_path
     lifecycle.close()
 
 
+@pytest.mark.parametrize('return_to_warm', [False, True])
+def test_cold_lifecycle_retains_warm_ancestor_accounting(tmp_path, return_to_warm):
+    from clawbox.cube.snapshot import read_snapshot_metadata, _allocated_bytes
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(1024 * 1024)
+    warm = tmp_path / 'warm'
+    lifecycle = CubeSandboxLifecycle(
+        client, template='tpl', node_name='node-a', ownership=_owner(),
+        warm_snapshot_root=str(warm), cold_snapshot_root=str(tmp_path / 'cold'),
+        snapshot_pool=pool, snapshot_reservation_bytes=65536,
+    )
+    lifecycle.start()
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    first = Path(lifecycle.timings[-1]['snapshot_metrics']['memory_snapshot_path'])
+    lifecycle.restore()
+    managed = warm / 'layers' / 'ancestor' / '000000.mem'
+    managed.parent.mkdir(parents=True)
+    managed.hardlink_to(first)
+    inherited_bytes = _allocated_bytes(managed)
+    native_pause = client.pause_sandbox
+
+    def publish_child(sandbox, **kwargs):
+        result = dict(native_pause(sandbox, **kwargs))
+        head = Path(kwargs['memory_snapshot_path'])
+        directory = Path(str(head) + '.layers')
+        (directory / '000000.mem').rename(directory / '000001.mem')
+        sidecar = Path(str(head) + '.lineage.json')
+        document = json.loads(sidecar.read_text())
+        document.update(schema_version=2, full_base=False, layers=[
+            {'name': '000000.mem', 'managed': True, 'layer_id': 'ancestor',
+             'external_path': str(managed)},
+            {'name': '000001.mem'},
+        ])
+        sidecar.write_text(json.dumps(document))
+        if first.exists():
+            first.unlink()
+            Path(str(first) + '.lineage.json').unlink()
+            shutil.rmtree(Path(str(first) + '.layers'))
+        result.update(read_snapshot_metadata(str(head), require_lineage=True))
+        return result
+
+    client.pause_sandbox = publish_child
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.COLD)
+    assert pool.committed_bytes == inherited_bytes
+    assert not pool.snapshot()['manifests']
+    assert lifecycle.timings[-1]['snapshot_metrics']['lineage_layer_map'][0]['tier'] == 'warm'
+    lifecycle.restore()
+    assert pool.committed_bytes == inherited_bytes
+    if return_to_warm:
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+        own = lifecycle.timings[-1]['snapshot_metrics']['allocated_bytes']
+        assert pool.committed_bytes == own + inherited_bytes
+        lifecycle.restore()
+    native_kill = client.kill_sandbox
+
+    def kill_and_gc(sandbox):
+        native_kill(sandbox)
+        shutil.rmtree(warm / lifecycle.sandbox_id)
+        managed.unlink()
+
+    client.kill_sandbox = kill_and_gc
+    lifecycle.close()
+    assert pool.accounted_bytes == 0
+
+
 def test_incremental_lineage_labels_template_backing_separately(tmp_path) -> None:
     template = tmp_path / "template.mem"
     template.write_bytes(b"template")

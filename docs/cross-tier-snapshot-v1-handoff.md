@@ -31,7 +31,9 @@ ClawBox includes:
 CubeSandbox includes, through the reviewed patch set:
 
 - cross-tier COLD/WARM incremental inheritance and managed layer takeover;
-- managed layer final-reference GC and safe old-layer reclamation;
+- cleanup-triggered page-range reclamation across shared WARM/COLD ancestors,
+  plus managed-file deletion after the final reference;
+- ordered publication/GC locks and allocation refresh after hole punching;
 - crash rollback record persistence and lifecycle;
 - API, protobuf, Cubelet, SDK, and DB migration support;
 - fail-closed crash rollback when runtime state cannot be determined.
@@ -41,7 +43,7 @@ CubeSandbox includes, through the reviewed patch set:
 The patchset is `deploy/cubesandbox/cross-tier-managed-lineage.patch`.
 
 ```text
-SHA256 929f0d28d94e01c0e29d9a9c687c25978dd1503981d97f94197b96a3461d7fdc
+SHA256 bdb93f30aec35c733d96bccaed852d1ca2aa4a28d021dab77249b38e46f0df2f
 ```
 
 ## Source mapping
@@ -253,10 +255,12 @@ successors were incremental. This is x86 evidence only.
 
 ## Known limits
 
-- With cross-tier enabled, WARM-to-COLD retains durable shared layers and
-  materializes only inherited tmpfs ranges on SSD. Missing parents or invalid
-  dirty-tracking history still require a full base. Validate zero updates,
-  durable-layer inode sharing, and restore after removing the WARM parent.
+- With cross-tier enabled, both directions retain shared ancestor layers on
+  their original tier. COLD successors can depend on managed tmpfs layers and
+  do not survive loss of those files. Missing parents or invalid dirty-tracking
+  history still require a full base. Validate zero updates, ancestor inode
+  sharing, and restore after retiring the WARM parent package while retaining
+  its managed layers.
 - VMA pressure is bounded proactively, but the mmap/copy decision must be
   measured on ARM64 using the target kernel and page size.
 - S1 forced/low-budget copy, ARM64 qualification, low-concurrency smoke, and

@@ -142,6 +142,24 @@ checks matching large file-backed mappings in two VMMs, supported by
 Deduplicate layer device/inode identities when computing
 storage totals.
 
+Cross-tier inheritance preserves ancestors on their original tier in both
+directions. COLD successors may depend on managed WARM layers; creating a COLD
+successor does not make that chain durable or release those DRAM bytes. The
+pool charges each managed WARM inode once, including references from COLD
+generations, refreshing physical allocation after native GC punches dead pages
+or removes a file. These shared ancestors are not ordinary
+generation-level spill candidates.
+
+Checkpoint cleanup scans the page ranges retained by every published lineage
+and rollback record in both tier roots. References are combined by device/inode,
+so shared ordinary hardlinks and managed ancestors have the same page lifetime.
+Unreferenced allocated ranges are hole-punched; pending publishers, unknown
+hardlinks, and immutable templates prevent reclamation. Running VMs retain their
+source checkpoints. Publication and the complete scan/reclaim operation acquire
+the same ordered root locks; relocation copies outside the locks and publishes
+before removing its source. This provides page-reference reclamation at cleanup,
+but scanning cost grows with all stored metadata rather than only changed pages.
+
 ## PMU measurements
 
 The Tool collector records cycles, instructions, LLC read accesses, and LLC read

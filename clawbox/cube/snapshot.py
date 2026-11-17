@@ -62,8 +62,8 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
     if type(logical) is not int or logical <= 0:
         raise RuntimeError("invalid native RAM logical size")
     # External layers are immutable dependencies. Legacy schema 1 has only a
-    # template base at index zero; schema 2 may also reference managed COLD
-    # layers at any position. None are charged to the WARM snapshot pool.
+    # template base at index zero; schema 2 may reference managed layers on
+    # either tier. The lifecycle charges WARM dependencies separately by inode.
     owned_files = [sidecar, memory]
     layer_files = []
     external_base_identity = None
@@ -104,6 +104,7 @@ def read_snapshot_metadata(path: str, *, require_lineage: bool = False) -> dict[
         allocated_bytes = _allocated_bytes(file, stat)
         layer_allocations.append({
             "layer_index": index,
+            "path": str(file),
             "identity": identity,
             "allocated_bytes": allocated_bytes,
             "external": external_path is not None,

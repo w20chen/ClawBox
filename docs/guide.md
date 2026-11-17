@@ -149,7 +149,19 @@ sudo bash scripts/install-incremental-cubesandbox.sh --lifecycle-components \
 
 The installer preserves backups, updates Cubelet/Shim/runtime and the Zstd
 helper, and enables managed cross-tier lineage. COLD-to-WARM reuses SSD layers;
-WARM-to-COLD copies only retained tmpfs ranges while preserving SSD sharing.
+WARM-to-COLD also shares ancestors in place: retained tmpfs pages stay in WARM,
+and only newly modified pages are written to COLD. A COLD generation can therefore
+depend on WARM files and cannot survive their loss. Those managed WARM layers
+remain charged to the shared-memory pool for their actual allocated bytes, even
+after the original snapshot package has been retired. Retiring or deleting a
+checkpoint triggers a scan of both tiers. It frees pages no remaining checkpoint
+or rollback record references, including pages inside shared ancestor files;
+the last reference disappearing allows the managed file itself to be removed.
+A running VM keeps its source checkpoint protected until it is replaced.
+Reclamation runs during cleanup, not on every guest write or a background timer.
+Pending publication and unregistered hardlinks conservatively retain pages.
+The WARM pool refreshes freed-space accounting on its next observation (ordinary
+refreshes are limited to once per second).
 It requires separate WARM
 tmpfs and COLD disk filesystems, no live VMs, and no active base cache. It
 restarts Cubelet when its binary or settings change; rebuilding the prepared

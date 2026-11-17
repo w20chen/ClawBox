@@ -664,11 +664,16 @@ class CubeSandboxLifecycle:
                                 int(manifest["logical_bytes"])
                             ),
                             **self._pool_allocation_fields(manifest),
+                            **self._pool_lineage_fields(manifest),
                         )
                         self._pending_snapshot_keys.discard(key)
-                    elif predecessor is not None and self.snapshot_pool is not None:
-                        self._verify_warm_files_removed()
-                        self.snapshot_pool.remove(predecessor)
+                    elif self.snapshot_pool is not None:
+                        if predecessor is not None:
+                            self._verify_warm_files_removed()
+                        self.snapshot_pool.commit_cold_dependencies(
+                            self._pool_lineage_fields(manifest)['managed_warm_layers'],
+                            replaces=predecessor,
+                        )
                     self._snapshot_key = key
                     self._snapshot_parent_key = lineage_parent
                     self._replica_memory_path = path
@@ -784,11 +789,16 @@ class CubeSandboxLifecycle:
                                     int(manifest["logical_bytes"])
                                 ),
                                 **self._pool_allocation_fields(manifest),
+                                **self._pool_lineage_fields(manifest),
                             )
                             self._pending_snapshot_keys.discard(key)
-                        elif predecessor is not None and self.snapshot_pool is not None:
-                            self._verify_warm_files_removed()
-                            self.snapshot_pool.remove(predecessor)
+                        elif self.snapshot_pool is not None:
+                            if predecessor is not None:
+                                self._verify_warm_files_removed()
+                            self.snapshot_pool.commit_cold_dependencies(
+                                self._pool_lineage_fields(manifest)['managed_warm_layers'],
+                                replaces=predecessor,
+                            )
                         self._snapshot_key = key
                         self._snapshot_parent_key = lineage_parent
                         self._snapshot_tier = tier
@@ -923,6 +933,24 @@ class CubeSandboxLifecycle:
                     shutil.rmtree(retired + suffix)
         self._peer_retired_warm_paths.clear()
 
+    def _pool_lineage_fields(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        owned_files = {}
+        for item in manifest.get('layer_allocations') or []:
+            if item.get('external') or not item.get('path'):
+                continue
+            path = Path(item['path'])
+            if path.exists():  # exclusively owned compressed layers have no raw file
+                stat = path.stat()
+                owned_files[f'{stat.st_dev}:{stat.st_ino}'] = (str(path), int(item['allocated_bytes']))
+        return {
+            'owned_layer_identities': tuple(owned_files),
+            'owned_layer_files': owned_files,
+            'managed_warm_layers': tuple(
+                item for item in manifest.get('external_layer_allocations') or []
+                if item.get('managed') and self._lineage_path_tier(item.get('path')) == 'warm'
+            ),
+        }
+
     @staticmethod
     def _pool_allocation_fields(manifest: Mapping[str, Any]) -> dict[str, Any]:
         compression = manifest.get("compression")
@@ -1006,6 +1034,7 @@ class CubeSandboxLifecycle:
                                 owned_allocated_bytes=int(
                                     raw_metrics.get("owned_allocated_bytes") or 0
                                 ),
+                                owned_layer_files=self._pool_lineage_fields(raw_metrics)['owned_layer_files'],
                             )
                 with self._transfer("spill"):
                     self.client.relocate_snapshot(
@@ -1311,6 +1340,7 @@ class CubeSandboxLifecycle:
                                     owned_allocated_bytes=int(
                                         raw_metadata.get("owned_allocated_bytes") or 0
                                     ),
+                                    owned_layer_files=self._pool_lineage_fields(raw_metadata)['owned_layer_files'],
                                 )
                                 self._capture_storage(
                                     storage_observations, "after_raw_accounting",
@@ -1678,6 +1708,7 @@ class CubeSandboxLifecycle:
                     for key in self._pending_snapshot_keys:
                         self.snapshot_pool.abort(key)
                     self._pending_snapshot_keys.clear()
+                    self.snapshot_pool.refresh_managed_warm_layers()
                 self._snapshot_key = None
                 self._compression_reuse_manifest = None
                 self.sandbox = None

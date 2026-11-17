@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import time
+import os
+from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from threading import BoundedSemaphore, Condition, Lock, RLock
 
 from .spec_types import SnapshotTier
@@ -55,6 +57,8 @@ class SnapshotManifest:
     owned_logical_bytes: int = 0
     owned_allocated_bytes: int = 0
     expanded: bool = True
+    owned_layer_identities: tuple[str, ...] = ()
+    owned_layer_files: dict[str, tuple[str, int]] = field(default_factory=dict)
 
 
 class WarmSnapshotPool:
@@ -135,6 +139,10 @@ class WarmSnapshotPool:
         # file read and lock acquisition per borrowed VM.
         self._unobserved_borrows: set[str] = set()
         self._manifests: dict[SnapshotKey, SnapshotManifest] = {}
+        # Managed ancestors can remain on tmpfs even when their child is COLD.
+        # Native GC owns their lifetime; charge physical inodes until removed.
+        self._managed_warm_layers: dict[str, tuple[str, int]] = {}
+        self._managed_warm_refresh_at = float('-inf')
         self._spillers: dict[SnapshotKey, Callable[[SnapshotManifest], None]] = {}
         self._warm_admissions = 0
         self._value_rejections = 0
@@ -193,7 +201,93 @@ class WarmSnapshotPool:
     @property
     def committed_bytes(self) -> int:
         with self._lock:
-            return sum(item.allocated_bytes for item in self._manifests.values())
+            return self._committed_bytes_locked()
+
+    def _track_managed_warm_layers_locked(self, layers) -> None:
+        from clawbox.cube.snapshot import _allocated_bytes
+        for layer in layers:
+            path = Path(layer['path'])
+            stat = path.stat()
+            if f'{stat.st_dev}:{stat.st_ino}' != layer['identity']:
+                raise RuntimeError(f'managed WARM layer identity changed: {path}')
+            self._managed_warm_layers[layer['identity']] = (
+                str(path), _allocated_bytes(path, stat),
+            )
+
+    def _refresh_owned_layers_locked(self, item: SnapshotManifest) -> None:
+        from clawbox.cube.snapshot import _allocated_bytes
+        for identity, (path, previous) in list(item.owned_layer_files.items()):
+            try:
+                stat = os.stat(path)
+            except FileNotFoundError:
+                continue  # predecessor retirement releases its manifest atomically
+            if f'{stat.st_dev}:{stat.st_ino}' != identity:
+                raise RuntimeError(f'owned WARM layer identity changed: {path}')
+            allocated = _allocated_bytes(Path(path), stat)
+            change = allocated - previous
+            if change > item.runtime_reserved_bytes:
+                raise RuntimeError(
+                    f'owned snapshot growth {change} exceeds runtime reserve '
+                    f'{item.runtime_reserved_bytes}: {item.key}'
+                )
+            item.allocated_bytes += change
+            item.raw_allocated_bytes += change
+            if not item.expanded:
+                item.compressed_allocated_bytes += change
+            if change > 0:
+                item.runtime_reserved_bytes -= change
+            item.owned_allocated_bytes = max(0, item.owned_allocated_bytes + change)
+            item.owned_layer_files[identity] = (path, allocated)
+
+    def refresh_managed_warm_layers(self, *, force: bool = True) -> None:
+        """Release charges only after native GC has actually removed a layer."""
+        with self._lock:
+            now = self._clock()
+            if not force and now - self._managed_warm_refresh_at < 1.0:
+                return
+            for item in self._manifests.values():
+                self._refresh_owned_layers_locked(item)
+            for identity, (path, _) in list(self._managed_warm_layers.items()):
+                try:
+                    stat = os.stat(path)
+                except FileNotFoundError:
+                    del self._managed_warm_layers[identity]
+                    continue
+                if f'{stat.st_dev}:{stat.st_ino}' != identity:
+                    raise RuntimeError(f'managed WARM layer identity changed: {path}')
+                from clawbox.cube.snapshot import _allocated_bytes
+                self._managed_warm_layers[identity] = (path, _allocated_bytes(Path(path), stat))
+            self._managed_warm_refresh_at = now
+            self._changed.notify_all()
+
+    def _managed_warm_bytes_locked(self) -> int:
+        owned = {identity for item in self._manifests.values()
+                 for identity in item.owned_layer_identities}
+        return sum(size for identity, (_, size) in self._managed_warm_layers.items()
+                   if identity not in owned)
+
+    def _committed_bytes_locked(self) -> int:
+        total = sum(item.allocated_bytes for item in self._manifests.values())
+        seen = set()
+        for item in self._manifests.values():
+            for identity, (_, allocated) in item.owned_layer_files.items():
+                if identity in seen:
+                    total -= allocated
+                seen.add(identity)
+        return total + self._managed_warm_bytes_locked()
+
+    def commit_cold_dependencies(self, layers, *, replaces: SnapshotKey | None = None) -> None:
+        """Atomically hand a retired WARM generation's charge to its ancestors."""
+        with self._lock:
+            if replaces is not None:
+                item = self._manifests[replaces]
+                if item.pinned:
+                    raise RuntimeError(f'cannot replace pinned snapshot: {replaces}')
+            self._track_managed_warm_layers_locked(layers)
+            if replaces is not None:
+                self.remove(replaces)
+            self.refresh_managed_warm_layers(force=False)
+            self._assert_capacity_locked()
 
     @property
     def borrowed_bytes(self) -> int:
@@ -311,7 +405,10 @@ class WarmSnapshotPool:
                expansion_allocated_bytes: int = 0,
                owned_logical_bytes: int = 0,
                owned_allocated_bytes: int = 0,
-               expanded: bool | None = None) -> SnapshotManifest:
+               expanded: bool | None = None,
+               owned_layer_identities: tuple[str, ...] = (),
+               owned_layer_files: dict[str, tuple[str, int]] | None = None,
+               managed_warm_layers: tuple[dict, ...] = ()) -> SnapshotManifest:
         if logical_bytes < 0 or allocated_bytes < 0 or (
             transferred_bytes is not None and transferred_bytes < 0
         ):
@@ -360,6 +457,8 @@ class WarmSnapshotPool:
                 owned_logical_bytes=owned_logical_bytes,
                 owned_allocated_bytes=owned_allocated_bytes,
                 expanded=expanded,
+                owned_layer_identities=owned_layer_identities,
+                owned_layer_files=dict(owned_layer_files or {}),
             )
             self._manifests[key] = manifest
             if predecessor is not None:
@@ -367,6 +466,9 @@ class WarmSnapshotPool:
                 self._spillers.pop(replaces, None)
             if spiller is not None:
                 self._spillers[key] = spiller
+            self._track_managed_warm_layers_locked(managed_warm_layers)
+            self._refresh_owned_layers_locked(manifest)
+            self.refresh_managed_warm_layers(force=False)
             self._assert_capacity_locked()
             self._changed.notify_all()
             return manifest
@@ -453,6 +555,7 @@ class WarmSnapshotPool:
         runtime_upper_bound_bytes: int = 0,
         owned_allocated_bytes: int = 0,
         retained_by_vm: bool = False,
+        owned_layer_files: dict[str, tuple[str, int]] | None = None,
     ) -> SnapshotManifest:
         """Replace expansion reservation and compressed charge with raw bytes."""
         if raw_allocated_bytes < 0:
@@ -483,6 +586,9 @@ class WarmSnapshotPool:
             item.runtime_reserved_bytes = runtime_reserved
             item.expanded = True
             item.retained_by_vm = retained_by_vm
+            if owned_layer_files is not None:
+                item.owned_layer_files = dict(owned_layer_files)
+                item.owned_layer_identities = tuple(owned_layer_files)
             self._assert_capacity_locked()
             self._changed.notify_all()
             return item
@@ -495,6 +601,7 @@ class WarmSnapshotPool:
                 raise RuntimeError(f"snapshot expansion is still incomplete: {key}")
             if item.expansion_allocated_bytes != 0:
                 raise RuntimeError(f"snapshot expansion reservation did not converge: {key}")
+            self._refresh_owned_layers_locked(item)
             if raw_allocated_bytes < item.allocated_bytes:
                 raise RuntimeError(
                     f"expanded snapshot allocation changed for {key}: "
@@ -711,10 +818,21 @@ class WarmSnapshotPool:
             )
             victims: list[SnapshotManifest] = []
             reclaimed = 0
+            remaining_owners: dict[str, int] = {}
+            for item in self._manifests.values():
+                for identity in item.owned_layer_identities:
+                    remaining_owners[identity] = remaining_owners.get(identity, 0) + 1
             for item in candidates:
                 item.pinned += 1
                 victims.append(item)
-                reclaimed += item.allocated_bytes
+                retained = 0
+                for identity in item.owned_layer_identities:
+                    remaining_owners[identity] -= 1
+                    if identity in self._managed_warm_layers:
+                        retained += self._managed_warm_layers[identity][1]
+                    elif remaining_owners[identity] and identity in item.owned_layer_files:
+                        retained += item.owned_layer_files[identity][1]
+                reclaimed += max(0, item.allocated_bytes - retained)
                 if reclaimed >= deficit:
                     break
             if reclaimed < deficit:
@@ -734,12 +852,14 @@ class WarmSnapshotPool:
     def usage_snapshot(self) -> dict[str, int]:
         """Totals for periodic evidence without serializing stored manifests."""
         with self._lock:
+            self.refresh_managed_warm_layers(force=False)
             return {
                 "reserved_bytes": sum(self._reservations.values()),
                 "expansion_reserved_bytes": sum(
                     self._expansion_reservations.values()
                 ),
-                "committed_bytes": sum(item.allocated_bytes for item in self._manifests.values()),
+                "committed_bytes": self._committed_bytes_locked(),
+                "managed_warm_bytes": self._managed_warm_bytes_locked(),
                 "borrowed_bytes": sum(self._borrow_reservations.values()),
                 "borrow_accounted_bytes": self._borrow_charge_locked(),
                 "accounted_bytes": self._usage_locked(),
@@ -751,6 +871,7 @@ class WarmSnapshotPool:
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
+            self.refresh_managed_warm_layers(force=False)
             return {
                 "capacity_bytes": self.capacity_bytes,
                 "external_occupied_bytes": self.external_occupied_bytes,
@@ -768,9 +889,8 @@ class WarmSnapshotPool:
                 "expansion_reserved_bytes": sum(
                     self._expansion_reservations.values()
                 ),
-                "committed_bytes": sum(
-                    item.allocated_bytes for item in self._manifests.values()
-                ),
+                "committed_bytes": self._committed_bytes_locked(),
+                "managed_warm_bytes": self._managed_warm_bytes_locked(),
                 "borrow_capacity_bytes": self.borrow_capacity_bytes,
                 "borrow_resident_headroom_bytes": self.borrow_resident_headroom_bytes,
                 "borrowed_bytes": sum(self._borrow_reservations.values()),
@@ -810,8 +930,8 @@ class WarmSnapshotPool:
     def _usage_locked(self) -> int:
         return self.external_warm_bytes + self._borrow_charge_locked() + sum(self._reservations.values()) + sum(
             self._expansion_reservations.values()
-        ) + sum(
-            item.allocated_bytes + getattr(item, "runtime_reserved_bytes", 0)
+        ) + self._committed_bytes_locked() + sum(
+            getattr(item, "runtime_reserved_bytes", 0)
             for item in self._manifests.values()
         )
 

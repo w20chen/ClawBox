@@ -1,8 +1,7 @@
 diff --git a/CubeAPI/src/handlers/sandboxes.rs b/CubeAPI/src/handlers/sandboxes.rs
-index 32e36ed..b91ebf4 100644
 --- a/CubeAPI/src/handlers/sandboxes.rs
 +++ b/CubeAPI/src/handlers/sandboxes.rs
-@@ -405,6 +405,39 @@ pub async fn resume_sandbox(
+@@ -405,6 +405,39 @@
  
  // ─── POST /sandboxes/:sandboxID/connect ───────────────────────────────────────
  
@@ -43,10 +42,9 @@ index 32e36ed..b91ebf4 100644
      post,
      path = "/sandboxes/{sandboxID}/connect",
 diff --git a/CubeAPI/src/openapi.rs b/CubeAPI/src/openapi.rs
-index e52e4b7..d9d86a3 100644
 --- a/CubeAPI/src/openapi.rs
 +++ b/CubeAPI/src/openapi.rs
-@@ -74,6 +74,7 @@ impl Modify for SecurityAddon {
+@@ -74,6 +74,7 @@
          handlers::sandboxes::kill_sandbox,
          handlers::sandboxes::pause_sandbox,
          handlers::sandboxes::resume_sandbox,
@@ -55,28 +53,36 @@ index e52e4b7..d9d86a3 100644
          handlers::sandboxes::get_sandbox_logs,
          handlers::sandboxes::get_sandbox_logs_v2,
 diff --git a/CubeAPI/src/routes.rs b/CubeAPI/src/routes.rs
-index a8f7426..3d3b3c2 100644
 --- a/CubeAPI/src/routes.rs
 +++ b/CubeAPI/src/routes.rs
-@@ -135,6 +135,10 @@ fn build_e2b_pause_resume_router(state: &AppState, auth_configured: bool) -> Rou
+@@ -134,6 +134,10 @@
+         .route(
              "/sandboxes/:sandboxID/resume",
              post(sandboxes::resume_sandbox),
-         )
++        )
 +        .route(
 +            "/sandboxes/:sandboxID/crash-rollback",
 +            post(sandboxes::crash_rollback_sandbox),
-+        )
+         )
          .route(
              "/sandboxes/:sandboxID/connect",
-             post(sandboxes::connect_sandbox),
 diff --git a/CubeAPI/src/services/sandboxes.rs b/CubeAPI/src/services/sandboxes.rs
-index f47185d..e05f653 100644
 --- a/CubeAPI/src/services/sandboxes.rs
 +++ b/CubeAPI/src/services/sandboxes.rs
-@@ -510,6 +510,37 @@ impl SandboxService {
-         ))
-     }
+@@ -500,6 +500,37 @@
+             d = self.fetch_sandbox_detail(sandbox_id).await?;
+         }
  
++        let envd_version = envd_version_from_annotations(&d.annotations);
++        Ok(self.sandbox_response(
++            d.template_id,
++            sandbox_id.to_string(),
++            d.host_id,
++            envd_version,
++            None,
++        ))
++    }
++
 +    pub async fn crash_rollback_sandbox(
 +        &self,
 +        sandbox_id: &str,
@@ -98,22 +104,11 @@ index f47185d..e05f653 100644
 +            "crash rollback did not resume a sandbox",
 +        )?;
 +        let d = self.fetch_sandbox_detail(sandbox_id).await?;
-+        let envd_version = envd_version_from_annotations(&d.annotations);
-+        Ok(self.sandbox_response(
-+            d.template_id,
-+            sandbox_id.to_string(),
-+            d.host_id,
-+            envd_version,
-+            None,
-+        ))
-+    }
-+
-     pub async fn get_logs(
-         &self,
-         sandbox_id: &str,
+         let envd_version = envd_version_from_annotations(&d.annotations);
+         Ok(self.sandbox_response(
+             d.template_id,
 diff --git a/CubeDB/migrate/migrations/mysql/20261114160000_crash_rollback_record.sql b/CubeDB/migrate/migrations/mysql/20261114160000_crash_rollback_record.sql
 new file mode 100644
-index 0000000..826c48e
 --- /dev/null
 +++ b/CubeDB/migrate/migrations/mysql/20261114160000_crash_rollback_record.sql
 @@ -0,0 +1,43 @@
@@ -162,7 +157,6 @@ index 0000000..826c48e
 +SELECT RELEASE_LOCK('cubemaster_migration_20261114160000_crash_rollback');
 diff --git a/CubeDB/migrate/migrations/postgres/20261114160000_crash_rollback_record.sql b/CubeDB/migrate/migrations/postgres/20261114160000_crash_rollback_record.sql
 new file mode 100644
-index 0000000..c86779d
 --- /dev/null
 +++ b/CubeDB/migrate/migrations/postgres/20261114160000_crash_rollback_record.sql
 @@ -0,0 +1,46 @@
@@ -213,10 +207,9 @@ index 0000000..c86779d
 +DROP TABLE IF EXISTS t_cube_crash_rollback;
 +SELECT pg_advisory_unlock(hashtext('cubemaster_migration_20261114160000_crash_rollback'));
 diff --git a/CubeMaster/api/services/cubebox/v1/cubebox.pb.go b/CubeMaster/api/services/cubebox/v1/cubebox.pb.go
-index 4ba0ebf..7aeb375 100644
 --- a/CubeMaster/api/services/cubebox/v1/cubebox.pb.go
 +++ b/CubeMaster/api/services/cubebox/v1/cubebox.pb.go
-@@ -5258,7 +5258,10 @@ type CleanupTemplateRequest struct {
+@@ -5258,7 +5258,10 @@
  	// populate this for backward compatibility but new masters MUST send empty.
  	Objects []*CowObjectRef `protobuf:"bytes,4,rep,name=objects,proto3" json:"objects,omitempty"`
  	// CoW backend from Master (xfs｜s3). Empty means xfs.
@@ -228,21 +221,21 @@ index 4ba0ebf..7aeb375 100644
  	unknownFields protoimpl.UnknownFields
  	sizeCache     protoimpl.SizeCache
  }
-@@ -5328,6 +5331,13 @@ func (x *CleanupTemplateRequest) GetBackend() string {
+@@ -5326,6 +5329,13 @@
+ 		return x.Backend
+ 	}
  	return ""
- }
- 
++}
++
 +func (x *CleanupTemplateRequest) GetAnnotations() map[string]string {
 +	if x != nil {
 +		return x.Annotations
 +	}
 +	return nil
-+}
-+
+ }
+ 
  type CleanupTemplateResponse struct {
- 	state protoimpl.MessageState `protogen:"open.v1"`
- 	// requestID reqID
-@@ -7162,7 +7172,7 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
+@@ -7162,7 +7172,7 @@
  	"\fCowObjectRef\x12\x12\n" +
  	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
  	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x12\n" +
@@ -251,7 +244,7 @@ index 4ba0ebf..7aeb375 100644
  	"\x16CleanupTemplateRequest\x12\x1c\n" +
  	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1e\n" +
  	"\n" +
-@@ -7170,7 +7180,11 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
+@@ -7170,7 +7180,11 @@
  	"templateID\x12\"\n" +
  	"\fsnapshotPath\x18\x03 \x01(\tR\fsnapshotPath\x12C\n" +
  	"\aobjects\x18\x04 \x03(\v2).cubelet.services.cubebox.v1.CowObjectRefR\aobjects\x12\x18\n" +
@@ -264,7 +257,7 @@ index 4ba0ebf..7aeb375 100644
  	"\x17CleanupTemplateResponse\x12\x1c\n" +
  	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
  	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1e\n" +
-@@ -7345,7 +7359,7 @@ func file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP() []byte {
+@@ -7345,7 +7359,7 @@
  }
  
  var file_api_services_cubebox_v1_cubebox_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
@@ -273,7 +266,7 @@ index 4ba0ebf..7aeb375 100644
  var file_api_services_cubebox_v1_cubebox_proto_goTypes = []any{
  	(MountPropagation)(0),                     // 0: cubelet.services.cubebox.v1.MountPropagation
  	(StorageMedium)(0),                        // 1: cubelet.services.cubebox.v1.StorageMedium
-@@ -7448,10 +7462,11 @@ var file_api_services_cubebox_v1_cubebox_proto_goTypes = []any{
+@@ -7448,10 +7462,11 @@
  	nil,                          // 98: cubelet.services.cubebox.v1.CubeSandboxFilter.LabelSelectorEntry
  	nil,                          // 99: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
  	nil,                          // 100: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ExtInfoEntry
@@ -289,7 +282,7 @@ index 4ba0ebf..7aeb375 100644
  }
  var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
  	7,   // 0: cubelet.services.cubebox.v1.ContainerSecurityContext.capabilities:type_name -> cubelet.services.cubebox.v1.Capability
-@@ -7469,7 +7484,7 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7469,7 +7484,7 @@
  	19,  // 12: cubelet.services.cubebox.v1.PreStop.lifecyle_handler:type_name -> cubelet.services.cubebox.v1.LifecycleHandler
  	19,  // 13: cubelet.services.cubebox.v1.PostStop.lifecyle_handler:type_name -> cubelet.services.cubebox.v1.LifecycleHandler
  	22,  // 14: cubelet.services.cubebox.v1.Hooks.Prestart:type_name -> cubelet.services.cubebox.v1.Hook
@@ -298,7 +291,7 @@ index 4ba0ebf..7aeb375 100644
  	24,  // 16: cubelet.services.cubebox.v1.ContainerConfig.envs:type_name -> cubelet.services.cubebox.v1.KeyValue
  	12,  // 17: cubelet.services.cubebox.v1.ContainerConfig.volume_mounts:type_name -> cubelet.services.cubebox.v1.VolumeMounts
  	11,  // 18: cubelet.services.cubebox.v1.ContainerConfig.r_limit:type_name -> cubelet.services.cubebox.v1.RLimit
-@@ -7493,7 +7508,7 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7493,7 +7508,7 @@
  	33,  // 36: cubelet.services.cubebox.v1.VolumeSource.empty_dir:type_name -> cubelet.services.cubebox.v1.EmptyDirVolumeSource
  	34,  // 37: cubelet.services.cubebox.v1.VolumeSource.sandbox_path:type_name -> cubelet.services.cubebox.v1.SandboxPathVolumeSource
  	36,  // 38: cubelet.services.cubebox.v1.VolumeSource.host_dir_volumes:type_name -> cubelet.services.cubebox.v1.HostDirVolumeSources
@@ -307,7 +300,7 @@ index 4ba0ebf..7aeb375 100644
  	38,  // 40: cubelet.services.cubebox.v1.VolumeSource.plugin_volume:type_name -> cubelet.services.cubebox.v1.PluginVolumeSource
  	90,  // 41: cubelet.services.cubebox.v1.PluginVolumeSource.options:type_name -> cubelet.services.cubebox.v1.PluginVolumeSource.OptionsEntry
  	37,  // 42: cubelet.services.cubebox.v1.Volume.volume_source:type_name -> cubelet.services.cubebox.v1.VolumeSource
-@@ -7502,7 +7517,7 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7502,7 +7517,7 @@
  	91,  // 45: cubelet.services.cubebox.v1.RunCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest.AnnotationsEntry
  	92,  // 46: cubelet.services.cubebox.v1.RunCubeSandboxRequest.labels:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxRequest.LabelsEntry
  	43,  // 47: cubelet.services.cubebox.v1.RunCubeSandboxRequest.cube_network_config:type_name -> cubelet.services.cubebox.v1.CubeNetworkConfig
@@ -316,7 +309,7 @@ index 4ba0ebf..7aeb375 100644
  	93,  // 49: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxResponse.ExtInfoEntry
  	42,  // 50: cubelet.services.cubebox.v1.RunCubeSandboxResponse.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
  	44,  // 51: cubelet.services.cubebox.v1.CubeNetworkConfig.rules:type_name -> cubelet.services.cubebox.v1.EgressRule
-@@ -7511,7 +7526,7 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7511,7 +7526,7 @@
  	47,  // 54: cubelet.services.cubebox.v1.EgressRuleAction.inject:type_name -> cubelet.services.cubebox.v1.EgressRuleInject
  	94,  // 55: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.AnnotationsEntry
  	53,  // 56: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.filter:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter
@@ -325,7 +318,7 @@ index 4ba0ebf..7aeb375 100644
  	95,  // 58: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ExtInfoEntry
  	51,  // 59: cubelet.services.cubebox.v1.CubeSandbox.containers:type_name -> cubelet.services.cubebox.v1.Container
  	42,  // 60: cubelet.services.cubebox.v1.CubeSandbox.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
-@@ -7528,64 +7543,65 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7528,64 +7543,65 @@
  	50,  // 71: cubelet.services.cubebox.v1.ListCubeSandboxResponse.items:type_name -> cubelet.services.cubebox.v1.CubeSandbox
  	99,  // 72: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
  	43,  // 73: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.cube_network_config:type_name -> cubelet.services.cubebox.v1.CubeNetworkConfig
@@ -446,7 +439,7 @@ index 4ba0ebf..7aeb375 100644
  }
  
  func init() { file_api_services_cubebox_v1_cubebox_proto_init() }
-@@ -7610,7 +7626,7 @@ func file_api_services_cubebox_v1_cubebox_proto_init() {
+@@ -7610,7 +7626,7 @@
  			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
  			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_services_cubebox_v1_cubebox_proto_rawDesc), len(file_api_services_cubebox_v1_cubebox_proto_rawDesc)),
  			NumEnums:      6,
@@ -456,10 +449,9 @@ index 4ba0ebf..7aeb375 100644
  			NumServices:   1,
  		},
 diff --git a/CubeMaster/api/services/cubebox/v1/cubebox.proto b/CubeMaster/api/services/cubebox/v1/cubebox.proto
-index e997b62..9016ee9 100644
 --- a/CubeMaster/api/services/cubebox/v1/cubebox.proto
 +++ b/CubeMaster/api/services/cubebox/v1/cubebox.proto
-@@ -1003,6 +1003,9 @@ message CleanupTemplateRequest {
+@@ -1003,6 +1003,9 @@
    repeated CowObjectRef objects = 4;
    // CoW backend from Master (xfs｜s3). Empty means xfs.
    string backend = 5;
@@ -470,10 +462,9 @@ index e997b62..9016ee9 100644
  
  message CleanupTemplateResponse {
 diff --git a/CubeMaster/pkg/base/constants/constants.go b/CubeMaster/pkg/base/constants/constants.go
-index b085f72..ba06f60 100644
 --- a/CubeMaster/pkg/base/constants/constants.go
 +++ b/CubeMaster/pkg/base/constants/constants.go
-@@ -230,6 +230,7 @@ const (
+@@ -230,6 +230,7 @@
  	// definitions). Pause bindings live in PauseSnapshotTableName.
  	SnapshotTableName      = "t_cube_snapshot"
  	PauseSnapshotTableName = "t_cube_pause_snapshot"
@@ -482,10 +473,9 @@ index b085f72..ba06f60 100644
  	// artifact is physically present, independent of replica lifecycle, so the
  	// last-owner-cleanup / GC paths can enumerate every node that ever held an
 diff --git a/CubeMaster/pkg/base/db/models/snapshot.go b/CubeMaster/pkg/base/db/models/snapshot.go
-index 2ff801f..dc41944 100644
 --- a/CubeMaster/pkg/base/db/models/snapshot.go
 +++ b/CubeMaster/pkg/base/db/models/snapshot.go
-@@ -60,3 +60,34 @@ type PauseSnapshotRecord struct {
+@@ -60,3 +60,34 @@
  func (PauseSnapshotRecord) TableName() string {
  	return constants.PauseSnapshotTableName
  }
@@ -522,7 +512,6 @@ index 2ff801f..dc41944 100644
 +}
 diff --git a/CubeMaster/pkg/crashrollback/store.go b/CubeMaster/pkg/crashrollback/store.go
 new file mode 100644
-index 0000000..439f084
 --- /dev/null
 +++ b/CubeMaster/pkg/crashrollback/store.go
 @@ -0,0 +1,487 @@
@@ -1015,7 +1004,6 @@ index 0000000..439f084
 +}
 diff --git a/CubeMaster/pkg/crashrollback/store_test.go b/CubeMaster/pkg/crashrollback/store_test.go
 new file mode 100644
-index 0000000..73a2e31
 --- /dev/null
 +++ b/CubeMaster/pkg/crashrollback/store_test.go
 @@ -0,0 +1,286 @@
@@ -1306,10 +1294,9 @@ index 0000000..73a2e31
 +	require.Equal(t, "runtime-2", complete.RuntimeIncarnation)
 +}
 diff --git a/CubeMaster/pkg/pausesnap/delete_paused_test.go b/CubeMaster/pkg/pausesnap/delete_paused_test.go
-index 27457f0..525d6a2 100644
 --- a/CubeMaster/pkg/pausesnap/delete_paused_test.go
 +++ b/CubeMaster/pkg/pausesnap/delete_paused_test.go
-@@ -129,6 +129,27 @@ func TestBeginCompletePersistsBackendAndRemoteStatus(t *testing.T) {
+@@ -129,6 +129,27 @@
  	require.Error(t, err)
  }
  
@@ -1338,10 +1325,9 @@ index 27457f0..525d6a2 100644
  	setupPauseDeleteTest(t)
  	destroys, cleans := mockCubeletOK(t)
 diff --git a/CubeMaster/pkg/pausesnap/store.go b/CubeMaster/pkg/pausesnap/store.go
-index c1b5aea..abfeec5 100644
 --- a/CubeMaster/pkg/pausesnap/store.go
 +++ b/CubeMaster/pkg/pausesnap/store.go
-@@ -31,9 +31,12 @@ const (
+@@ -31,9 +31,12 @@
  	KindPauseSnapshot = "pause_snapshot"
  	// StatusReady marks a completed pause: the shim is gone and the sandbox
  	// exists only as this binding plus the node-local package.
@@ -1357,7 +1343,7 @@ index c1b5aea..abfeec5 100644
  	// StatusFailed is a terminal Pause failure. Binding and sandbox proxy are
  	// kept so the user can see the failure; Resume is rejected until Delete.
  	StatusFailed = "FAILED"
-@@ -220,6 +223,37 @@ func Complete(ctx context.Context, sandboxID, snapshotID, nodeID, nodeIP, instan
+@@ -220,6 +223,37 @@
  	return nil
  }
  
@@ -1396,10 +1382,9 @@ index c1b5aea..abfeec5 100644
  // asking Cubelet to drop local snap/sandbox rows. Used when Pause RPC fails or
  // times out: do not undo in-flight Cubelet work.
 diff --git a/CubeMaster/pkg/service/sandbox/sandbox_remove.go b/CubeMaster/pkg/service/sandbox/sandbox_remove.go
-index 0605370..a238eab 100644
 --- a/CubeMaster/pkg/service/sandbox/sandbox_remove.go
 +++ b/CubeMaster/pkg/service/sandbox/sandbox_remove.go
-@@ -17,6 +17,7 @@ import (
+@@ -17,6 +17,7 @@
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
@@ -1407,7 +1392,7 @@ index 0605370..a238eab 100644
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
-@@ -230,6 +231,10 @@ func callCubelet(ctx context.Context, callEp string, req *cubebox.DestroyCubeSan
+@@ -230,6 +231,10 @@
  		if err := runAfterDestroySandboxSuccessHook(ctx, req.GetSandboxID()); err != nil {
  			log.G(ctx).Warnf("afterDestroySandboxSuccess hook failed: %v", err)
  		}
@@ -1419,10 +1404,9 @@ index 0605370..a238eab 100644
  		return nil
  	})
 diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
-index 334cdae..51fd8ac 100644
 --- a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
 +++ b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
-@@ -6,6 +6,7 @@ package sandbox
+@@ -6,6 +6,7 @@
  
  import (
  	"context"
@@ -1430,7 +1414,7 @@ index 334cdae..51fd8ac 100644
  	"errors"
  	"fmt"
  	"strconv"
-@@ -13,10 +14,12 @@ import (
+@@ -13,10 +14,12 @@
  	"time"
  
  	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
@@ -1443,7 +1427,7 @@ index 334cdae..51fd8ac 100644
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubeproxy"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
-@@ -69,12 +72,71 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
+@@ -69,11 +72,70 @@
  	if spec, specErr := sandboxspec.Get(ctx, req.SandboxID); specErr == nil && spec != nil {
  		req.Backend = spec.Backend
  	}
@@ -1495,7 +1479,7 @@ index 334cdae..51fd8ac 100644
  		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
  		rsp.Ret.RetMsg = fmt.Sprintf("begin pause snapshot: %v", err)
  		return rsp
- 	}
++	}
 +	var crashBefore *crashrollback.Record
 +	if crashEnabled {
 +		crashBefore, err = crashrollback.Begin(ctx, req.SandboxID, req.RequestID,
@@ -1511,11 +1495,10 @@ index 334cdae..51fd8ac 100644
 +			req.SandboxID, req.RequestID, crashBefore.LastSnapshotID,
 +			crashBefore.Epoch,
 +		)
-+	}
+ 	}
  
  	calleeEndpoint := cubelet.GetCubeletAddr(hostIP)
- 	cubeletReq := &cubebox.UpdateCubeSandboxRequest{
-@@ -117,6 +179,10 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
+@@ -117,6 +179,10 @@
  			log.G(ctx).Warnf("pause rpc timed out sandbox=%s snap=%s: %v", req.SandboxID, snapID, err)
  		}
  		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, msg)
@@ -1526,16 +1509,17 @@ index 334cdae..51fd8ac 100644
  		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
  		rsp.Ret.RetMsg = msg
  		return rsp
-@@ -130,8 +196,28 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
+@@ -130,7 +196,27 @@
  	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
  		// Definitive Cubelet failure: cannot Resume (delete only).
  		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, rsp.Ret.RetMsg)
+-		return rsp
 +		if crashEnabled {
 +			_ = crashrollback.Fail(ctx, req.SandboxID, req.RequestID,
 +				crashBefore.Epoch, rsp.Ret.RetMsg)
 +		}
- 		return rsp
- 	}
++		return rsp
++	}
 +	if crashEnabled {
 +		if err := crashrollback.MarkLocalSealed(
 +			ctx, req.SandboxID, req.RequestID, crashBefore.Epoch,
@@ -1551,11 +1535,10 @@ index 334cdae..51fd8ac 100644
 +				"mark crash rollback local seal: %v", err)
 +			return rsp
 +		}
-+	}
+ 	}
  
  	released := volrefcount.ReleasedVolumeIDs(cubeRsp.GetExtInfo())
- 	exportUUIDs := ""
-@@ -146,14 +232,445 @@ func pauseSandbox(ctx context.Context, req *types.UpdateRequest, hostIP string)
+@@ -146,11 +232,442 @@
  	}
  	if err := pausesnap.Complete(ctx, req.SandboxID, snapID, nodeID, hostIP, req.InstanceType, released, exportUUIDs); err != nil {
  		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, err.Error())
@@ -1646,9 +1629,9 @@ index 334cdae..51fd8ac 100644
 +		}
 +	}
  	runAfterUpdateSandboxSuccessHook(ctx, req.SandboxID, req.InstanceType, "pause", req.RequestID)
- 	return rsp
- }
- 
++	return rsp
++}
++
 +type crashRollbackEvidence struct {
 +	SnapshotID          string   `json:"snapshot_id"`
 +	NodeID              string   `json:"node_id"`
@@ -1995,16 +1978,15 @@ index 334cdae..51fd8ac 100644
 +	}
 +	rsp.Ret.RetMsg = fmt.Sprintf(
 +		"crash rollback resumed last committed snapshot %s", targetID)
-+	return rsp
-+}
-+
- func relocatePauseSnapshot(ctx context.Context, req *types.UpdateRequest, hostIP string) *types.Res {
- 	rsp := &types.Res{Ret: &types.Ret{RetCode: int(errorcode.ErrorCode_Success), RetMsg: errorcode.ErrorCode_Success.String()}}
- 	rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID)
-@@ -228,6 +745,121 @@ func cubeletReportsPaused(ctx context.Context, hostIP, sandboxID string) bool {
- 	return false
+ 	return rsp
  }
  
+@@ -226,6 +743,121 @@
+ 		}
+ 	}
+ 	return false
++}
++
 +func observeCrashRollbackRuntime(
 +	ctx context.Context,
 +	hostIP string,
@@ -2118,14 +2100,11 @@ index 334cdae..51fd8ac 100644
 +		return false
 +	}
 +	return true
-+}
-+
+ }
+ 
  // recoverTimedOutPauseForResume heals a Master FAILED pause binding only when
- // the failure was an RPC timeout and Cubelet already reports PAUSED. Completes
- // READY with empty plugin-volume list (no ext_info → do not adjust refcount).
 diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause_crash_test.go b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause_crash_test.go
 new file mode 100644
-index 0000000..3900348
 --- /dev/null
 +++ b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause_crash_test.go
 @@ -0,0 +1,402 @@
@@ -2532,23 +2511,23 @@ index 0000000..3900348
 +	require.Equal(t, crashrollback.StateRollingBack, record.State)
 +}
 diff --git a/CubeMaster/pkg/service/sandbox/sandbox_update.go b/CubeMaster/pkg/service/sandbox/sandbox_update.go
-index 8b0ed81..efd9904 100644
 --- a/CubeMaster/pkg/service/sandbox/sandbox_update.go
 +++ b/CubeMaster/pkg/service/sandbox/sandbox_update.go
-@@ -44,9 +44,10 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
+@@ -44,9 +44,10 @@
  		rsp.Ret.RetMsg = "should provide InstanceType,SandboxID,Action"
  		return
  	}
 -	if req.Action != "pause" && req.Action != "resume" && req.Action != "relocate_snapshot" {
+-		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+-		rsp.Ret.RetMsg = "action should be pause or resume"
 +	if req.Action != "pause" && req.Action != "resume" &&
 +		req.Action != "relocate_snapshot" && req.Action != "crash_rollback" {
- 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
--		rsp.Ret.RetMsg = "action should be pause or resume"
++		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 +		rsp.Ret.RetMsg = "unsupported sandbox lifecycle action"
  		return
  	}
  	if ret := normalizeSandboxIDInReq(ctx, &req.SandboxID); ret != nil {
-@@ -65,6 +66,8 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
+@@ -65,6 +66,8 @@
  		lockOpts.TTL = sandboxlock.ResumeTTL
  	case "relocate_snapshot":
  		lockOpts.TTL = sandboxlock.PauseTTL
@@ -2557,7 +2536,7 @@ index 8b0ed81..efd9904 100644
  	}
  	err := sandboxlock.WithLock(ctx, req.SandboxID, lockOpts, func(ctx context.Context) error {
  		// Client/HTTP cancel must not abort bookkeeping or release the lock
-@@ -95,6 +98,8 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
+@@ -95,6 +98,8 @@
  			*rsp = *resumeFromPauseSnapshot(ctx, req, hostIP)
  		case "relocate_snapshot":
  			*rsp = *relocatePauseSnapshot(ctx, req, hostIP)
@@ -2567,10 +2546,9 @@ index 8b0ed81..efd9904 100644
  		return nil
  	})
 diff --git a/CubeMaster/pkg/templatecenter/store.go b/CubeMaster/pkg/templatecenter/store.go
-index 168d5c4..930cfe7 100644
 --- a/CubeMaster/pkg/templatecenter/store.go
 +++ b/CubeMaster/pkg/templatecenter/store.go
-@@ -24,6 +24,7 @@ import (
+@@ -24,6 +24,7 @@
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/node"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
@@ -2578,7 +2556,7 @@ index 168d5c4..930cfe7 100644
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
-@@ -260,6 +261,7 @@ func Init(ctx context.Context) error {
+@@ -260,6 +261,7 @@
  			return
  		}
  		pausesnap.Init(store.db)
@@ -2587,10 +2565,9 @@ index 168d5c4..930cfe7 100644
  		configureSandboxSpecHooks()
  		if warmErr := warmReadyTemplateLocality(ctx); warmErr != nil {
 diff --git a/Cubelet/api/services/cubebox/v1/cubebox.pb.go b/Cubelet/api/services/cubebox/v1/cubebox.pb.go
-index d6bef0c..fc19098 100644
 --- a/Cubelet/api/services/cubebox/v1/cubebox.pb.go
 +++ b/Cubelet/api/services/cubebox/v1/cubebox.pb.go
-@@ -5203,7 +5203,10 @@ type CleanupTemplateRequest struct {
+@@ -5203,7 +5203,10 @@
  	// populate this for backward compatibility but new masters MUST send empty.
  	Objects []*CowObjectRef `protobuf:"bytes,4,rep,name=objects,proto3" json:"objects,omitempty"`
  	// CoW backend from Master (xfs｜s3). Empty means xfs.
@@ -2602,21 +2579,21 @@ index d6bef0c..fc19098 100644
  	unknownFields protoimpl.UnknownFields
  	sizeCache     protoimpl.SizeCache
  }
-@@ -5273,6 +5276,13 @@ func (x *CleanupTemplateRequest) GetBackend() string {
+@@ -5271,6 +5274,13 @@
+ 		return x.Backend
+ 	}
  	return ""
- }
- 
++}
++
 +func (x *CleanupTemplateRequest) GetAnnotations() map[string]string {
 +	if x != nil {
 +		return x.Annotations
 +	}
 +	return nil
-+}
-+
+ }
+ 
  type CleanupTemplateResponse struct {
- 	state protoimpl.MessageState `protogen:"open.v1"`
- 	// requestID reqID
-@@ -7129,7 +7139,7 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
+@@ -7129,7 +7139,7 @@
  	"\fCowObjectRef\x12\x12\n" +
  	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
  	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x12\n" +
@@ -2625,7 +2602,7 @@ index d6bef0c..fc19098 100644
  	"\x16CleanupTemplateRequest\x12\x1c\n" +
  	"\trequestID\x18\x01 \x01(\tR\trequestID\x12\x1e\n" +
  	"\n" +
-@@ -7137,7 +7147,11 @@ const file_api_services_cubebox_v1_cubebox_proto_rawDesc = "" +
+@@ -7137,7 +7147,11 @@
  	"templateID\x12\"\n" +
  	"\fsnapshotPath\x18\x03 \x01(\tR\fsnapshotPath\x12C\n" +
  	"\aobjects\x18\x04 \x03(\v2).cubelet.services.cubebox.v1.CowObjectRefR\aobjects\x12\x18\n" +
@@ -2638,7 +2615,7 @@ index d6bef0c..fc19098 100644
  	"\x17CleanupTemplateResponse\x12\x1c\n" +
  	"\trequestID\x18\x01 \x01(\tR\trequestID\x124\n" +
  	"\x03ret\x18\x02 \x01(\v2\".cubelet.services.errorcode.v1.RetR\x03ret\x12\x1e\n" +
-@@ -7312,7 +7326,7 @@ func file_api_services_cubebox_v1_cubebox_proto_rawDescGZIP() []byte {
+@@ -7312,7 +7326,7 @@
  }
  
  var file_api_services_cubebox_v1_cubebox_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
@@ -2647,7 +2624,7 @@ index d6bef0c..fc19098 100644
  var file_api_services_cubebox_v1_cubebox_proto_goTypes = []any{
  	(MountPropagation)(0),                     // 0: cubelet.services.cubebox.v1.MountPropagation
  	(StorageMedium)(0),                        // 1: cubelet.services.cubebox.v1.StorageMedium
-@@ -7413,11 +7427,12 @@ var file_api_services_cubebox_v1_cubebox_proto_goTypes = []any{
+@@ -7413,11 +7427,12 @@
  	nil,                            // 96: cubelet.services.cubebox.v1.CubeSandboxFilter.LabelSelectorEntry
  	nil,                            // 97: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
  	nil,                            // 98: cubelet.services.cubebox.v1.UpdateCubeSandboxResponse.ExtInfoEntry
@@ -2665,7 +2642,7 @@ index d6bef0c..fc19098 100644
  }
  var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
  	7,   // 0: cubelet.services.cubebox.v1.ContainerSecurityContext.capabilities:type_name -> cubelet.services.cubebox.v1.Capability
-@@ -7435,7 +7450,7 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7435,7 +7450,7 @@
  	19,  // 12: cubelet.services.cubebox.v1.PreStop.lifecyle_handler:type_name -> cubelet.services.cubebox.v1.LifecycleHandler
  	19,  // 13: cubelet.services.cubebox.v1.PostStop.lifecyle_handler:type_name -> cubelet.services.cubebox.v1.LifecycleHandler
  	22,  // 14: cubelet.services.cubebox.v1.Hooks.Prestart:type_name -> cubelet.services.cubebox.v1.Hook
@@ -2674,7 +2651,7 @@ index d6bef0c..fc19098 100644
  	24,  // 16: cubelet.services.cubebox.v1.ContainerConfig.envs:type_name -> cubelet.services.cubebox.v1.KeyValue
  	12,  // 17: cubelet.services.cubebox.v1.ContainerConfig.volume_mounts:type_name -> cubelet.services.cubebox.v1.VolumeMounts
  	11,  // 18: cubelet.services.cubebox.v1.ContainerConfig.r_limit:type_name -> cubelet.services.cubebox.v1.RLimit
-@@ -7459,15 +7474,15 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7459,15 +7474,15 @@
  	33,  // 36: cubelet.services.cubebox.v1.VolumeSource.empty_dir:type_name -> cubelet.services.cubebox.v1.EmptyDirVolumeSource
  	34,  // 37: cubelet.services.cubebox.v1.VolumeSource.sandbox_path:type_name -> cubelet.services.cubebox.v1.SandboxPathVolumeSource
  	36,  // 38: cubelet.services.cubebox.v1.VolumeSource.host_dir_volumes:type_name -> cubelet.services.cubebox.v1.HostDirVolumeSources
@@ -2693,7 +2670,7 @@ index d6bef0c..fc19098 100644
  	91,  // 48: cubelet.services.cubebox.v1.RunCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.RunCubeSandboxResponse.ExtInfoEntry
  	41,  // 49: cubelet.services.cubebox.v1.RunCubeSandboxResponse.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
  	43,  // 50: cubelet.services.cubebox.v1.CubeNetworkConfig.rules:type_name -> cubelet.services.cubebox.v1.EgressRule
-@@ -7476,7 +7491,7 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7476,7 +7491,7 @@
  	46,  // 53: cubelet.services.cubebox.v1.EgressRuleAction.inject:type_name -> cubelet.services.cubebox.v1.EgressRuleInject
  	92,  // 54: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.AnnotationsEntry
  	52,  // 55: cubelet.services.cubebox.v1.DestroyCubeSandboxRequest.filter:type_name -> cubelet.services.cubebox.v1.CubeSandboxFilter
@@ -2702,7 +2679,7 @@ index d6bef0c..fc19098 100644
  	93,  // 57: cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ext_info:type_name -> cubelet.services.cubebox.v1.DestroyCubeSandboxResponse.ExtInfoEntry
  	50,  // 58: cubelet.services.cubebox.v1.CubeSandbox.containers:type_name -> cubelet.services.cubebox.v1.Container
  	41,  // 59: cubelet.services.cubebox.v1.CubeSandbox.port_mappings:type_name -> cubelet.services.cubebox.v1.PortMapping
-@@ -7493,64 +7508,65 @@ var file_api_services_cubebox_v1_cubebox_proto_depIdxs = []int32{
+@@ -7493,64 +7508,65 @@
  	49,  // 70: cubelet.services.cubebox.v1.ListCubeSandboxResponse.items:type_name -> cubelet.services.cubebox.v1.CubeSandbox
  	97,  // 71: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.annotations:type_name -> cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.AnnotationsEntry
  	42,  // 72: cubelet.services.cubebox.v1.UpdateCubeSandboxRequest.cube_network_config:type_name -> cubelet.services.cubebox.v1.CubeNetworkConfig
@@ -2823,7 +2800,7 @@ index d6bef0c..fc19098 100644
  }
  
  func init() { file_api_services_cubebox_v1_cubebox_proto_init() }
-@@ -7575,7 +7591,7 @@ func file_api_services_cubebox_v1_cubebox_proto_init() {
+@@ -7575,7 +7591,7 @@
  			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
  			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_services_cubebox_v1_cubebox_proto_rawDesc), len(file_api_services_cubebox_v1_cubebox_proto_rawDesc)),
  			NumEnums:      6,
@@ -2833,10 +2810,9 @@ index d6bef0c..fc19098 100644
  			NumServices:   1,
  		},
 diff --git a/Cubelet/api/services/cubebox/v1/cubebox.proto b/Cubelet/api/services/cubebox/v1/cubebox.proto
-index f6ec0fa..74a3504 100644
 --- a/Cubelet/api/services/cubebox/v1/cubebox.proto
 +++ b/Cubelet/api/services/cubebox/v1/cubebox.proto
-@@ -995,6 +995,9 @@ message CleanupTemplateRequest {
+@@ -995,6 +995,9 @@
    repeated CowObjectRef objects = 4;
    // CoW backend from Master (xfs｜s3). Empty means xfs.
    string backend = 5;
@@ -2847,7 +2823,6 @@ index f6ec0fa..74a3504 100644
  
  message CleanupTemplateResponse {
 diff --git a/Cubelet/doc/cubelet-api.md b/Cubelet/doc/cubelet-api.md
-index 89f130e..d4f489c 100644
 --- a/Cubelet/doc/cubelet-api.md
 +++ b/Cubelet/doc/cubelet-api.md
 @@ -11,6 +11,7 @@
@@ -2858,7 +2833,7 @@ index 89f130e..d4f489c 100644
      - [CleanupTemplateResponse](#cubelet-services-cubebox-v1-CleanupTemplateResponse)
      - [CommitSandboxRequest](#cubelet-services-cubebox-v1-CommitSandboxRequest)
      - [CommitSandboxResponse](#cubelet-services-cubebox-v1-CommitSandboxResponse)
-@@ -359,6 +360,23 @@ Capability contains the container capabilities to add or drop
+@@ -359,6 +360,23 @@
  | snapshotPath | [string](#string) |  | Snapshot path recorded on this node, if any. DEPRECATED in v4: cubelet resolves this from local catalog; legacy masters may still send it for backward compatibility but new masters MUST send empty. |
  | objects | [CowObjectRef](#cubelet-services-cubebox-v1-CowObjectRef) | repeated | cubecow objects that should be removed on this node. DEPRECATED in v4: cubelet derives objects from local catalog; legacy masters may still populate this for backward compatibility but new masters MUST send empty. |
  | backend | [string](#string) |  | CoW backend from Master (xfs｜s3). Empty means xfs. |
@@ -2883,10 +2858,9 @@ index 89f130e..d4f489c 100644
  
  
 diff --git a/Cubelet/services/cubebox/incremental_memory.go b/Cubelet/services/cubebox/incremental_memory.go
-index 2252822..f0044d4 100644
 --- a/Cubelet/services/cubebox/incremental_memory.go
 +++ b/Cubelet/services/cubebox/incremental_memory.go
-@@ -13,7 +13,7 @@ import (
+@@ -13,7 +13,7 @@
  )
  
  type memoryLayerRange struct {
@@ -2895,7 +2869,7 @@ index 2252822..f0044d4 100644
  	Offset uint64 `json:"offset"`
  	Length uint64 `json:"length"`
  }
-@@ -35,7 +35,9 @@ func allocateWarmRange(fd int, offset, length int64) error {
+@@ -35,7 +35,9 @@
  func serveWarmAllocation(path string, size uint64) (func(), error) {
  	socketPath := path + ".allocate.sock"
  	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
@@ -2906,7 +2880,7 @@ index 2252822..f0044d4 100644
  	if err := os.Chmod(socketPath, 0600); err != nil {
  		listener.Close()
  		return nil, err
-@@ -78,5 +80,7 @@ func cleanupDirectMemorySnapshot(path string) {
+@@ -78,5 +80,7 @@
  	_ = os.Remove(path + ".metrics.json")
  	_ = os.Remove(path + ".lineage.json")
  	_ = os.Remove(path + ".lineage.json.pending")
@@ -2915,10 +2889,9 @@ index 2252822..f0044d4 100644
  	_ = os.RemoveAll(path + ".layers")
  }
 diff --git a/Cubelet/services/cubebox/incremental_memory_reclaim.go b/Cubelet/services/cubebox/incremental_memory_reclaim.go
-index 5144552..5a43eb0 100644
 --- a/Cubelet/services/cubebox/incremental_memory_reclaim.go
 +++ b/Cubelet/services/cubebox/incremental_memory_reclaim.go
-@@ -23,6 +23,8 @@ type reclaimMemoryLayer struct {
+@@ -23,6 +23,8 @@
  	Name         string               `json:"name"`
  	Ranges       []reclaimMemoryRange `json:"ranges"`
  	ExternalPath *string              `json:"external_path,omitempty"`
@@ -2927,7 +2900,7 @@ index 5144552..5a43eb0 100644
  }
  
  type reclaimMemoryLineage struct {
-@@ -81,7 +83,8 @@ func reclaimSupersededMemory(memoryPath string) (memoryReclaimStats, error) {
+@@ -81,7 +83,8 @@
  	if err := json.Unmarshal(raw, &lineage); err != nil {
  		return stats, fmt.Errorf("decode RAM lineage: %w", err)
  	}
@@ -2938,10 +2911,9 @@ index 5144552..5a43eb0 100644
  	}
  
 diff --git a/Cubelet/services/cubebox/incremental_memory_reclaim_test.go b/Cubelet/services/cubebox/incremental_memory_reclaim_test.go
-index 1a98631..1cac5ce 100644
 --- a/Cubelet/services/cubebox/incremental_memory_reclaim_test.go
 +++ b/Cubelet/services/cubebox/incremental_memory_reclaim_test.go
-@@ -95,3 +95,67 @@ func TestReclaimSupersededMemoryPreservesSharedReader(t *testing.T) {
+@@ -95,3 +95,67 @@
  		t.Fatalf("shared reader content was reclaimed")
  	}
  }
@@ -3010,7 +2982,6 @@ index 1a98631..1cac5ce 100644
 +	return &value
 +}
 diff --git a/Cubelet/services/cubebox/incremental_memory_test.go b/Cubelet/services/cubebox/incremental_memory_test.go
-index a1e3d57..5de7422 100644
 --- a/Cubelet/services/cubebox/incremental_memory_test.go
 +++ b/Cubelet/services/cubebox/incremental_memory_test.go
 @@ -1,7 +1,9 @@
@@ -3023,7 +2994,7 @@ index a1e3d57..5de7422 100644
  	"net"
  	"os"
  	"path/filepath"
-@@ -12,19 +14,19 @@ import (
+@@ -12,19 +14,19 @@
  )
  
  func TestAllocateWarmRangeRetriesEINTR(t *testing.T) {
@@ -3056,7 +3027,7 @@ index a1e3d57..5de7422 100644
  }
  
  func TestDirectPauseMemoryPathAcceptsConfiguredWarmRoot(t *testing.T) {
-@@ -234,3 +236,172 @@ func TestSpillOwnsExternalTemplateBaseWithoutCopying(t *testing.T) {
+@@ -234,3 +236,172 @@
  		}
  	}
  }
@@ -3233,7 +3204,7 @@ diff --git a/Cubelet/services/cubebox/managed_memory_layers.go b/Cubelet/service
 new file mode 100644
 --- /dev/null
 +++ b/Cubelet/services/cubebox/managed_memory_layers.go
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,522 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +package cubebox
@@ -3263,10 +3234,12 @@ new file mode 100644
 +)
 +
 +type managedMemoryLayerGCStats struct {
-+	Scanned       int
-+	Deleted       int
-+	UnlinkedBytes uint64
-+	Retained      int
++	Scanned        int
++	Deleted        int
++	UnlinkedBytes  uint64
++	Retained       int
++	ReclaimedBytes uint64
++	PunchedRanges  int
 +}
 +
 +func managedMemoryLayerRoots() []string {
@@ -3287,19 +3260,30 @@ new file mode 100644
 +}
 +
 +type managedMemoryLineage struct {
-+	SchemaVersion uint32 `json:"schema_version"`
-+	Layers        []struct {
-+		ExternalPath *string `json:"external_path,omitempty"`
-+		LayerID      *string `json:"layer_id,omitempty"`
-+		Managed      bool    `json:"managed,omitempty"`
-+	} `json:"layers"`
++	SchemaVersion uint32               `json:"schema_version"`
++	Layers        []reclaimMemoryLayer `json:"layers"`
 +}
 +
 +type managedMemoryCrashRollbackManifest struct {
 +	Objects []struct {
-+		Path     string `json:"path"`
-+		Category string `json:"category"`
++		Path     string               `json:"path"`
++		Category string               `json:"category"`
++		Ranges   []reclaimMemoryRange `json:"ranges,omitempty"`
 +	} `json:"objects"`
++}
++
++type memoryPageReference struct {
++	ranges   []reclaimMemoryRange
++	whole    bool
++	required bool
++}
++
++func mergeMemoryReference(refs map[string]memoryPageReference, path string, ref memoryPageReference) {
++	old := refs[path]
++	old.ranges = append(old.ranges, ref.ranges...)
++	old.whole = old.whole || ref.whole
++	old.required = old.required || ref.required
++	refs[path] = old
 +}
 +
 +// Published sidecars are immutable between replacements. Cache only their
@@ -3312,8 +3296,9 @@ new file mode 100644
 +}
 +
 +type managedReferenceRecord struct {
-+	stamp managedReferenceStamp
-+	paths []string
++	stamp   managedReferenceStamp
++	pages   map[string]memoryPageReference
++	pending bool
 +}
 +
 +var managedReferenceCache = struct {
@@ -3322,7 +3307,7 @@ new file mode 100644
 +}{}
 +
 +func readManagedReferenceRecord(path string, stamp managedReferenceStamp) (managedReferenceRecord, error) {
-+	record := managedReferenceRecord{stamp: stamp}
++	record := managedReferenceRecord{stamp: stamp, pages: map[string]memoryPageReference{}}
 +	raw, err := os.ReadFile(path)
 +	if err != nil {
 +		return record, err
@@ -3335,14 +3320,40 @@ new file mode 100644
 +		if lineage.SchemaVersion != 1 && lineage.SchemaVersion != 2 {
 +			return record, fmt.Errorf("unsupported RAM lineage schema %d in %s", lineage.SchemaVersion, path)
 +		}
-+		for _, layer := range lineage.Layers {
-+			if layer.ExternalPath == nil || !layer.Managed {
-+				continue
++		// Include owned aliases: an old checkpoint or running VM can still
++		// need ranges through its original hardlinks after cross-tier takeover.
++		head := strings.TrimSuffix(path, ".lineage.json")
++		for index, layer := range lineage.Layers {
++			if layer.Name != fmt.Sprintf("%06d.mem", index) {
++				return record, fmt.Errorf("invalid RAM layer name in %s", path)
 +			}
-+			if layer.LayerID == nil || strings.ContainsAny(*layer.LayerID, `/\`) {
-+				return record, fmt.Errorf("invalid managed RAM layer identity in %s", path)
++			ref := memoryPageReference{ranges: layer.Ranges}
++			target := filepath.Join(head+".layers", layer.Name)
++			if layer.ExternalPath != nil {
++				target = filepath.Clean(*layer.ExternalPath)
++				ref.required = true
++				if !filepath.IsAbs(target) {
++					return record, fmt.Errorf("relative RAM dependency in %s", path)
++				}
++				if layer.Managed {
++					if layer.LayerID == nil || strings.ContainsAny(*layer.LayerID, `/\`) {
++						return record, fmt.Errorf("invalid managed RAM layer identity in %s", path)
++					}
++				} else {
++					ref.whole = true // immutable reusable template
++				}
 +			}
-+			record.paths = append(record.paths, filepath.Clean(*layer.ExternalPath))
++			if len(ref.ranges) == 0 {
++				return record, fmt.Errorf("missing RAM page ranges in %s", path)
++			}
++			mergeMemoryReference(record.pages, target, ref)
++		}
++		// The memory head is another name for the newest owned layer. Count
++		// that hardlink without creating a second page reference.
++		if _, err := os.Stat(head); err == nil {
++			mergeMemoryReference(record.pages, head, memoryPageReference{})
++		} else if !errors.Is(err, fs.ErrNotExist) {
++			return record, err
 +		}
 +	} else {
 +		var manifest managedMemoryCrashRollbackManifest
@@ -3353,19 +3364,28 @@ new file mode 100644
 +			clean := filepath.Clean(strings.TrimSpace(object.Path))
 +			switch object.Category {
 +			case "lineage_layer":
-+				record.paths = append(record.paths, clean)
++				if len(object.Ranges) == 0 {
++					return record, fmt.Errorf("missing rollback page ranges in %s", path)
++				}
++				mergeMemoryReference(record.pages, clean, memoryPageReference{ranges: object.Ranges, required: true})
 +			case "pending_marker":
-+				record.paths = append(record.paths, filepath.Join(filepath.Dir(clean), "000000.mem"))
++				record.pending = true
++				// A pending publication has not committed its page references yet.
++				if _, err := os.Stat(clean); err == nil {
++					mergeMemoryReference(record.pages, filepath.Join(filepath.Dir(clean), "000000.mem"), memoryPageReference{whole: true, required: true})
++				} else if !errors.Is(err, fs.ErrNotExist) {
++					return record, err
++				}
 +			}
 +		}
 +	}
 +	return record, nil
 +}
 +
-+func managedMemoryLayerReferences(roots []string) (map[string]struct{}, error) {
++func managedMemoryLayerReferences(roots []string) (map[string]memoryPageReference, error) {
 +	managedReferenceCache.Lock()
 +	defer managedReferenceCache.Unlock()
-+	references := map[string]struct{}{}
++	references := map[string]memoryPageReference{}
 +	current := map[string]managedReferenceRecord{}
 +	type pendingRead struct {
 +		path   string
@@ -3376,11 +3396,11 @@ new file mode 100644
 +	}
 +	pending := []*pendingRead{}
 +	collect := func(path string, record managedReferenceRecord, stable bool) {
-+		if stable {
++		if stable && !record.pending {
 +			current[path] = record
 +		}
-+		for _, referenced := range record.paths {
-+			references[referenced] = struct{}{}
++		for target, ref := range record.pages {
++			mergeMemoryReference(references, target, ref)
 +		}
 +	}
 +	for _, root := range roots {
@@ -3393,6 +3413,9 @@ new file mode 100644
 +			}
 +			if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".lineage.json") && !strings.HasSuffix(entry.Name(), ".crash-rollback.json")) {
 +				return nil
++			}
++			if strings.HasSuffix(entry.Name(), ".copying.lineage.json") {
++				return nil // relocation has not published; its source still owns the pages
 +			}
 +			info, err := os.Stat(path)
 +			// A concurrent cleanup may remove one file, not the rest of the root.
@@ -3620,6 +3643,13 @@ new file mode 100644
 +	if err != nil {
 +		return stats, err
 +	}
++	pages, err := resolveMemoryPageReferences(references)
++	if err != nil {
++		return stats, err
++	}
++	if err := protectPendingMemoryPages(layerRoots, pages); err != nil {
++		return stats, err
++	}
 +	for _, layerRoot := range layerRoots {
 +		entries, readErr := os.ReadDir(layerRoot)
 +		if readErr != nil {
@@ -3641,6 +3671,9 @@ new file mode 100644
 +				continue
 +			}
 +			if _, retained := references[target]; retained {
++				if err := reclaimReferencedMemoryPages(target, pages, &stats); err != nil {
++					return stats, err
++				}
 +				stats.Retained++
 +				continue
 +			}
@@ -3677,14 +3710,28 @@ new file mode 100644
 +			stats.UnlinkedBytes += uint64(allocated.Blocks) * 512
 +		}
 +	}
++	// Shared ordinary hardlinks need the same range-union treatment. External
++	// template files never enter this path, and each inode is punched once.
++	for path, ref := range references {
++		if ref.required || !strings.HasSuffix(filepath.Base(filepath.Dir(path)), ".layers") {
++			continue
++		}
++		if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
++			continue
++		} else if err != nil {
++			return stats, err
++		}
++		if err := reclaimReferencedMemoryPages(path, pages, &stats); err != nil {
++			return stats, err
++		}
++	}
 +	return stats, nil
 +}
 diff --git a/Cubelet/services/cubebox/managed_memory_layers_test.go b/Cubelet/services/cubebox/managed_memory_layers_test.go
 new file mode 100644
-index 0000000..4d5d1f2
 --- /dev/null
 +++ b/Cubelet/services/cubebox/managed_memory_layers_test.go
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,334 @@
 +// SPDX-License-Identifier: Apache-2.0
 +
 +package cubebox
@@ -3730,6 +3777,7 @@ index 0000000..4d5d1f2
 +		"schema_version": 2,
 +		"layers": []map[string]interface{}{{
 +			"name":          "000000.mem",
++			"ranges":        []reclaimMemoryRange{{Offset: 0, Length: uint64(os.Getpagesize())}},
 +			"external_path": filepath.Join(layerRoot, referencedID, "000000.mem"),
 +			"layer_id":      referencedID,
 +			"managed":       true,
@@ -3842,6 +3890,7 @@ index 0000000..4d5d1f2
 +			"schema_version": 2,
 +			"layers": []map[string]interface{}{{
 +				"name":          "000000.mem",
++				"ranges":        []reclaimMemoryRange{{Offset: 0, Length: uint64(os.Getpagesize())}},
 +				"external_path": filepath.Join(layerRoot, referencedID, "000000.mem"),
 +				"layer_id":      referencedID,
 +				"managed":       true,
@@ -3915,9 +3964,10 @@ index 0000000..4d5d1f2
 +	}
 +	raw, _ := json.Marshal(map[string]interface{}{
 +		"schema_version": 1,
-+		"objects": []map[string]string{{
++		"objects": []map[string]interface{}{{
 +			"path":     layerPath,
 +			"category": "lineage_layer",
++			"ranges":   []reclaimMemoryRange{{Offset: 0, Length: uint64(os.Getpagesize())}},
 +		}},
 +	})
 +	if err := os.WriteFile(manifestPath, raw, 0600); err != nil {
@@ -4017,10 +4067,9 @@ index 0000000..4d5d1f2
 +	return file.Close()
 +}
 diff --git a/Cubelet/services/cubebox/pause_cow.go b/Cubelet/services/cubebox/pause_cow.go
-index 8d2c5db..90e4ebb 100644
 --- a/Cubelet/services/cubebox/pause_cow.go
 +++ b/Cubelet/services/cubebox/pause_cow.go
-@@ -12,6 +12,7 @@ import (
+@@ -12,6 +12,7 @@
  	"os"
  	"path/filepath"
  	"strings"
@@ -4028,10 +4077,11 @@ index 8d2c5db..90e4ebb 100644
  	"time"
  
  	"golang.org/x/sys/unix"
-@@ -39,6 +40,127 @@ type pauseSnapshotConfig struct {
+@@ -38,6 +39,132 @@
+ }
  
  const directMemoryKind = "clawbox-direct-file"
- 
++
 +const (
 +	crashRollbackEnabledEnv          = "CLAWBOX_CRASH_ROLLBACK"
 +	crashRollbackPreviousSnapshotKey = "clawbox.crash_rollback.previous_pause_snapshot_id"
@@ -4043,13 +4093,14 @@ index 8d2c5db..90e4ebb 100644
 +}
 +
 +type crashRollbackManifestObject struct {
-+	Path           string `json:"path"`
-+	Category       string `json:"category"`
-+	Device         uint64 `json:"device"`
-+	Inode          uint64 `json:"inode"`
-+	AllocatedBytes int64  `json:"allocated_bytes"`
-+	LogicalBytes   int64  `json:"logical_bytes"`
-+	Mode           string `json:"mode"`
++	Path           string               `json:"path"`
++	Category       string               `json:"category"`
++	Device         uint64               `json:"device"`
++	Inode          uint64               `json:"inode"`
++	AllocatedBytes int64                `json:"allocated_bytes"`
++	LogicalBytes   int64                `json:"logical_bytes"`
++	Mode           string               `json:"mode"`
++	Ranges         []reclaimMemoryRange `json:"ranges,omitempty"`
 +}
 +
 +func writeCrashRollbackManifest(
@@ -4060,6 +4111,7 @@ index 8d2c5db..90e4ebb 100644
 +	if !crashRollbackEnabled() {
 +		return nil
 +	}
++	pageRanges := map[string][]reclaimMemoryRange{}
 +	paths := map[string]string{
 +		directMemoryPath: "memory_head",
 +		snapshotPath:     "snapshot_root",
@@ -4088,7 +4140,8 @@ index 8d2c5db..90e4ebb 100644
 +		paths[sidecar] = "lineage_sidecar"
 +		var document struct {
 +			Layers []struct {
-+				ExternalPath string `json:"external_path"`
++				ExternalPath string               `json:"external_path"`
++				Ranges       []reclaimMemoryRange `json:"ranges"`
 +			} `json:"layers"`
 +		}
 +		if raw, readErr := os.ReadFile(sidecar); readErr == nil {
@@ -4098,6 +4151,7 @@ index 8d2c5db..90e4ebb 100644
 +						continue
 +					}
 +					paths[layer.ExternalPath] = "lineage_layer"
++					pageRanges[layer.ExternalPath] = append(pageRanges[layer.ExternalPath], layer.Ranges...)
 +					matches, _ := filepath.Glob(filepath.Join(
 +						filepath.Dir(layer.ExternalPath), ".pending-*",
 +					))
@@ -4123,6 +4177,7 @@ index 8d2c5db..90e4ebb 100644
 +			Category:     category,
 +			LogicalBytes: info.Size(),
 +			Mode:         info.Mode().String(),
++			Ranges:       pageRanges[path],
 +		}
 +		if stat != nil {
 +			object.Device = uint64(stat.Dev)
@@ -4152,11 +4207,10 @@ index 8d2c5db..90e4ebb 100644
 +	}
 +	return os.Rename(temporary, target)
 +}
-+
+ 
  func directPauseMemoryPath(req *cubebox.UpdateCubeSandboxRequest) (string, bool, error) {
  	ann := req.GetAnnotations()
- 	tier := strings.TrimSpace(ann["clawbox.snapshot.tier"])
-@@ -506,6 +628,14 @@ func (s *service) updateWithPauseCow(
+@@ -506,6 +633,14 @@
  		return failPause(errorcode.ErrorCode_Unknown,
  			fmt.Sprintf("failed to seal s3 pause package snapshots for %s: %v", snapID, err))
  	}
@@ -4171,7 +4225,7 @@ index 8d2c5db..90e4ebb 100644
  
  	// Mark PAUSED before keep_tombstone Destroy so the destroy path takes the
  	// IsPaused branch (task Delete reaps the still-living shim). Pause catalog
-@@ -573,17 +703,29 @@ func (s *service) updateWithPauseCow(
+@@ -573,17 +708,29 @@
  		return rsp, nil
  	}
  	if prev := replacedLivePauseSnapshotID(prevLiveSnap, snapID); prev != "" {
@@ -4213,7 +4267,6 @@ index 8d2c5db..90e4ebb 100644
  		}
  	}
 diff --git a/Cubelet/services/cubebox/pause_cow_test.go b/Cubelet/services/cubebox/pause_cow_test.go
-index 5ae9656..99f020f 100644
 --- a/Cubelet/services/cubebox/pause_cow_test.go
 +++ b/Cubelet/services/cubebox/pause_cow_test.go
 @@ -5,12 +5,17 @@
@@ -4234,10 +4287,13 @@ index 5ae9656..99f020f 100644
  )
  
  func TestResolvePauseSnapshotID(t *testing.T) {
-@@ -84,6 +89,90 @@ func TestReplacedLivePauseSnapshotID(t *testing.T) {
+@@ -81,6 +86,90 @@
  	}
- }
- 
+ 	if got := replacedLivePauseSnapshotID("snap-a00000000000000000000000001", "snap-b00000000000000000000000001"); got != "snap-a00000000000000000000000001" {
+ 		t.Fatalf("resume leftover should GC after next pause, got %q", got)
++	}
++}
++
 +func TestCrashRollbackEnabled(t *testing.T) {
 +	t.Setenv(crashRollbackEnabledEnv, "1")
 +	if !crashRollbackEnabled() {
@@ -4279,7 +4335,7 @@ index 5ae9656..99f020f 100644
 +	}
 +	sidecar := memory + ".lineage.json"
 +	sidecarBody, _ := json.Marshal(map[string]any{
-+		"layers": []map[string]any{{"external_path": layer}},
++		"layers": []map[string]any{{"external_path": layer, "ranges": []reclaimMemoryRange{{Offset: 0, Length: uint64(os.Getpagesize())}}}},
 +	})
 +	if err := os.WriteFile(sidecar, sidecarBody, 0o600); err != nil {
 +		t.Fatal(err)
@@ -4319,17 +4375,27 @@ index 5ae9656..99f020f 100644
 +	}
 +	if !foundPending {
 +		t.Fatalf("pending marker missing from manifest: %s", strings.TrimSpace(string(raw)))
-+	}
-+}
-+
- func TestPauseSnapshotIDForGCCatalogMissUsesPauseLabel(t *testing.T) {
- 	t.Parallel()
- 	snapID := "snap-deadbeefdeadbeefdeadbeef"
+ 	}
+ }
+ 
 diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
-index c599afb..9fcbbf4 100644
 --- a/Cubelet/services/cubebox/relocate_snapshot.go
 +++ b/Cubelet/services/cubebox/relocate_snapshot.go
-@@ -228,6 +228,13 @@ func copyLogicalSnapshot(source, destination string, requireLineage bool) (int64
+@@ -89,6 +89,13 @@
+ 	}
+ 	copied, err := copyLogicalSnapshot(source, tmp, entry.MemorySnapshotMechanism == "incremental-cow")
+ 	if err == nil {
++		var release func()
++		release, err = lockMemoryPublication()
++		if err == nil {
++			defer release()
++		}
++	}
++	if err == nil {
+ 		if _, statErr := os.Stat(tmp + ".lineage.json"); statErr == nil {
+ 			err = os.Rename(tmp+".layers", destination+".layers")
+ 			if err == nil {
+@@ -228,6 +235,13 @@
  		Name         string             `json:"name"`
  		Ranges       []memoryLayerRange `json:"ranges"`
  		ExternalPath *string            `json:"external_path,omitempty"`
@@ -4343,7 +4409,7 @@ index c599afb..9fcbbf4 100644
  	}
  	if err := json.Unmarshal(manifest["layers"], &layers); err != nil {
  		return 0, err
-@@ -239,20 +246,28 @@ func copyLogicalSnapshot(source, destination string, requireLineage bool) (int64
+@@ -239,19 +253,27 @@
  	if err := json.Unmarshal(manifest["logical_bytes"], &logical); err != nil || logical == 0 {
  		return 0, fmt.Errorf("invalid RAM logical size")
  	}
@@ -4365,7 +4431,7 @@ index c599afb..9fcbbf4 100644
 -			if i != 0 || !filepath.IsAbs(*layer.ExternalPath) {
 +			if !filepath.IsAbs(*layer.ExternalPath) {
  				return 0, fmt.Errorf("invalid external RAM base")
- 			}
++			}
 +			if !layer.Managed && i != 0 {
 +				return 0, fmt.Errorf("legacy external RAM base must be layer zero")
 +			}
@@ -4374,11 +4440,10 @@ index c599afb..9fcbbf4 100644
 +			}
 +			if layer.Managed && filepath.Base(filepath.Dir(*layer.ExternalPath)) != *layer.LayerID {
 +				return 0, fmt.Errorf("managed RAM layer path does not match its identity")
-+			}
+ 			}
  			info, err := os.Lstat(*layer.ExternalPath)
  			if err != nil || !info.Mode().IsRegular() || uint64(info.Size()) != logical {
- 				return 0, fmt.Errorf("missing or truncated external RAM base")
-@@ -303,9 +318,11 @@ func copyLogicalSnapshot(source, destination string, requireLineage bool) (int64
+@@ -303,9 +325,11 @@
  		}
  		allocated += stat.Blocks * 512
  		if reused {
@@ -4392,13 +4457,14 @@ index c599afb..9fcbbf4 100644
  	if err := os.Link(filepath.Join(destination+".layers", layers[len(layers)-1].Name), destination); err != nil {
  		return transferred, err
 diff --git a/Cubelet/services/cubebox/template_ops.go b/Cubelet/services/cubebox/template_ops.go
-index c64cdf9..c6bfc6d 100644
 --- a/Cubelet/services/cubebox/template_ops.go
 +++ b/Cubelet/services/cubebox/template_ops.go
-@@ -28,6 +28,15 @@ import (
+@@ -26,6 +26,15 @@
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
  	"github.com/tencentcloud/CubeSandbox/cubelog"
- )
- 
++)
++
 +const (
 +	crashRollbackAbortDeadMarkersAnnotation = "cube.master.crash_rollback.abort_dead_markers"
 +	// crashRollbackReclaimMemoryAnnotation names the current generation whose
@@ -4406,12 +4472,10 @@ index c64cdf9..c6bfc6d 100644
 +	// has been successfully retired. The path is validated against the
 +	// configured warm/cold roots before any inode is touched.
 +	crashRollbackReclaimMemoryAnnotation = "clawbox.snapshot.memory.path"
-+)
-+
+ )
+ 
  func (s *service) CommitSandbox(ctx context.Context, req *cubebox.CommitSandboxRequest) (*cubebox.CommitSandboxResponse, error) {
- 	rsp := &cubebox.CommitSandboxResponse{
- 		RequestID:  req.GetRequestID(),
-@@ -473,6 +482,8 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
+@@ -473,6 +482,8 @@
  		rsp.Ret.RetMsg = "templateID is required"
  		return rsp, nil
  	}
@@ -4420,7 +4484,7 @@ index c64cdf9..c6bfc6d 100644
  	if err := pathutil.ValidateSafeID(rsp.TemplateID); err != nil {
  		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
  		rsp.Ret.RetMsg = fmt.Sprintf("invalid templateID: %v", err)
-@@ -494,6 +505,22 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
+@@ -494,6 +505,22 @@
  		rsp.Ret.RetMsg = err.Error()
  		return rsp, nil
  	}
@@ -4443,7 +4507,7 @@ index c64cdf9..c6bfc6d 100644
  	if _, catErr := storage.GetLocalSnapshotFor(ctx, backend, rsp.TemplateID); errors.Is(catErr, storage.ErrSnapshotCatalogNotFound) && !strings.Contains(backend, "@") {
  		if other := otherCowBackend(backend); other != backend {
  			if _, altErr := storage.GetLocalSnapshotFor(ctx, other, rsp.TemplateID); altErr == nil {
-@@ -535,9 +562,55 @@ func (s *service) CleanupTemplate(ctx context.Context, req *cubebox.CleanupTempl
+@@ -535,7 +562,55 @@
  		rsp.Ret.RetMsg = rerr.Message()
  	}
  	storage.DeleteSnapshotCatalogFor(backend, rsp.TemplateID)
@@ -4466,13 +4530,15 @@ index c64cdf9..c6bfc6d 100644
 +	}
 +	if stats, gcErr := gcManagedMemoryLayers(); gcErr != nil {
 +		log.G(ctx).Warnf("managed RAM layer GC after %s: %v", rsp.TemplateID, gcErr)
-+	} else if stats.Deleted > 0 {
-+		log.G(ctx).Infof("managed RAM layer GC after %s: deleted=%d retained=%d unlinked_allocated_bytes=%d",
-+			rsp.TemplateID, stats.Deleted, stats.Retained, stats.UnlinkedBytes)
++		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
++		rsp.Ret.RetMsg = fmt.Sprintf("RAM page reclamation failed: %v; correct the reported dependency or storage error and retry snapshot cleanup", gcErr)
++	} else if stats.Deleted > 0 || stats.ReclaimedBytes > 0 {
++		log.G(ctx).Infof("managed RAM layer GC after %s: deleted=%d retained=%d unlinked_allocated_bytes=%d reclaimed_bytes=%d punched_ranges=%d",
++			rsp.TemplateID, stats.Deleted, stats.Retained, stats.UnlinkedBytes, stats.ReclaimedBytes, stats.PunchedRanges)
 +	}
  	return rsp, nil
- }
- 
++}
++
 +func safeManagedMemoryReclaimPath(candidate string) bool {
 +	candidate = strings.TrimSpace(candidate)
 +	if candidate == "" || !filepath.IsAbs(candidate) {
@@ -4494,13 +4560,10 @@ index c64cdf9..c6bfc6d 100644
 +		return true
 +	}
 +	return false
-+}
-+
+ }
+ 
  // resolveCleanupRefs is the v4 catalog-first resolution for CleanupTemplate.
- // Priority:
- //  1. caller-supplied Objects (legacy master compatibility) -> parse as-is
 diff --git a/hypervisor/vmm/src/checkpoint_metrics.rs b/hypervisor/vmm/src/checkpoint_metrics.rs
-index 03913bd..6ea3bef 100644
 --- a/hypervisor/vmm/src/checkpoint_metrics.rs
 +++ b/hypervisor/vmm/src/checkpoint_metrics.rs
 @@ -1,17 +1,59 @@
@@ -4508,7 +4571,7 @@ index 03913bd..6ea3bef 100644
  use std::io::Write;
 +use std::sync::{Mutex, OnceLock};
  use std::time::{Instant, SystemTime, UNIX_EPOCH};
- 
++
 +fn log_path() -> Option<&'static str> {
 +    static LOG_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 +    LOG_PATH
@@ -4552,7 +4615,7 @@ index 03913bd..6ea3bef 100644
 +        let _ = file.write_all(format!("{}\n", row).as_bytes());
 +    }
 +}
-+
+ 
  pub fn measure<T, E>(phase: &str, target: &str, bytes: Option<u64>,
                       operation: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
      // Timing JSON is diagnostic-only. With no explicit path, bypass clocks,
@@ -4569,7 +4632,7 @@ index 03913bd..6ea3bef 100644
      // Per-range logging adds thousands of open/write/close operations to each
      // checkpoint. Even when aggregate diagnostics are enabled, detailed range
      // tracing must be explicitly enabled before starting the VM.
-@@ -24,14 +66,40 @@ pub fn measure<T, E>(phase: &str, target: &str, bytes: Option<u64>,
+@@ -24,14 +66,40 @@
      let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
      let result = operation();
      let duration = started.elapsed().as_secs_f64();
@@ -4656,8 +4719,8 @@ diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_ma
 +    same_device: bool,
 +    cross_tier_enabled: bool,
 +) -> bool {
-+    // Lineage::inherit materializes remaining volatile ranges on durable
-+    // targets; crossing tiers no longer requires rewriting all guest RAM.
++    // Both directions retain immutable ancestors on their original tier.
++    // A COLD head does not promise a durable dependency closure.
 +    same_device || cross_tier_enabled
 +}
 +
@@ -4995,12 +5058,8 @@ diff --git a/hypervisor/vmm/src/memory_manager.rs b/hypervisor/vmm/src/memory_ma
 diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapshot_lineage.rs
 --- a/hypervisor/vmm/src/snapshot_lineage.rs
 +++ b/hypervisor/vmm/src/snapshot_lineage.rs
-@@ -7,9 +7,15 @@
- use std::fs::{self, File, OpenOptions};
- use std::io::{self, Write};
- use std::collections::HashSet;
--use std::os::unix::fs::MetadataExt;
-+use std::os::unix::fs::{FileExt, MetadataExt};
+@@ -10,6 +10,12 @@
+ use std::os::unix::fs::MetadataExt;
  use std::os::unix::io::AsRawFd;
  use std::path::{Path, PathBuf};
 +use std::sync::atomic::{AtomicU64, Ordering};
@@ -5036,10 +5095,12 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
  }
  
  pub fn sidecar(path: &Path) -> PathBuf {
-@@ -60,8 +76,176 @@
+@@ -58,6 +74,156 @@
+     let mut name = path.as_os_str().to_os_string();
+     name.push(".layers");
      name.into()
- }
- 
++}
++
 +fn tier_roots() -> Vec<PathBuf> {
 +    ["CLAWBOX_COLD_SNAPSHOT_ROOT", "CLAWBOX_WARM_SNAPSHOT_ROOT"]
 +        .iter()
@@ -5075,12 +5136,10 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +
 +fn managed_layer_identity(metadata: &fs::Metadata) -> String {
 +    format!(
-+        "{:x}-{:x}-{:x}-{:x}-{:x}",
++        "{:x}-{:x}-{:x}",
 +        metadata.dev(),
 +        metadata.ino(),
-+        metadata.len(),
-+        metadata.mtime(),
-+        metadata.mtime_nsec()
++        metadata.len()
 +    )
 +}
 +
@@ -5106,10 +5165,16 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +    }
 +}
 +
-+fn acquire_managed_root_locks(markers: &[PathBuf]) -> io::Result<Vec<ManagedRootLock>> {
++fn acquire_managed_root_locks(markers: &[PathBuf], snapshot: &Path) -> io::Result<Vec<ManagedRootLock>> {
 +    let mut roots = markers.iter()
 +        .filter_map(|marker| marker.parent().and_then(Path::parent).map(Path::to_path_buf))
 +        .collect::<Vec<_>>();
++    // Same-filesystem hardlinked layers also participate in page GC. Publish
++    // their references under the same locks even without a managed ancestor.
++    roots.extend(tier_roots().into_iter().map(|root| root.join("layers")));
++    // Some shims do not inherit the tier environment. The destination's
++    // <tier>/<sandbox>/<memory>.layers shape still identifies its GC lock.
++    roots.push(managed_root_for(&layer_dir(snapshot).join("000000.mem"))?);
 +    roots.sort();
 +    roots.dedup();
 +    roots.into_iter().map(|root| ManagedRootLock::acquire(&root)).collect()
@@ -5184,36 +5249,10 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +        return Err(invalid("managed RAM layer path does not match its stable identity"));
 +    }
 +    Ok(external.clone())
-+}
-+
- fn invalid(message: &str) -> io::Error {
-     io::Error::new(io::ErrorKind::InvalidData, message)
-+}
-+
-+// A durable successor must own SSD copies of its remaining tmpfs ranges.
-+// Copy only the ranges still selected by the lineage, without inspecting page
-+// contents. Durable external layers keep their existing shared identities.
-+fn copy_layer_ranges(source: &File, target: &Path, ranges: &[Range]) -> io::Result<u64> {
-+    let output = OpenOptions::new().write(true).create_new(true).open(target)?;
-+    output.set_len(source.metadata()?.len())?;
-+    let mut buffer = vec![0_u8; 1024 * 1024];
-+    let mut copied = 0;
-+    for range in ranges {
-+        let mut offset = range.offset;
-+        let end = range_end(range)?;
-+        while offset < end {
-+            let length = (end - offset).min(buffer.len() as u64) as usize;
-+            source.read_exact_at(&mut buffer[..length], offset)?;
-+            output.write_all_at(&buffer[..length], offset)?;
-+            offset += length as u64;
-+            copied += length as u64;
-+        }
-+    }
-+    Ok(copied)
  }
  
- fn range_end(range: &Range) -> io::Result<u64> {
-@@ -172,7 +356,10 @@
+ fn invalid(message: &str) -> io::Error {
+@@ -172,7 +338,10 @@
              Err(e) => return Err(e),
          };
          let lineage: Self = serde_json::from_reader(std::io::BufReader::new(file))?;
@@ -5225,7 +5264,7 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
              || lineage.logical_bytes != layout.iter().map(|r| r.length).sum::<u64>()
              || page_size == 0
          {
-@@ -183,12 +370,12 @@
+@@ -183,12 +352,12 @@
              if layer.name != format!("{:06}.mem", index) {
                  return Err(invalid("invalid RAM layer name"));
              }
@@ -5244,7 +5283,7 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
              if !metadata.is_file() || metadata.len() != lineage.logical_bytes {
                  return Err(invalid("missing or truncated RAM layer"));
              }
-@@ -223,7 +410,9 @@
+@@ -223,7 +392,9 @@
              reclaimed_bytes: 0, full_base: false,
              layers: vec![Layer {
                  name: "000000.mem".into(), ranges, external_path: Some(path),
@@ -5254,45 +5293,21 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
          }
      }
  
-@@ -237,7 +426,12 @@
+@@ -237,6 +408,7 @@
      {
          fs::create_dir(layer_dir(path))?;
          let mut layers = Vec::new();
 +        let mut takeover_markers = Vec::new();
-+        let mut copied_bytes = 0;
-+        let mut copied_ranges = 0;
-+        let promotion_started = std::time::Instant::now();
          if let Some((parent_path, parent)) = parent {
-+            let durable_target = !volatile(&File::open(layer_dir(path))?)?;
              // Canonicalize both new and legacy parents newest-to-oldest. Each
              // inherited layer contains only bytes not supplied by a newer
-             // parent layer or this checkpoint.
-@@ -254,20 +448,77 @@
+@@ -254,20 +426,57 @@
              retained.reverse();
              for (index, (layer, ranges)) in retained.into_iter().enumerate() {
                  let name = format!("{:06}.mem", index);
 -                if layer.external_path.is_none() {
 -                    fs::hard_link(layer.file_path(parent_path), layer_dir(path).join(&name))?;
 +                let source = layer.file_path(parent_path);
-+                if durable_target {
-+                    let input = File::open(&source)?;
-+                    if volatile(&input)? {
-+                        copied_bytes += copy_layer_ranges(
-+                            &input, &layer_dir(path).join(&name), &ranges)?;
-+                        copied_ranges += ranges.len();
-+                        layers.push(Layer {
-+                            name, ranges, external_path: None, layer_id: None,
-+                            managed: false,
-+                        });
-+                        continue;
-+                    }
-                 }
--                layers.push(Layer {
--                    name,
--                    ranges,
--                    external_path: layer.external_path.clone(),
--                });
--            }
 +                if let Some(external) = &layer.external_path {
 +                    validate_external_layer(layer, index)?;
 +                    layers.push(Layer {
@@ -5303,7 +5318,14 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +                        managed: layer.managed,
 +                    });
 +                    continue;
-+                }
+                 }
+-                layers.push(Layer {
+-                    name,
+-                    ranges,
+-                    external_path: layer.external_path.clone(),
+-                });
+-            }
+-        }
 +                match fs::hard_link(&source, layer_dir(path).join(&name)) {
 +                    Ok(()) => layers.push(Layer {
 +                        name,
@@ -5338,24 +5360,16 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +        } else {
 +            LEGACY_LINEAGE_SCHEMA_VERSION
 +        };
-+        if copied_ranges > 0 {
-+            crate::checkpoint_metrics::record(
-+                "memory.promote_volatile_layers", &path.to_string_lossy(),
-+                promotion_started.elapsed().as_secs_f64(), Some(copied_bytes),
-+                Some(copied_ranges as u64),
-+            );
-         }
          Ok(Self {
 -            schema_version: 1, logical_bytes, allocated_bytes: 0,
--            dirty_bytes: None, transferred_bytes: 0, effective_private_bytes: 0,
 +            schema_version, logical_bytes, allocated_bytes: 0,
-+            dirty_bytes: None, transferred_bytes: copied_bytes, effective_private_bytes: 0,
+             dirty_bytes: None, transferred_bytes: 0, effective_private_bytes: 0,
              reclaimed_bytes: 0, full_base: parent.is_none(), layers,
 +            takeover_markers,
          })
      }
  
-@@ -276,12 +527,15 @@
+@@ -276,12 +485,15 @@
      pub fn publish(mut self, path: &Path, ranges: Vec<Range>, durable: bool)
          -> io::Result<()>
      {
@@ -5374,7 +5388,7 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
          }
          let mut inodes = HashSet::new();
          for layer in &self.layers {
-@@ -297,6 +551,13 @@
+@@ -297,6 +509,13 @@
              if durable { file.sync_all()?; }
          }
          let target = sidecar(path);
@@ -5384,11 +5398,11 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +        let mut publication_paths = self.takeover_markers.clone();
 +        publication_paths.extend(self.layers.iter().filter(|layer| layer.managed)
 +            .filter_map(|layer| layer.external_path.clone()));
-+        let _root_locks = acquire_managed_root_locks(&publication_paths)?;
++        let _root_locks = acquire_managed_root_locks(&publication_paths, path)?;
          let temporary = target.with_extension("json.pending");
          let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
          file.write_all(&serde_json::to_vec(&self)?)?;
-@@ -306,6 +567,9 @@
+@@ -306,6 +525,9 @@
          }
          fs::rename(temporary, target)?;
          if durable { File::open(path.parent().ok_or_else(|| invalid("no parent"))?)?.sync_all()?; }
@@ -5398,7 +5412,7 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
          Ok(())
      }
  }
-@@ -314,7 +578,11 @@
+@@ -314,7 +536,11 @@
  mod tests {
      use super::*;
      use std::os::unix::fs::FileExt;
@@ -5410,7 +5424,7 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
  
      struct Directory(PathBuf);
      impl Directory {
-@@ -328,6 +596,93 @@
+@@ -328,6 +554,144 @@
      }
      impl Drop for Directory {
          fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
@@ -5451,12 +5465,42 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +    }
 +
 +    #[test]
-+    fn warm_to_cold_copies_only_retained_ranges_and_keeps_ssd_base_shared() {
++    fn ordinary_publication_locks_inferred_tier_and_identity_survives_punch() {
++        let _guard = TEST_ENV_LOCK.lock().unwrap();
++        std::env::remove_var("CLAWBOX_WARM_SNAPSHOT_ROOT");
++        std::env::remove_var("CLAWBOX_COLD_SNAPSHOT_ROOT");
++        let directory = Directory::new();
++        let snapshot = directory.0.join("sandbox").join("child.mem");
++        fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
++        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
++        fs::write(&snapshot, vec![0x42; 2 * page]).unwrap();
++        let before = managed_layer_identity(&snapshot.metadata().unwrap());
++        let file = OpenOptions::new().write(true).open(&snapshot).unwrap();
++        assert_eq!(unsafe { libc::fallocate(file.as_raw_fd(),
++            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE, 0, page as i64) }, 0);
++        assert_eq!(before, managed_layer_identity(&snapshot.metadata().unwrap()));
++        let lock = ManagedRootLock::acquire(&directory.0.join("layers")).unwrap();
++        let (send, receive) = mpsc::channel();
++        let worker = thread::spawn(move || {
++            let locks = acquire_managed_root_locks(&[], &snapshot).unwrap();
++            send.send(()).unwrap();
++            drop(locks);
++        });
++        assert!(receive.recv_timeout(Duration::from_millis(100)).is_err());
++        drop(lock);
++        receive.recv_timeout(Duration::from_secs(2)).unwrap();
++        worker.join().unwrap();
++    }
++
++    #[test]
++    fn warm_to_cold_shares_retained_ranges_without_copying() {
 +        let _guard = TEST_ENV_LOCK.lock().unwrap();
 +        let cold = Directory::new();
 +        let warm = Directory(Path::new("/dev/shm").join(format!(
-+            "cube-lineage-promote-{}", std::process::id())));
++            "cube-lineage-warm-parent-{}", std::process::id())));
 +        fs::create_dir(&warm.0).unwrap();
++        std::env::set_var(CROSS_TIER_FLAG, "1");
++        std::env::set_var("CLAWBOX_WARM_SNAPSHOT_ROOT", &warm.0);
 +        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
 +        let size = 4 * page;
 +        let range = |n, count| Range {
@@ -5476,6 +5520,7 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +        Lineage::inherit(&parent_path, Some((&base_path, &base)), size, &[range(1, 2)])
 +            .unwrap().publish(&parent_path, vec![range(1, 2)], false).unwrap();
 +        let parent = Lineage::load(&parent_path, &layout, page).unwrap().unwrap();
++        let warm_inode = parent_path.metadata().unwrap().ino();
 +        let child_path = cold.0.join("child.mem");
 +        let file = File::create(&child_path).unwrap();
 +        assert!(!volatile(&file).unwrap());
@@ -5483,16 +5528,23 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +        file.write_all_at(&vec![0x43; page as usize], 2 * page).unwrap();
 +        Lineage::inherit(&child_path, Some((&parent_path, &parent)), size, &[range(2, 1)])
 +            .unwrap().publish(&child_path, vec![range(2, 1)], true).unwrap();
-+        drop(warm); // The durable child must survive loss of the entire tmpfs parent.
++        // Retiring the parent package must not delete the managed WARM layer.
++        fs::remove_file(&parent_path).unwrap();
++        fs::remove_file(sidecar(&parent_path)).unwrap();
++        fs::remove_dir_all(layer_dir(&parent_path)).unwrap();
 +        let child = Lineage::load(&child_path, &layout, page).unwrap().unwrap();
 +        assert!(!child.full_base);
 +        assert_eq!(child.dirty_bytes, Some(page));
-+        assert_eq!(child.transferred_bytes, 2 * page);
++        assert_eq!(child.transferred_bytes, page);
 +        assert_eq!(child.layers[0].file_path(&child_path).metadata().unwrap().ino(), base_inode);
++        assert!(child.layers[1].managed);
++        let inherited = child.layers[1].file_path(&child_path);
++        assert_eq!(inherited.metadata().unwrap().ino(), warm_inode);
++        assert!(volatile(&File::open(&inherited).unwrap()).unwrap());
++        assert_eq!(child.layers[1].ranges, vec![range(1, 1)]);
 +        let mut restored = vec![0xff; size as usize];
 +        for layer in &child.layers {
 +            let file = File::open(layer.file_path(&child_path)).unwrap();
-+            assert!(!volatile(&file).unwrap());
 +            for r in &layer.ranges {
 +                file.read_exact_at(&mut restored[r.offset as usize..(r.offset + r.length) as usize], r.offset).unwrap();
 +            }
@@ -5501,10 +5553,23 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +        expected[page as usize..2 * page as usize].fill(0);
 +        expected[2 * page as usize..3 * page as usize].fill(0x43);
 +        assert_eq!(restored, expected);
++        // A zero-dirty successor must retain the same WARM inode too.
++        let next_path = cold.0.join("next.mem");
++        File::create(&next_path).unwrap().set_len(size).unwrap();
++        Lineage::inherit(&next_path, Some((&child_path, &child)), size, &[])
++            .unwrap().publish(&next_path, vec![], true).unwrap();
++        let next = Lineage::load(&next_path, &layout, page).unwrap().unwrap();
++        assert_eq!(next.transferred_bytes, 0);
++        assert_eq!(next.dirty_bytes, Some(0));
++        assert_eq!(next.layers[1].file_path(&next_path).metadata().unwrap().ino(), warm_inode);
++        drop(warm);
++        assert!(Lineage::load(&child_path, &layout, page).is_err());
++        std::env::remove_var("CLAWBOX_WARM_SNAPSHOT_ROOT");
++        std::env::remove_var(CROSS_TIER_FLAG);
      }
  
      #[test]
-@@ -464,4 +819,190 @@
+@@ -464,4 +828,190 @@
          assert_eq!(child.transferred_bytes, 0);
          assert_eq!(child.dirty_bytes, Some(0));
      }
@@ -5697,10 +5762,9 @@ diff --git a/hypervisor/vmm/src/snapshot_lineage.rs b/hypervisor/vmm/src/snapsho
 +    }
 +}
 diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
-index 71449b4..df8bedf 100644
 --- a/sdk/python/cubesandbox/sandbox.py
 +++ b/sdk/python/cubesandbox/sandbox.py
-@@ -365,6 +365,24 @@ class Sandbox:
+@@ -365,6 +365,24 @@
          _check_response(resp)
          return cls(resp.json(), config=cfg)
  
@@ -5726,10 +5790,9 @@ index 71449b4..df8bedf 100644
      @classmethod
      def list(cls, config: Config | None = None) -> list[dict]:
 diff --git a/sdk/python/tests/test_sandbox.py b/sdk/python/tests/test_sandbox.py
-index 56815bb..4e8d583 100644
 --- a/sdk/python/tests/test_sandbox.py
 +++ b/sdk/python/tests/test_sandbox.py
-@@ -705,6 +705,22 @@ class TestConnect:
+@@ -705,6 +705,22 @@
          assert "timeout" not in body
  
  
@@ -5775,9 +5838,9 @@ new file mode 100644
 +			encode := func(name string) []byte {
 +				var doc interface{}
 +				if suffix == ".lineage.json" {
-+					doc = map[string]interface{}{"schema_version": 2, "layers": []map[string]interface{}{{"external_path": name, "layer_id": "layer", "managed": true}}}
++					doc = map[string]interface{}{"schema_version": 2, "layers": []map[string]interface{}{{"name": "000000.mem", "external_path": name, "layer_id": "layer", "managed": true, "ranges": []reclaimMemoryRange{{Offset: 0, Length: uint64(os.Getpagesize())}}}}}
 +				} else {
-+					doc = map[string]interface{}{"objects": []map[string]string{{"path": name, "category": "lineage_layer"}}}
++					doc = map[string]interface{}{"objects": []map[string]interface{}{{"path": name, "category": "lineage_layer", "ranges": []reclaimMemoryRange{{Offset: 0, Length: uint64(os.Getpagesize())}}}}}
 +				}
 +				raw, err := json.Marshal(doc)
 +				if err != nil {
@@ -5887,4 +5950,581 @@ new file mode 100644
 +	if _, err := batch.run(request, "roots-b", collect); err != nil || calls != 5 {
 +		t.Fatalf("failed sweep was reused: calls=%d err=%v", calls, err)
 +	}
++}
+diff --git a/Cubelet/services/cubebox/managed_page_reclaim.go b/Cubelet/services/cubebox/managed_page_reclaim.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/managed_page_reclaim.go
+@@ -0,0 +1,197 @@
++// SPDX-License-Identifier: Apache-2.0
++package cubebox
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sort"
++
++	"golang.org/x/sys/unix"
++)
++
++type memoryInode struct{ device, inode uint64 }
++type memoryPageUse struct {
++	ranges    []reclaimMemoryRange
++	names     map[string]struct{}
++	whole     bool
++	reclaimed bool
++}
++
++func lockMemoryPublication() (func(), error) {
++	roots := managedMemoryLayerRoots()
++	sort.Strings(roots)
++	var locks []*os.File
++	release := func() {
++		for i := len(locks) - 1; i >= 0; i-- {
++			unix.Flock(int(locks[i].Fd()), unix.LOCK_UN)
++			locks[i].Close()
++		}
++	}
++	for _, root := range roots {
++		lock, err := lockManagedMemoryLayerRoot(filepath.Join(root, "layers"))
++		if err != nil {
++			release()
++			return nil, err
++		}
++		locks = append(locks, lock)
++	}
++	return release, nil
++}
++
++// The layer-root publication locks must cover the complete census and reclaim.
++// All aliases participate: the original checkpoint may still back a live VM.
++func resolveMemoryPageReferences(refs map[string]memoryPageReference) (map[memoryInode]*memoryPageUse, error) {
++	pages := map[memoryInode]*memoryPageUse{}
++	for path, ref := range refs {
++		var stat unix.Stat_t
++		err := unix.Lstat(path, &stat)
++		if errors.Is(err, os.ErrNotExist) && !ref.required {
++			continue // exclusively owned layers can be stored compressed
++		}
++		if err != nil {
++			return nil, fmt.Errorf("stat referenced RAM %s: %w", path, err)
++		}
++		if stat.Mode&unix.S_IFMT != unix.S_IFREG {
++			return nil, fmt.Errorf("referenced RAM is not a regular file: %s", path)
++		}
++		key := memoryInode{uint64(stat.Dev), stat.Ino}
++		use := pages[key]
++		if use == nil {
++			use = &memoryPageUse{names: map[string]struct{}{}}
++			pages[key] = use
++		}
++		use.names[filepath.Clean(path)] = struct{}{}
++		use.whole = use.whole || ref.whole
++		for _, r := range ref.ranges {
++			page := uint64(os.Getpagesize())
++			if r.Length == 0 || r.Offset%page != 0 || r.Length%page != 0 ||
++				r.Offset > uint64(stat.Size) || r.Length > uint64(stat.Size)-r.Offset {
++				return nil, fmt.Errorf("invalid referenced RAM page range in %s: %+v", path, r)
++			}
++			use.ranges = append(use.ranges, r)
++		}
++	}
++	return pages, nil
++}
++
++// Pending takeover protects the entire inode, including any other managed name
++// for it. No ranges can be discarded before the publisher commits its sidecar.
++func protectPendingMemoryPages(layerRoots []string, pages map[memoryInode]*memoryPageUse) error {
++	for _, root := range layerRoots {
++		entries, err := os.ReadDir(root)
++		if err != nil {
++			return err
++		}
++		for _, entry := range entries {
++			if !entry.IsDir() {
++				continue
++			}
++			directory := filepath.Join(root, entry.Name())
++			pending, err := hasManagedMemoryLayerMarker(directory)
++			if err != nil {
++				return err
++			}
++			if !pending {
++				continue
++			}
++			var stat unix.Stat_t
++			err = unix.Stat(filepath.Join(directory, "000000.mem"), &stat)
++			if errors.Is(err, os.ErrNotExist) {
++				continue
++			}
++			if err != nil {
++				return err
++			}
++			if use := pages[memoryInode{uint64(stat.Dev), stat.Ino}]; use != nil {
++				use.whole = true
++			}
++		}
++	}
++	return nil
++}
++
++func referencedMemoryUnion(ranges []reclaimMemoryRange) []reclaimMemoryRange {
++	ordered := append([]reclaimMemoryRange(nil), ranges...)
++	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Offset < ordered[j].Offset })
++	merged := make([]reclaimMemoryRange, 0, len(ordered))
++	for _, r := range ordered {
++		if len(merged) > 0 {
++			previous := &merged[len(merged)-1]
++			end := previous.Offset + previous.Length
++			if r.Offset <= end {
++				if next := r.Offset + r.Length; next > end {
++					previous.Length = next - previous.Offset
++				}
++				continue
++			}
++		}
++		merged = append(merged, r)
++	}
++	return merged
++}
++
++func reclaimReferencedMemoryPages(path string, pages map[memoryInode]*memoryPageUse, stats *managedMemoryLayerGCStats) error {
++	file, err := os.OpenFile(path, os.O_RDWR, 0)
++	if err != nil {
++		return err
++	}
++	defer file.Close()
++	var before unix.Stat_t
++	if err := unix.Fstat(int(file.Fd()), &before); err != nil {
++		return err
++	}
++	use := pages[memoryInode{uint64(before.Dev), before.Ino}]
++	if use == nil || use.whole || use.reclaimed {
++		return nil
++	}
++	// An alias outside the scanned checkpoint directories is an unknown owner,
++	// not evidence of zero references. Keep its pages until it is registered.
++	if uint64(before.Nlink) > uint64(len(use.names)) {
++		return nil
++	}
++	holes, err := reclaimHoles(referencedMemoryUnion(use.ranges), uint64(before.Size))
++	if err != nil {
++		return err
++	}
++	for _, hole := range holes {
++		end := int64(hole.Offset + hole.Length)
++		for offset := int64(hole.Offset); offset < end; {
++			data, err := unix.Seek(int(file.Fd()), offset, unix.SEEK_DATA)
++			if errors.Is(err, unix.ENXIO) {
++				break
++			}
++			if err != nil {
++				return fmt.Errorf("find allocated RAM pages %s: %w", path, err)
++			}
++			if data >= end {
++				break
++			}
++			next, err := unix.Seek(int(file.Fd()), data, unix.SEEK_HOLE)
++			if err != nil {
++				return err
++			}
++			if next > end {
++				next = end
++			}
++			if next <= data {
++				return fmt.Errorf("invalid RAM extent in %s", path)
++			}
++			if err := unix.Fallocate(int(file.Fd()), unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, data, next-data); err != nil {
++				return fmt.Errorf("reclaim zero-reference RAM pages %s: %w", path, err)
++			}
++			stats.PunchedRanges++
++			offset = next
++		}
++	}
++	var after unix.Stat_t
++	if err := unix.Fstat(int(file.Fd()), &after); err != nil {
++		return err
++	}
++	if after.Blocks < before.Blocks {
++		stats.ReclaimedBytes += uint64(before.Blocks-after.Blocks) * 512
++	}
++	use.reclaimed = true
++	return nil
++}
+diff --git a/Cubelet/services/cubebox/managed_page_reclaim_test.go b/Cubelet/services/cubebox/managed_page_reclaim_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/managed_page_reclaim_test.go
+@@ -0,0 +1,370 @@
++package cubebox
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"sort"
++	"sync"
++	"testing"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++func pageGCFile(t testing.TB, path string, pages int) {
++	t.Helper()
++	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
++		t.Fatal(err)
++	}
++	data := make([]byte, pages*os.Getpagesize())
++	for i := 0; i < pages; i++ {
++		copy(data[i*os.Getpagesize():], bytes.Repeat([]byte{byte(i + 1)}, os.Getpagesize()))
++	}
++	if err := os.WriteFile(path, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func pageGCReference(t testing.TB, snapshot, layer string, indices ...int) {
++	t.Helper()
++	ranges := make([]reclaimMemoryRange, 0, len(indices))
++	for _, i := range indices {
++		ranges = append(ranges, reclaimMemoryRange{Offset: uint64(i * os.Getpagesize()), Length: uint64(os.Getpagesize())})
++	}
++	doc := map[string]any{"schema_version": 2, "layers": []map[string]any{{
++		"name": "000000.mem", "external_path": layer, "managed": true,
++		"layer_id": filepath.Base(filepath.Dir(layer)), "ranges": ranges,
++	}}}
++	raw, err := json.Marshal(doc)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.MkdirAll(filepath.Dir(snapshot), 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(snapshot+".lineage.json", raw, 0600); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func pageGCRoots(t testing.TB, tmpfs bool) (string, string) {
++	t.Helper()
++	cold := t.TempDir()
++	warm := t.TempDir()
++	if tmpfs {
++		var err error
++		warm, err = os.MkdirTemp("/dev/shm", "clawbox-page-gc-")
++		if err != nil {
++			t.Fatal(err)
++		}
++		t.Cleanup(func() { os.RemoveAll(warm) })
++	}
++	t.Setenv("CLAWBOX_COLD_SNAPSHOT_ROOT", cold)
++	t.Setenv("CLAWBOX_WARM_SNAPSHOT_ROOT", warm)
++	t.Setenv("CLAWBOX_MANAGED_LAYER_GC_GRACE_SECONDS", "0")
++	return cold, warm
++}
++
++func checkPageGCContents(t *testing.T, path string, total int, live ...int) {
++	t.Helper()
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	keep := map[int]bool{}
++	for _, n := range live {
++		keep[n] = true
++	}
++	for n := 0; n < total; n++ {
++		value := byte(0)
++		if keep[n] {
++			value = byte(n + 1)
++		}
++		if !bytes.Equal(data[n*os.Getpagesize():(n+1)*os.Getpagesize()], bytes.Repeat([]byte{value}, os.Getpagesize())) {
++			t.Fatalf("page %d changed incorrectly, live=%v", n, keep[n])
++		}
++	}
++}
++
++func TestManagedPagesReclaimBranchUnionOnDiskAndTmpfs(t *testing.T) {
++	for _, tmpfs := range []bool{false, true} {
++		t.Run(fmt.Sprint(tmpfs), func(t *testing.T) {
++			cold, warm := pageGCRoots(t, tmpfs)
++			layer := filepath.Join(warm, "layers", "shared", "000000.mem")
++			pageGCFile(t, layer, 8)
++			a, b := filepath.Join(cold, "a", "g2.mem"), filepath.Join(warm, "b", "g2.mem")
++			pageGCReference(t, a, layer, 0, 1, 4)
++			pageGCReference(t, b, layer, 2, 3, 6)
++			stats, err := gcManagedMemoryLayers()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if stats.ReclaimedBytes != uint64(2*os.Getpagesize()) {
++				t.Fatalf("wrong physical reclaim: %+v", stats)
++			}
++			checkPageGCContents(t, layer, 8, 0, 1, 2, 3, 4, 6)
++			os.Remove(a + ".lineage.json")
++			stats, err = gcManagedMemoryLayers()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if stats.ReclaimedBytes != uint64(3*os.Getpagesize()) {
++				t.Fatalf("last page references not released: %+v", stats)
++			}
++			checkPageGCContents(t, layer, 8, 2, 3, 6)
++			stats, err = gcManagedMemoryLayers()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if stats.ReclaimedBytes != 0 || stats.PunchedRanges != 0 {
++				t.Fatalf("repeated sweep rewrote holes: %+v", stats)
++			}
++			os.Remove(b + ".lineage.json")
++			stats, err = gcManagedMemoryLayers()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if stats.Deleted != 1 {
++				t.Fatalf("last owner did not delete layer: %+v", stats)
++			}
++			if _, err := os.Stat(layer); !os.IsNotExist(err) {
++				t.Fatal("unreferenced file retained", err)
++			}
++		})
++	}
++}
++
++func TestManagedPagesProtectLiveParentAliasesAndPendingPublisher(t *testing.T) {
++	cold, warm := pageGCRoots(t, true)
++	layer := filepath.Join(warm, "layers", "shared", "000000.mem")
++	pageGCFile(t, layer, 4)
++	parent := filepath.Join(warm, "parent", "g1.mem")
++	os.MkdirAll(parent+".layers", 0700)
++	if err := os.Link(layer, parent); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Link(layer, filepath.Join(parent+".layers", "000000.mem")); err != nil {
++		t.Fatal(err)
++	}
++	raw, _ := json.Marshal(map[string]any{"schema_version": 2, "layers": []map[string]any{{"name": "000000.mem", "ranges": []reclaimMemoryRange{{Offset: 0, Length: uint64(4 * os.Getpagesize())}}}}})
++	os.WriteFile(parent+".lineage.json", raw, 0600)
++	child := filepath.Join(cold, "child", "g2.mem")
++	pageGCReference(t, child, layer, 2)
++	f, err := os.Open(layer)
++	if err != nil {
++		t.Fatal(err)
++	}
++	mapping, err := unix.Mmap(int(f.Fd()), 0, 4*os.Getpagesize(), unix.PROT_READ, unix.MAP_PRIVATE)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stats, err := gcManagedMemoryLayers()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.ReclaimedBytes != 0 || mapping[0] != 1 {
++		t.Fatalf("live parent lost pages: %+v", stats)
++	}
++	unix.Munmap(mapping)
++	f.Close()
++	os.RemoveAll(filepath.Dir(parent))
++	marker := filepath.Join(filepath.Dir(layer), ".pending-test")
++	os.WriteFile(marker, nil, 0600)
++	stats, err = gcManagedMemoryLayers()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.ReclaimedBytes != 0 {
++		t.Fatal("pending publisher lost pages")
++	}
++	os.Remove(marker)
++	stats, err = gcManagedMemoryLayers()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.ReclaimedBytes != uint64(3*os.Getpagesize()) {
++		t.Fatalf("retired parent still pins data: %+v", stats)
++	}
++	checkPageGCContents(t, layer, 4, 2)
++}
++
++func TestManagedPagesUnknownAliasAndInvalidRangeFailClosed(t *testing.T) {
++	cold, warm := pageGCRoots(t, false)
++	layer := filepath.Join(warm, "layers", "shared", "000000.mem")
++	pageGCFile(t, layer, 4)
++	child := filepath.Join(cold, "child", "g2.mem")
++	pageGCReference(t, child, layer, 1)
++	unknown := filepath.Join(t.TempDir(), "unknown.mem")
++	os.Link(layer, unknown)
++	stats, err := gcManagedMemoryLayers()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.ReclaimedBytes != 0 {
++		t.Fatal("unknown hardlink was ignored")
++	}
++	os.Remove(unknown)
++	pageGCReference(t, child, layer, 99)
++	if _, err := gcManagedMemoryLayers(); err == nil {
++		t.Fatal("invalid range accepted")
++	}
++	checkPageGCContents(t, layer, 4, 0, 1, 2, 3)
++}
++
++func TestSharedOrdinaryFilesReleaseZeroReferencePages(t *testing.T) {
++	cold, _ := pageGCRoots(t, false)
++	first := filepath.Join(cold, "a", "g1.mem")
++	second := filepath.Join(cold, "b", "g2.mem")
++	a := filepath.Join(first+".layers", "000000.mem")
++	b := filepath.Join(second+".layers", "000000.mem")
++	pageGCFile(t, a, 4)
++	os.MkdirAll(filepath.Dir(b), 0700)
++	os.Link(a, b)
++	for head, index := range map[string]int{first: 0, second: 2} {
++		raw, _ := json.Marshal(map[string]any{"schema_version": 2, "layers": []map[string]any{{"name": "000000.mem", "ranges": []reclaimMemoryRange{{Offset: uint64(index * os.Getpagesize()), Length: uint64(os.Getpagesize())}}}}})
++		os.WriteFile(head+".lineage.json", raw, 0600)
++	}
++	stats, err := gcManagedMemoryLayers()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.ReclaimedBytes != uint64(2*os.Getpagesize()) {
++		t.Fatalf("shared ordinary aliases not reclaimed: %+v", stats)
++	}
++	checkPageGCContents(t, a, 4, 0, 2)
++	os.RemoveAll(filepath.Dir(first))
++	stats, err = gcManagedMemoryLayers()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if stats.ReclaimedBytes != uint64(os.Getpagesize()) {
++		t.Fatalf("removed branch retained pages: %+v", stats)
++	}
++	checkPageGCContents(t, b, 4, 2)
++}
++
++func TestRollbackProtectsItsRangesAndPendingMarkerExpires(t *testing.T) {
++	cold, warm := pageGCRoots(t, true)
++	layer := filepath.Join(warm, "layers", "rollback", "000000.mem")
++	pageGCFile(t, layer, 4)
++	pageGCReference(t, filepath.Join(cold, "current.mem"), layer, 1)
++	marker := filepath.Join(filepath.Dir(layer), ".pending-test")
++	os.WriteFile(marker, nil, 0600)
++	manifest := filepath.Join(cold, "previous.mem.crash-rollback.json")
++	raw, _ := json.Marshal(map[string]any{"objects": []map[string]any{
++		{"path": layer, "category": "lineage_layer", "ranges": []reclaimMemoryRange{{Offset: uint64(3 * os.Getpagesize()), Length: uint64(os.Getpagesize())}}},
++		{"path": marker, "category": "pending_marker"},
++	}})
++	os.WriteFile(manifest, raw, 0600)
++	if _, err := gcManagedMemoryLayers(); err != nil {
++		t.Fatal(err)
++	}
++	checkPageGCContents(t, layer, 4, 0, 1, 2, 3)
++	os.Remove(marker)
++	if _, err := gcManagedMemoryLayers(); err != nil {
++		t.Fatal(err)
++	}
++	checkPageGCContents(t, layer, 4, 1, 3)
++	os.Remove(manifest)
++	if _, err := gcManagedMemoryLayers(); err != nil {
++		t.Fatal(err)
++	}
++	checkPageGCContents(t, layer, 4, 1)
++}
++
++func TestManagedPagesGCSerializesWithReferencePublication(t *testing.T) {
++	cold, warm := pageGCRoots(t, true)
++	layer := filepath.Join(warm, "layers", "shared", "000000.mem")
++	pageGCFile(t, layer, 4)
++	parent := filepath.Join(cold, "parent", "g1.mem")
++	pageGCReference(t, parent, layer, 0, 1, 2, 3)
++	lock, err := lockManagedMemoryLayerRoot(filepath.Join(warm, "layers"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan error, 1)
++	go func() { _, err := gcManagedMemoryLayers(); done <- err }()
++	select {
++	case err := <-done:
++		t.Fatalf("GC passed publication lock: %v", err)
++	case <-time.After(30 * time.Millisecond):
++	}
++	child := filepath.Join(warm, "child", "g2.mem")
++	pageGCReference(t, child, layer, 1, 3)
++	os.Remove(parent + ".lineage.json")
++	unixFlockUnlock(lock)
++	if err := <-done; err != nil {
++		t.Fatal(err)
++	}
++	checkPageGCContents(t, layer, 4, 1, 3)
++}
++
++func setupPageGCScale(t testing.TB, count int) {
++	cold, warm := pageGCRoots(t, false)
++	for i := 0; i < 32; i++ {
++		pageGCFile(t, filepath.Join(warm, "layers", fmt.Sprint(i), "000000.mem"), 16)
++	}
++	for i := 0; i < count; i++ {
++		layer := filepath.Join(warm, "layers", fmt.Sprint(i%32), "000000.mem")
++		pageGCReference(t, filepath.Join(cold, fmt.Sprint(i), "g2.mem"), layer, 0, 2, 4, 6, 8, 10, 12, 14)
++	}
++	if _, err := gcManagedMemoryLayers(); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func BenchmarkManagedPageGC(b *testing.B) {
++	for _, count := range []int{64, 256, 1280, 2560} {
++		for _, cached := range []bool{false, true} {
++			b.Run(fmt.Sprintf("checkpoints=%d/cached=%t", count, cached), func(b *testing.B) {
++				setupPageGCScale(b, count)
++				if cached {
++					time.Sleep(1100 * time.Millisecond)
++					if _, err := gcManagedMemoryLayers(); err != nil {
++						b.Fatal(err)
++					}
++				}
++				b.ResetTimer()
++				for i := 0; i < b.N; i++ {
++					if !cached {
++						managedReferenceCache.files = nil
++					}
++					if _, err := gcManagedMemoryLayers(); err != nil {
++						b.Fatal(err)
++					}
++				}
++			})
++		}
++	}
++}
++
++func TestManagedPageGCConcurrentLatency(t *testing.T) {
++	setupPageGCScale(t, 1280)
++	start := make(chan struct{})
++	latency := make(chan time.Duration, 16)
++	var workers sync.WaitGroup
++	for i := 0; i < 16; i++ {
++		workers.Add(1)
++		go func() {
++			defer workers.Done()
++			<-start
++			began := time.Now()
++			if _, err := gcManagedMemoryLayers(); err != nil {
++				t.Error(err)
++			}
++			latency <- time.Since(began)
++		}()
++	}
++	close(start)
++	workers.Wait()
++	close(latency)
++	values := []time.Duration{}
++	for value := range latency {
++		values = append(values, value)
++	}
++	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
++	t.Logf("1280 checkpoints / 32 shared files / 16 simultaneous cleanup requests: p50=%s p95=%s max=%s", values[7], values[15], values[15])
 +}

@@ -146,7 +146,8 @@ def test_page_container_roundtrip_preserves_lineage_and_shared_base(tmp_path: Pa
     assert _digest(external) == external_digest
 
 
-def test_cold_successor_reuses_compressed_parent_layers(tmp_path: Path):
+@pytest.mark.parametrize('change', ['unchanged', 'reclaimed', 'replaced'])
+def test_cold_successor_reuses_only_unchanged_parent_pages(tmp_path: Path, change):
     binary = _build_helper(tmp_path)
     first = tmp_path / "cold" / "runtime-g1.mem"
     first.parent.mkdir()
@@ -178,7 +179,21 @@ def test_cold_successor_reuses_compressed_parent_layers(tmp_path: Path):
     second_layers = Path(str(second) + ".layers")
     second_layers.mkdir()
     inherited = second_layers / "000001.mem"
-    inherited.write_bytes(first_delta.read_bytes())  # native may publish a new inode
+    os.link(first_delta, inherited)
+    first.unlink()
+    first_delta.unlink()  # native retires the predecessor before compression
+    expected = b'A' * (2 * 1024 * 1024)
+    if change == 'reclaimed':
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        with inherited.open('r+b') as stream:
+            result = libc.fallocate(stream.fileno(), 3, ctypes.c_longlong(0), ctypes.c_longlong(4096))
+        assert result == 0, os.strerror(ctypes.get_errno())
+        expected = bytes(4096) + expected[4096:]
+    elif change == 'replaced':
+        inherited.unlink()
+        expected = b'C' * len(expected)
+        inherited.write_bytes(expected)
     second_delta = second_layers / "000002.mem"
     second_delta.write_bytes(b"B" * 4096)
     os.link(second_delta, second)
@@ -198,8 +213,8 @@ def test_cold_successor_reuses_compressed_parent_layers(tmp_path: Path):
         },
     )
 
-    assert compressed["reused_group_count"] == 1
-    assert compressed["fresh_group_count"] == 1
+    assert compressed["reused_group_count"] == int(change == 'unchanged')
+    assert compressed["fresh_group_count"] == (1 if change == 'unchanged' else 2)
     assert compressed["reuse_manifest_consumed"] is True
     assert not reuse_manifest.exists()
     assert not first.exists() and not first_delta.exists()
@@ -207,12 +222,13 @@ def test_cold_successor_reuses_compressed_parent_layers(tmp_path: Path):
         Path(str(second) + ".zstd-pages.json").read_text()
     )
     by_layer = {record["layer_name"]: record for record in manifest["groups"]}
-    assert by_layer["000001.mem"]["reused_compressed_parent"] is True
-    assert by_layer["000001.mem"]["metrics"]["codec_seconds"] == 0
+    assert by_layer["000001.mem"]["reused_compressed_parent"] is (change == 'unchanged')
+    if change == 'unchanged':
+        assert by_layer["000001.mem"]["metrics"]["codec_seconds"] == 0
     assert by_layer["000002.mem"]["reused_compressed_parent"] is False
 
     assert decompress_snapshot(second, binary=str(binary)) is not None
-    assert inherited.read_bytes() == b"A" * (2 * 1024 * 1024)
+    assert inherited.read_bytes() == expected
     assert second_delta.read_bytes() == b"B" * 4096
     assert os.path.samefile(second, second_delta)
 
@@ -407,14 +423,15 @@ def test_external_hardlink_prevents_unintended_copy(tmp_path: Path):
     assert outside.read_bytes() == b"A" * 8192
 
 
-def test_managed_external_dependency_is_not_compressed_or_replaced(tmp_path: Path):
+@pytest.mark.parametrize('ancestor_tier', ['cold', 'warm'])
+def test_managed_external_dependency_is_not_compressed_or_replaced(tmp_path: Path, ancestor_tier):
     binary = _build_helper(tmp_path)
     snapshot = tmp_path / "vm.mem"
     layers = Path(str(snapshot) + ".layers")
     layers.mkdir()
     base = layers / "000000.mem"
     base.write_bytes(b"A" * 8192)
-    external = tmp_path / "cold" / "layers" / "cold-layer" / "000000.mem"
+    external = tmp_path / ancestor_tier / "layers" / "shared-layer" / "000000.mem"
     external.parent.mkdir(parents=True)
     external.write_bytes(b"C" * 8192)
     external_inode = external.stat().st_ino
@@ -433,7 +450,7 @@ def test_managed_external_dependency_is_not_compressed_or_replaced(tmp_path: Pat
             {
                 "name": "000001.mem",
                 "external_path": str(external),
-                "layer_id": "cold-layer",
+                "layer_id": "shared-layer",
                 "managed": True,
             },
             {"name": "000002.mem", "external_path": None},
@@ -561,3 +578,48 @@ def test_manifest_accounting_uses_actual_allocation_after_rewrite(
     assert retried["compression_manifest_allocated_bytes"] == (
         manifest.stat().st_blocks * 512
     )
+
+
+def test_parked_compressed_snapshot_refreshes_shared_page_allocation(tmp_path: Path):
+    import ctypes
+    binary = _build_helper(tmp_path)
+    page = os.sysconf('SC_PAGE_SIZE')
+    snapshot = tmp_path / 'vm.mem'
+    layers = Path(str(snapshot) + '.layers')
+    layers.mkdir()
+    shared = layers / '000000.mem'
+    shared.write_bytes(b'A' * (8 * page))
+    os.link(shared, tmp_path / 'other-owner.mem')
+    external = tmp_path / 'managed' / '000000.mem'
+    external.parent.mkdir()
+    external.write_bytes(b'B' * (8 * page))
+    delta = layers / '000002.mem'
+    delta.write_bytes(b'C' * (8 * page))
+    os.link(delta, snapshot)
+    Path(str(snapshot) + '.lineage.json').write_text(json.dumps({
+        'schema_version': 2, 'logical_bytes': 8 * page,
+        'transferred_bytes': 2 * page, 'dirty_bytes': 2 * page, 'full_base': False,
+        'layers': [
+            {'name': '000000.mem', 'ranges': [{'offset': 0, 'length': 4 * page}]},
+            {'name': '000001.mem', 'external_path': str(external),
+             'managed': True, 'layer_id': 'managed',
+             'ranges': [{'offset': 4 * page, 'length': 2 * page}]},
+            {'name': '000002.mem', 'ranges': [{'offset': 6 * page, 'length': 2 * page}]},
+        ],
+    }))
+    native = read_snapshot_metadata(str(snapshot), require_lineage=True)
+    compress_snapshot(snapshot, binary=str(binary), native_snapshot_metrics=native)
+    before = read_compressed_snapshot_metadata(snapshot)
+    libc = ctypes.CDLL(None, use_errno=True)
+    for file, offset in ((shared, 4 * page), (external, 0)):
+        with file.open('r+b') as stream:
+            assert libc.fallocate(stream.fileno(), 3, ctypes.c_longlong(offset),
+                                  ctypes.c_longlong(4 * page)) == 0
+    after = read_compressed_snapshot_metadata(snapshot)
+    for field in ('allocated_bytes', 'raw_allocated_bytes', 'owned_allocated_bytes'):
+        assert after[field] == before[field] - 4 * page
+    assert after['managed_external_bytes'] == before['managed_external_bytes'] - 4 * page
+    assert read_compressed_snapshot_metadata(snapshot) == after
+    decompress_snapshot(snapshot, binary=str(binary))
+    assert shared.read_bytes() == b'A' * (4 * page) + bytes(4 * page)
+    assert external.read_bytes() == bytes(4 * page) + b'B' * (4 * page)

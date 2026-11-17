@@ -637,10 +637,10 @@ are identical, so a Shim/runtime/helper update does not rebuild the TAP pool.
 This mode enables `CLAWBOX_CROSS_TIER_LINEAGE=1` in a Cubelet systemd drop-in,
 retains lazy private mappings and sets the explicit WARM/COLD roots. COLD-to-WARM
 successors reuse managed SSD layers; exclusively owned delta files remain
-compressed. WARM-to-COLD preserves durable shared layers and copies only the
-still-referenced tmpfs ranges into owned SSD layers before publishing. Dirty
-pages supersede inherited ranges, including zero-value updates. A COLD
-successor therefore has no tmpfs dependency without rewriting all guest RAM.
+compressed. WARM-to-COLD also shares ancestors in place, including managed
+tmpfs layers. Dirty pages supersede inherited ranges, including zero-value
+updates. A COLD successor can therefore depend on WARM and is not protected
+against loss of those tmpfs files.
 Crash rollback remains a separate opt-in with matching API/Master
 and database prerequisites.
 
@@ -661,11 +661,10 @@ Incremental checkpoint/spill lifecycle records also expose
 layer ID when present, declared range count/bytes, path kind and actual
 `warm`/`cold`/`template`/`external` tier. This reads native metadata only; it
 does not scan RAM or add a per-checkpoint sidecar/fsync.
-`memory.promote_volatile_layers` measures WARM-to-COLD inherited-range copies.
-`transferred_bytes` includes those copies plus newly dirty bytes;
-`dirty_bytes` counts only newly dirty bytes. Existing durable shared layers do
-not count as transferred. A missing parent or invalidated dirty history still
-requires a full base.
+For an incremental successor, `transferred_bytes` and `dirty_bytes` count
+newly dirty bytes. Shared ancestor layers on either tier do not count as
+transferred. A missing parent or invalidated dirty history still requires a
+full base.
 
 For peer local-SSD restore, `build-cubesandbox-release.sh --peer-components`
 builds API/Master/Cubelet, but does not build or install the required Shim.
@@ -703,6 +702,41 @@ WARM and live borrowing share one capacity. Pre-existing shared-node occupancy
 is measured and withheld from new reservations. `warm-only` has no disk fallback;
 `tiered` can use COLD or spill eligible WARM snapshots. Incremental CoW uses lazy
 restore. These snapshot choices take effect when idle reclaim is enabled.
+
+With the current native build and `CLAWBOX_CROSS_TIER_LINEAGE=1` (enabled by the
+lifecycle installer), incremental inheritance shares ancestor layers in both
+directions. A COLD successor retains references to needed WARM ancestors; it
+does not copy them to SSD for durability. Its tier names the new snapshot's
+destination, not the placement or persistence of its complete dependency chain.
+Losing WARM data invalidates every dependent snapshot, including COLD ones.
+`managed_warm_bytes` reports WARM ancestor allocation not already charged through
+a WARM generation, deduplicated by device/inode. It remains in `committed_bytes`
+until native GC releases pages or removes the files; ordinary pool observations
+refresh physical allocation at most once per second. Such ancestors cannot be evicted
+independently by the generation-level spill policy.
+To use this behavior, rebuild/install the lifecycle components using the guide,
+update ClawBox, and use a new run ID with fresh qualification. No guest image
+rebuild, kernel change, or predictor retraining is required.
+
+Checkpoint cleanup computes the union of referenced page ranges across both
+tiers, including retained rollback records and the source checkpoint of a live
+restored VM. It punches holes only in unreferenced pages of shared raw files;
+when a managed file has no references, it removes that file. Immutable templates
+are excluded. Pending publications and unknown hardlinks retain data until their
+ownership is resolved. The filesystem must support `SEEK_DATA`/`SEEK_HOLE` and
+hole punching (the supported tmpfs and XFS storage paths do).
+
+Cleanup is the trigger: there is no background timer or per-write reference
+counter. The default collection grace is zero. The existing Cubelet environment
+variable `CLAWBOX_MANAGED_LAYER_GC_GRACE_SECONDS` accepts nonnegative seconds and
+delays whole-file deletion only, not reclamation inside retained files; changing
+it requires a Cubelet restart. A failed explicit cleanup returns an error;
+automatic predecessor cleanup remains best-effort and may defer reclamation to
+a later cleanup. Publishing checkpoint references and collecting pages use the
+same ordered filesystem locks. Scanning all checkpoint metadata while holding
+those locks can delay publication as checkpoint/range counts grow. Reclamation
+skips already sparse holes and never copies retained page contents. Compression
+container reuse is invalidated when the decoded raw file changes.
 
 Page-local snapshot compression is configured under `environment.resources`,
 because it is fixed for every arm in one run:

@@ -128,6 +128,12 @@ def _layer_name(paths: list[Path]) -> str | None:
     return next(iter(names)) if len(names) == 1 else None
 
 
+def _raw_identity(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {"device": stat.st_dev, "inode": stat.st_ino, "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns, "allocated_bytes": _allocated(path, stat)}
+
+
 def _reuse_records(
     manifest: str | Path | None,
     native_snapshot_metrics: dict[str, Any] | None,
@@ -217,6 +223,38 @@ def read_compressed_snapshot_metadata(path: str | Path) -> dict[str, Any] | None
         native["private_delta_bytes"] = native["raw_private_delta_bytes"]
     native = apply_compression_accounting(native, compression)
     native["compression"] = compression
+    # Shared raw files are deliberately excluded from compression. Their dead
+    # pages can be reclaimed by native GC while this package remains parked.
+    allocations = {}
+    changed_owned = 0
+    for item in native.get("layer_allocations") or []:
+        if not item.get("path"):
+            continue
+        file = Path(item["path"])
+        if not file.exists():
+            continue
+        stat = file.stat()
+        identity = f"{stat.st_dev}:{stat.st_ino}"
+        if identity != item["identity"]:
+            continue  # a decompression in progress has recreated an owned inode
+        allocated = _allocated(file, stat)
+        if not item.get("external") and identity not in allocations:
+            changed_owned += allocated - int(item["allocated_bytes"])
+        item["allocated_bytes"] = allocated
+        allocations[identity] = allocated
+    for key in ("allocated_bytes", "raw_allocated_bytes", "private_delta_bytes", "raw_private_delta_bytes", "owned_allocated_bytes"):
+        if key in native:
+            native[key] += changed_owned
+    external = native.get("external_layer_allocations") or []
+    for item in external:
+        if item["identity"] in allocations:
+            item["allocated_bytes"] = allocations[item["identity"]]
+    if external:
+        native["external_base_allocated_bytes"] = sum(item["allocated_bytes"] for item in external)
+        native["managed_external_bytes"] = sum(item["allocated_bytes"] for item in external if item.get("managed"))
+    for item in native.get("lineage_layer_map") or []:
+        if item["identity"] in allocations:
+            item["allocated_bytes"] = allocations[item["identity"]]
     return native
 
 
@@ -273,6 +311,11 @@ def compress_snapshot(
             temporary = Path(str(container) + ".tmp")
             layer_name = _layer_name(paths)
             reused = reusable.get(layer_name) if layer_name else None
+            # Native GC may punch dead pages, and layer names can be renumbered.
+            # Reusing the old container would resurrect freed pages or restore
+            # another layer. Only reuse the identical, unchanged decoded inode.
+            if reused is not None and reused.get("decoded_identity") != _raw_identity(source):
+                reused = None
             if reused is None:
                 metrics = _run(binary, "compress", source, temporary)
                 reuse_method = None
@@ -444,6 +487,7 @@ def decompress_snapshot(
                 os.link(canonical, alias)
         if not all(path.exists() and os.path.samefile(canonical, path) for path in paths):
             raise RuntimeError(f"snapshot decompression did not restore hardlink identity: {snapshot}")
+        record["decoded_identity"] = _raw_identity(canonical)
     reuse_path = None
     if retain_for_reuse:
         reuse_path = compression_reuse_manifest(snapshot)
