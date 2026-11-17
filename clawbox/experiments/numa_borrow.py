@@ -504,6 +504,12 @@ class SandboxNumaBorrower:
         if retained is not None and configured_mems == str(self.shared_node):
             self.writer(leaf / "cpuset.mems", str(self.local_node))
         effective = (leaf / "cpuset.mems.effective").read_text(encoding="ascii").strip()
+        from .topology import parse_cpu_list
+        if self.local_node not in parse_cpu_list(effective):
+            raise RuntimeError(
+                f"VM native LOCAL memory policy excludes requested node "
+                f"{self.local_node}: effective={effective}"
+            )
         if verified_placement is None:
             resident, unattributed = read_numa_lru_bytes(leaf)
             anon_resident = read_numa_anon_bytes(leaf)
@@ -522,14 +528,7 @@ class SandboxNumaBorrower:
             unattributed = int(verified_placement.get('unattributed_bytes', 0))
         attributed_anon = sum(anon_resident.values())
         initial_residency_check = sandbox_id not in self._initial_placement_verified
-        if (initial_residency_check
-                and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES
-                and anon_resident.get(self.local_node, 0) * 2 <= attributed_anon):
-            raise RuntimeError(
-                f"VM native LOCAL placement did not take effect: requested node "
-                f"{self.local_node}, anon_residency={anon_resident}, "
-                f"total_residency={resident}, unattributed={unattributed}"
-            )
+        local_anon = anon_resident.get(self.local_node, 0)
         self._initial_placement_verified.add(sandbox_id)
         if retained is not None and self._usage(leaf)[1] == 0:
             self.shared_pool.release_borrow(sandbox_id)
@@ -549,10 +548,11 @@ class SandboxNumaBorrower:
                 if initial_residency_check else "restore_policy_only"
             ),
             "local_residency_fraction": (
-                anon_resident.get(self.local_node, 0) / attributed_anon
+                local_anon / attributed_anon
                 if (initial_residency_check
                     and attributed_anon >= PLACEMENT_SAMPLE_MIN_BYTES) else None
             ),
+            "remote_anon_residency_bytes": attributed_anon - local_anon,
             "effective_cpus": (leaf / "cpuset.cpus.effective").read_text().strip()
                 if self.cpus is not None else None,
             "cgroup": str(leaf), "verified_unix_s": time.time(),

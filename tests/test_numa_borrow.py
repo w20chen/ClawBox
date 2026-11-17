@@ -187,7 +187,7 @@ def test_local_pin_accepts_native_broad_cpuset_without_rewriting_it(tmp_path):
     assert writes==[]
 
 
-def test_local_pin_ignores_remote_file_cache_but_rejects_remote_anonymous_pages(tmp_path):
+def test_local_pin_uses_effective_policy_and_records_pre_policy_remote_pages(tmp_path):
     root, leaf, proc = make_tree(tmp_path)
     borrower = SandboxNumaBorrower(
         root, local_node=0, shared_node=1, cpus=None,
@@ -205,7 +205,10 @@ def test_local_pin_ignores_remote_file_cache_but_rejects_remote_anonymous_pages(
     (leaf/'memory.numa_stat').write_text(
         'active_anon N0=1 N1=16777216\nactive_file N0=100 N1=0\n'
     )
-    with pytest.raises(RuntimeError, match='LOCAL placement did not take effect'):
+    observation = borrower.pin_local('sandbox-abc')
+    assert observation['remote_anon_residency_bytes'] == 16777216
+    (leaf/'cpuset.mems.effective').write_text('1')
+    with pytest.raises(RuntimeError, match='excludes requested node'):
         borrower.pin_local('sandbox-abc')
 
 

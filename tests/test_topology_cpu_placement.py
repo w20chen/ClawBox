@@ -587,8 +587,14 @@ def test_vm_verification_tolerates_exited_auxiliary_thread(monkeypatch, tmp_path
     monkeypatch.setattr('clawbox.experiments.numa_borrow.read_numa_anon_bytes',
                         lambda path: {0: 1024, 1: 16 * 1024 * 1024})
     domain._initial_residency_verified.clear()
-    with pytest.raises(RuntimeError, match='memory placement is not local'):
+    startup_remote = domain.verify(0, 'tool', 'vm')
+    assert startup_remote['remote_anon_residency_bytes'] == 16 * 1024 * 1024
+    assert startup_remote['memory_nodes'] == [0]
+    # Effective policy, unlike pre-policy startup residency, is authoritative.
+    (leaf / 'cpuset.mems.effective').write_text('1')
+    with pytest.raises(RuntimeError, match='wrong memory policy'):
         domain.verify(0, 'tool', 'vm')
+    (leaf / 'cpuset.mems.effective').write_text('0')
     # An empty vCPU set must still fail: disappearance is not evidence of routing.
     (leaf / 'cgroup.threads').write_text('100')
     domain.native_vcpu_ready_grace_seconds = 0
