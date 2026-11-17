@@ -97,7 +97,9 @@ class CubeSandboxLifecycle:
                  default_snapshot_tier: SnapshotTier | None = None,
                  snapshot_reuse_probability: float | None = None,
                  warm_restore_seconds_per_gib: float | None = None,
-                 cold_restore_seconds_per_gib: float | None = None) -> None:
+                 cold_restore_seconds_per_gib: float | None = None,
+                 snapshot_page_profiler: Any = None,
+                 snapshot_page_event: Callable[[Mapping[str, Any]], None] | None = None) -> None:
         if snapshot_storage not in {"tiered", "warm-only"}:
             raise ValueError("invalid snapshot storage")
         self.snapshot_storage = snapshot_storage
@@ -156,6 +158,18 @@ class CubeSandboxLifecycle:
         self._warm_paths: set[str] = set()
         self._first_tool_restore: dict[str, Any] | None = None
         self._restore_fault_sampler = None
+        self.snapshot_page_profiler = snapshot_page_profiler
+        self.snapshot_page_event = snapshot_page_event
+
+    def _emit_snapshot_page_event(self, event: Mapping[str, Any] | None) -> None:
+        if event is not None and self.snapshot_page_event is not None:
+            self.snapshot_page_event(event)
+
+    def _stop_snapshot_page_profile(self, reason: str) -> None:
+        if self.snapshot_page_profiler is not None:
+            self._emit_snapshot_page_event(
+                self.snapshot_page_profiler.stop(reason=reason)
+            )
 
     def claim_first_tool_after_restore(self, execution_id: str) -> None:
         """Claim at admission, so concurrent completion order cannot relabel it."""
@@ -492,9 +506,14 @@ class CubeSandboxLifecycle:
             if tier is SnapshotTier.COLD and not self.cold_snapshot_root:
                 raise ValueError("COLD checkpoint requires cold_snapshot_root")
             before = self._state
-            self._state = SandboxState.CHECKPOINTING
             started_wall, started_mono = time.time(), time.monotonic()
             stage_seconds: dict[str, float] = _StageSeconds()
+            if self.snapshot_page_profiler is not None:
+                with self._measure_stage(stage_seconds, "snapshot_page_profile_stop_s"):
+                    self._stop_snapshot_page_profile(
+                        f"checkpoint_g{self._generation + 1}"
+                    )
+            self._state = SandboxState.CHECKPOINTING
             with self._measure_stage(stage_seconds, 'physical_observation_before_s'):
                 host_memory_before = self._observe_physical()
             key = None
@@ -1058,6 +1077,91 @@ class CubeSandboxLifecycle:
             self._replica_memory_path = result["memory_path"]
             return result
 
+    def prepare_snapshot_pages(
+        self, *, controller: Any, cancel: Any,
+        context: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Expand a COLD snapshot and read its profiled hot ranges before restore.
+
+        This method never changes the lifecycle state or native lineage.  The
+        normal restore path takes the same snapshot lock and therefore either
+        consumes a completed preparation or waits only for the currently
+        running decompression/read chunk.
+        """
+        started_mono = time.monotonic()
+        with self._snapshot_access():
+            if self._state is not SandboxState.SWAPPED:
+                return {
+                    "status": "skipped",
+                    "reason": f"lifecycle_{self._state.value}",
+                }
+            if self._snapshot_tier is not SnapshotTier.COLD:
+                # WARM expansion consumes accounted tmpfs capacity.  The P1
+                # experiment targets the dominant COLD path and leaves WARM
+                # accounting/retention unchanged.
+                return {
+                    "status": "skipped",
+                    "reason": "warm_snapshot",
+                    "snapshot_generation": self._generation,
+                    "snapshot_tier": self._snapshot_tier.value,
+                }
+            if self._snapshot_key is None or not self.cold_snapshot_root:
+                return {"status": "skipped", "reason": "snapshot_identity_unavailable"}
+            snapshot = Path(self._replica_memory_path or (
+                f"{self.cold_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
+                f"{self.role}-g{self._snapshot_key.generation}.mem"
+            ))
+            if cancel.is_set():
+                return {
+                    "status": "cancelled",
+                    "reason": "demand_restore_before_expansion",
+                    "snapshot_generation": self._generation,
+                    "snapshot_tier": self._snapshot_tier.value,
+                }
+            decompression = None
+            decompression_wall_started = time.monotonic()
+            decompression_cpu_started = time.thread_time()
+            if self.snapshot_compression == "zstd-page":
+                from .snapshot_compression import decompress_snapshot
+                decompression = decompress_snapshot(
+                    snapshot,
+                    binary=self.snapshot_compression_binary,
+                    retain_for_reuse=self.snapshot_mechanism == "incremental-cow",
+                )
+                if decompression and decompression.get("reuse_manifest_path"):
+                    self._compression_reuse_manifest = str(
+                        decompression["reuse_manifest_path"]
+                    )
+            expansion_wall = time.monotonic() - decompression_wall_started
+            expansion_cpu = time.thread_time() - decompression_cpu_started
+            base = {
+                "snapshot_generation": self._generation,
+                "snapshot_tier": self._snapshot_tier.value,
+                "snapshot_path": str(snapshot),
+                "expansion_performed": decompression is not None,
+                "expansion_wall_seconds": expansion_wall,
+                "expansion_thread_cpu_seconds": expansion_cpu,
+                "expansion_metrics": decompression,
+            }
+            if cancel.is_set():
+                return {
+                    **base,
+                    "status": "cancelled",
+                    "reason": "demand_restore_after_expansion",
+                    "prepare_service_seconds": time.monotonic() - started_mono,
+                }
+            prefetch = controller.prefetch_snapshot(snapshot, self.role, cancel)
+            return {
+                **base,
+                **prefetch,
+                "status": "cancelled" if prefetch["cancelled_for_demand"] else "ok",
+                "reason": (
+                    "demand_restore_during_prefetch"
+                    if prefetch["cancelled_for_demand"] else "prepared"
+                ),
+                "prepare_service_seconds": time.monotonic() - started_mono,
+            }
+
     def restore(self) -> float:
         with self._snapshot_access():
             if self.sandbox_id is None or self._state is not SandboxState.SWAPPED:
@@ -1239,6 +1343,26 @@ class CubeSandboxLifecycle:
                         )
                     except OSError:
                         self._restore_fault_sampler = None
+                if self.snapshot_page_profiler is not None:
+                    if verified_cgroup is None:
+                        raise RuntimeError(
+                            "snapshot page profiling requires the verified VM cgroup"
+                        )
+                    if not self._replica_memory_path or self._snapshot_tier is None:
+                        raise RuntimeError(
+                            "snapshot page profiling requires a managed snapshot path and tier"
+                        )
+                    with self._measure_stage(
+                        stage_seconds, "snapshot_page_profile_start_s"
+                    ):
+                        self._emit_snapshot_page_event(
+                            self.snapshot_page_profiler.start(
+                                cgroup=Path(verified_cgroup),
+                                generation=self._generation,
+                                tier=self._snapshot_tier.value,
+                                snapshot_path=self._replica_memory_path,
+                            )
+                        )
                 elapsed = self._record("restore", before, self._state,
                                     started_wall, started_mono,
                                     host_memory_before=host_memory_before,
@@ -1469,6 +1593,7 @@ class CubeSandboxLifecycle:
         with self._snapshot_access():
             if self._state is SandboxState.CLOSED:
                 return 0.0
+            self._stop_snapshot_page_profile("session_close")
             before = self._state
             self._state = SandboxState.DESTROYING
             started_wall, started_mono = time.time(), time.monotonic()

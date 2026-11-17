@@ -385,6 +385,71 @@ class SessionCpuSlot(StrictFrozenModel):
     cpus: str = Field(min_length=1)
 
 
+class SnapshotPageProfileSpec(StrictFrozenModel):
+    """Sparse, profiling-only access-window telemetry for restored VM pages."""
+
+    roles: tuple[Literal["runtime", "tool"], ...] = ("runtime", "tool")
+    case_ids: tuple[str, ...] = Field(min_length=1)
+    interval_seconds: float = Field(default=2.0, ge=0.1, allow_inf_nan=False)
+    max_windows_per_generation: int = Field(default=3600, ge=1, le=65535)
+    force_model_wait_checkpoints: bool = False
+    checkpoint_tiers: tuple[Literal["warm", "cold"], ...] = ()
+
+    @model_validator(mode="after")
+    def unique_values(self):
+        if not self.roles:
+            raise ValueError("snapshot_page_profile.roles must not be empty")
+        if len(set(self.roles)) != len(self.roles):
+            raise ValueError("snapshot_page_profile.roles must be unique")
+        if len(set(self.case_ids)) != len(self.case_ids):
+            raise ValueError("snapshot_page_profile.case_ids must be unique")
+        if self.force_model_wait_checkpoints and not self.checkpoint_tiers:
+            raise ValueError(
+                "snapshot_page_profile.checkpoint_tiers is required when "
+                "force_model_wait_checkpoints is true"
+            )
+        if not self.force_model_wait_checkpoints and self.checkpoint_tiers:
+            raise ValueError(
+                "snapshot_page_profile.checkpoint_tiers requires "
+                "force_model_wait_checkpoints"
+            )
+        return self
+
+
+class SnapshotPageManagementSpec(StrictFrozenModel):
+    """GPU-triggered preparation of a frozen, profiled snapshot hotset."""
+
+    mode: Literal["gpu_event"] = "gpu_event"
+    hotset_manifest: str = Field(min_length=1)
+    trigger_event: Literal["queued", "prefill_start"] = "prefill_start"
+    prefetch_budget_mib: int = Field(ge=1)
+    per_vm_prefetch_mib: int = Field(default=32, ge=1)
+    max_inflight_mib: int = Field(default=128, ge=1)
+    io_workers: int = Field(default=2, ge=1, le=32)
+    prefetch_bandwidth_mib_s: float = Field(
+        default=256.0, gt=0, allow_inf_nan=False,
+    )
+    max_ranges_per_vm: int = Field(default=512, ge=1, le=65536)
+    signal_max_age_seconds: float = Field(
+        default=5.0, gt=0, allow_inf_nan=False,
+    )
+
+    @model_validator(mode="after")
+    def valid_budgets(self):
+        path = PurePosixPath(self.hotset_manifest)
+        if not path.is_absolute() or ".." in path.parts:
+            raise ValueError("snapshot_page_management.hotset_manifest must be absolute")
+        if self.per_vm_prefetch_mib > self.max_inflight_mib:
+            raise ValueError(
+                "snapshot_page_management.per_vm_prefetch_mib exceeds max_inflight_mib"
+            )
+        if self.max_inflight_mib > self.prefetch_budget_mib:
+            raise ValueError(
+                "snapshot_page_management.max_inflight_mib exceeds prefetch_budget_mib"
+            )
+        return self
+
+
 class ExecutionSpec(StrictFrozenModel):
     kb_scope_policy: Literal['pair'] = 'pair'
     retain_clause_telemetry_artifacts: bool = False
@@ -457,6 +522,8 @@ class ExecutionSpec(StrictFrozenModel):
     worker_thread_switch_interval_seconds: float = Field(
         default=0.001, gt=0, le=0.1, allow_inf_nan=False)
     worker_cyclic_gc_enabled: bool = False
+    snapshot_page_profile: SnapshotPageProfileSpec | None = None
+    snapshot_page_management: SnapshotPageManagementSpec | None = None
     snapshot_branching: SnapshotBranchingSpec | None = None
     tool_placement: ToolPlacementStudySpec | None = None
     randomized_order: bool = True
@@ -984,6 +1051,52 @@ class ExperimentSpec(StrictFrozenModel):
         cases = self.workload.cases or load_workload_cases(self.workload)
         if len({case.case_id for case in cases}) != len(cases):
             raise ValueError("workload.cases case_id values must be unique")
+        page_profile = self.execution.snapshot_page_profile
+        if page_profile is not None:
+            case_ids = {case.case_id for case in cases}
+            missing = set(page_profile.case_ids) - case_ids
+            if missing:
+                raise ValueError(
+                    "snapshot_page_profile.case_ids are absent from the workload: "
+                    + ", ".join(sorted(missing))
+                )
+            if self.agent.driver is not AgentDriver.OPENCLAW:
+                raise ValueError("snapshot_page_profile requires agent.driver=openclaw")
+            if self.resources.snapshot_mechanism != "incremental-cow":
+                raise ValueError("snapshot_page_profile requires incremental-cow snapshots")
+            if page_profile.force_model_wait_checkpoints and any(
+                policy.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
+                or not policy.runtime_snapshot
+                for policy in self.policies
+            ):
+                raise ValueError(
+                    "forced snapshot page profiling requires agent_and_tool snapshot pause"
+                )
+        page_management = self.execution.snapshot_page_management
+        if page_management is not None:
+            if page_profile is not None:
+                raise ValueError(
+                    "snapshot_page_management cannot run with snapshot_page_profile"
+                )
+            if self.agent.driver is not AgentDriver.OPENCLAW:
+                raise ValueError("snapshot_page_management requires agent.driver=openclaw")
+            if self.inference.backend is not InferenceBackend.SERVING_SIM:
+                raise ValueError("snapshot_page_management requires inference.backend=serving_sim")
+            if self.resources.snapshot_mechanism != "incremental-cow":
+                raise ValueError("snapshot_page_management requires incremental-cow snapshots")
+            if self.resources.snapshot_compression != "zstd-page":
+                raise ValueError("snapshot_page_management requires zstd-page compression")
+            if self.resources.snapshot_storage != "tiered" or not self.resources.cold_snapshot_root:
+                raise ValueError("snapshot_page_management requires tiered COLD snapshot storage")
+            if any(
+                policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE
+                or policy.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
+                or not policy.runtime_snapshot
+                for policy in self.policies
+            ):
+                raise ValueError(
+                    "snapshot_page_management requires GPU-aware agent_and_tool snapshot pause"
+                )
         if self.workload.session_assignment is SessionAssignment.UNIQUE:
             required = max(self.execution.concurrency_levels)
             if len(cases) < required:

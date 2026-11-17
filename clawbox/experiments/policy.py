@@ -1725,10 +1725,30 @@ class PolicyCoordinator:
         return self.evict_one_for_watermark(exclude=exclude, reason="memory_admission")
 
     def evict_one_for_watermark(self, *, tier: SnapshotTier | None = None,
-                                exclude: str = "", reason: str = "local_high_watermark") -> bool:
+                                exclude: str = "", reason: str = "local_high_watermark",
+                                profile_session_id: str | None = None) -> bool:
         """Atomically claim one actual idle session, then checkpoint its configured scope."""
         with self._condition:
-            victim = self._claim_victim_locked(exclude=exclude)
+            if profile_session_id is None:
+                victim = self._claim_victim_locked(exclude=exclude)
+            else:
+                victim = self._sessions.get(profile_session_id)
+                if not (
+                    victim is not None
+                    and victim.session_id != exclude
+                    and victim.wait_id is not None
+                    and not victim.response_ready
+                    and not victim.tool_active
+                    and not victim.eviction_in_progress
+                    and not victim.migration_in_progress
+                    and victim.lifecycle.resident
+                ):
+                    victim = None
+                else:
+                    # Explicit page profiling controls the checkpoint tier and
+                    # generation count. It still uses the ordinary pair fence,
+                    # reservations and lifecycle path; only victim ranking is bypassed.
+                    victim.eviction_in_progress = True
             if victim is None:
                 return False
             # Once claimed, response delivery and Tool start wait for the whole

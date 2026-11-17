@@ -2210,6 +2210,12 @@ class ExperimentWorker:
     def _run(self, *, arm_ids: set[str] | None = None,
              write_summary: bool = True) -> list[ResultEnvelope]:
         self.output_root.mkdir(parents=True, exist_ok=True)
+        if self.spec.execution.snapshot_page_profile is not None:
+            from .page_access import validate_page_idle_host
+            atomic_json(
+                self.output_root / "page-access" / "host-capability.json",
+                validate_page_idle_host(),
+            )
         control_host = os.environ.get("CLAWBOX_CONTROL_HOST", "").strip()
         policy_port = int(os.environ.get("CLAWBOX_POLICY_PORT", "18080"))
         gateway_host = os.environ.get("CLAWBOX_MODEL_GATEWAY_HOST", control_host).strip()
@@ -2406,6 +2412,7 @@ class ExperimentWorker:
                 for index in range(arm.concurrency)
             },
         )
+        page_prefetch = None
         shared_borrow_mib = arm.resources.shared_memory_borrow_limit_mib
         sampler = (
             NumaCgroupMemorySampler(
@@ -2897,6 +2904,8 @@ class ExperimentWorker:
                     self.serving_sim.check()
                 if self._runtime_memory is not None:
                     self._runtime_memory.check()
+                if page_prefetch is not None:
+                    page_prefetch.check()
                 for domain in domains.values():
                     if domain.controller is not None and domain.controller._error is not None:
                         raise domain.controller._error
@@ -3003,6 +3012,7 @@ class ExperimentWorker:
                     offered_offset_seconds=offer_offsets[index],
                     telemetry_warmup_pool=telemetry_warmup_pool,
                     dependency_install_gate=dependency_install_gate,
+                    page_prefetch=page_prefetch,
                     arm_cancel=arm_cancel, session_binding=binding,
                     session_placement=placement, peer_store=peer_store, peer_cpu=peer_cpu,
                     base_cache_receipt=base_cache_receipt)
@@ -3033,6 +3043,16 @@ class ExperimentWorker:
                         raise ArmInfrastructureError(
                             f"placement cleanup incomplete for {session_id}") from exc
         try:
+            if arm.execution.snapshot_page_management is not None:
+                from .page_prefetch import SnapshotPagePrefetchController
+                page_prefetch = SnapshotPagePrefetchController(
+                    arm.execution.snapshot_page_management, emit=events.write,
+                )
+                events.write({
+                    "event": "snapshot_page_management_initialized",
+                    **page_prefetch.metrics(),
+                    "configuration": arm.execution.snapshot_page_management.model_dump(),
+                })
             placement = (SessionPlacement(domains,
                 cpu_overcommit=arm.execution.placement_cpu_overcommit,
                 monitor=CpuMonitor({k:d.cpus for k,d in domains.items()},
@@ -3092,6 +3112,13 @@ class ExperimentWorker:
             telemetry_warmup_pool.shutdown(
                 wait=not interrupted, cancel_futures=interrupted,
             )
+            if page_prefetch is not None:
+                page_prefetch.close(wait=not interrupted, cancel=interrupted)
+                try:
+                    page_prefetch.check()
+                except Exception as exc:
+                    infrastructure_error = infrastructure_error or exc
+                    failure = failure or exc
             # Rich reporting reads live policy/queue helpers. Detach it before
             # those helpers close; the core sampler continues through VM
             # cleanup and records the complete memory series independently.
@@ -3575,6 +3602,13 @@ class ExperimentWorker:
                     for item in sessions
                     if item.get("runtime_trace_root")
                 },
+                **{
+                    f"snapshot_page_profile:{item['session_id']}": str(
+                        item["snapshot_page_profile_root"]
+                    )
+                    for item in sessions
+                    if item.get("snapshot_page_profile_root")
+                },
             },
         )
         # Result first, complete marker second. A crash between them retries the
@@ -3602,6 +3636,7 @@ class ExperimentWorker:
                       offered_offset_seconds: float | None = None,
                       telemetry_warmup_pool: ThreadPoolExecutor | None = None,
                       dependency_install_gate: DependencyInstallGate | None = None,
+                     page_prefetch: Any = None,
                       arm_cancel: Event | None = None,
                       session_binding: SessionBinding | None = None,
                       session_placement: SessionPlacement | None = None,
@@ -3620,6 +3655,32 @@ class ExperimentWorker:
         if arm_started_monotonic is not None:
             time.sleep(max(0.0, arm_started_monotonic + offered_offset - time.monotonic()))
         session_id = f"{arm.arm_id}-{index:04d}"
+        page_profile_spec = arm.execution.snapshot_page_profile
+        page_profile_selected = (
+            page_profile_spec is not None
+            and arm.case.case_id in page_profile_spec.case_ids
+        )
+        page_profile_root = self.output_root / "page-access" / session_id
+
+        def page_profiler(role: str):
+            if not page_profile_selected or role not in page_profile_spec.roles:
+                return None
+            from .page_access import SnapshotPageProfiler
+            return SnapshotPageProfiler(
+                output=page_profile_root / role,
+                session_id=session_id,
+                case_id=arm.case.case_id,
+                role=role,
+                interval_s=page_profile_spec.interval_seconds,
+                max_windows=page_profile_spec.max_windows_per_generation,
+                warm_root=(Path(arm.resources.warm_snapshot_root)
+                           if arm.resources.warm_snapshot_root else None),
+                cold_root=(Path(arm.resources.cold_snapshot_root)
+                           if arm.resources.cold_snapshot_root else None),
+            )
+
+        runtime_page_profiler = page_profiler("runtime")
+        tool_page_profiler = page_profiler("tool")
         events.write({'event': 'session_preparation_started', 'session_id': session_id,
                       'qos_class': arm.case.qos_class, 'case_id': arm.case.case_id})
         priority_domain = getattr(self, '_priority_domain', None)
@@ -3773,6 +3834,8 @@ class ExperimentWorker:
                 arm.resources.snapshot_residency_costs.cold_restore_seconds_per_gib
                 if arm.resources.snapshot_residency_costs else None
             ),
+            snapshot_page_profiler=runtime_page_profiler,
+            snapshot_page_event=events.write,
             **priority_options('runtime'),
             **({'storage_domain': session_binding.current,
                 'storage_domain_root': arm.resources.snapshot_scheduling_storage.local_roots[session_binding.current],
@@ -3831,6 +3894,8 @@ class ExperimentWorker:
                 arm.resources.snapshot_residency_costs.cold_restore_seconds_per_gib
                 if arm.resources.snapshot_residency_costs else None
             ),
+            snapshot_page_profiler=tool_page_profiler,
+            snapshot_page_event=events.write,
             **priority_options('tool'),
             **({'storage_domain': session_binding.current,
                 'storage_domain_root': arm.resources.snapshot_scheduling_storage.local_roots[session_binding.current],
@@ -4072,6 +4137,46 @@ class ExperimentWorker:
                 if arm_cancel is not None and arm_cancel.is_set():
                     return
                 try:
+                    if (page_profile_selected
+                            and page_profile_spec.force_model_wait_checkpoints):
+                        generations = {
+                            lifecycle._generation, runtime_lifecycle._generation,
+                        }
+                        if len(generations) != 1:
+                            # Tool is checkpointed before Runtime inside the
+                            # ordinary pair fence. A second queued/prefill
+                            # callback can observe that short-lived gN/gN-1
+                            # state; it must not duplicate or fail the pair.
+                            events.write({
+                                "event": "snapshot_page_profile_checkpoint",
+                                "session_id": session_id,
+                                "case_id": arm.case.case_id,
+                                "request_id": event.get("request_id"),
+                                "generations": sorted(generations),
+                                "performed": False,
+                                "reason": "pair_checkpoint_in_progress",
+                            })
+                            return
+                        generation = generations.pop()
+                        if generation < len(page_profile_spec.checkpoint_tiers):
+                            tier = SnapshotTier(
+                                page_profile_spec.checkpoint_tiers[generation]
+                            )
+                            performed = coordinator.evict_one_for_watermark(
+                                tier=tier,
+                                reason="snapshot_page_profile",
+                                profile_session_id=session_id,
+                            )
+                            events.write({
+                                "event": "snapshot_page_profile_checkpoint",
+                                "session_id": session_id,
+                                "case_id": arm.case.case_id,
+                                "request_id": event.get("request_id"),
+                                "generation": generation + 1,
+                                "tier": tier.value,
+                                "performed": performed,
+                            })
+                            return
                     # Recheck live pressure; the queued event may be stale.
                     # Candidate selection/claim shares the Tool admission lock.
                     if coordinator.blocked_demand_pressure():
@@ -4189,6 +4294,12 @@ class ExperimentWorker:
                 request_id = str(event["request_id"])
                 trigger = str(event["event"])
                 operation = f"gpu_{trigger}"
+                if page_prefetch is not None:
+                    # Demand restore has priority over speculative reads.  A
+                    # preparation already in decompression remains useful;
+                    # range reads stop at their next bounded chunk.
+                    page_prefetch.cancel(runtime_lifecycle, request_id)
+                    page_prefetch.cancel(lifecycle, request_id)
                 # Do not hold wait_lock while an already-claimed checkpoint finishes.
                 if not coordinator.wait_for_gpu_prewarm(session_id, request_id):
                     return
@@ -4258,6 +4369,26 @@ class ExperimentWorker:
                     events.write({"event": "gpu_policy_observation", "session_id": session_id,
                                   "request_id": event["request_id"], "signal": event["event"],
                                   "signal_sequence": event.get("signal_sequence"), "decision": decision})
+                page_management = (
+                    arm.execution.snapshot_page_management
+                    if page_prefetch is not None else None
+                )
+                if (page_prefetch is not None and page_management is not None
+                        and decision.get("accepted")
+                        and event.get("event") == page_management.trigger_event):
+                    request_id = str(event["request_id"])
+                    for vm, role in (
+                        (runtime_lifecycle, "runtime"), (lifecycle, "tool"),
+                    ):
+                        if not vm.resident:
+                            page_prefetch.submit(
+                                vm,
+                                session_id=session_id,
+                                case_id=arm.case.case_id,
+                                role=role,
+                                request_id=request_id,
+                                signal=event,
+                            )
                 if decision.get("should_prewarm") and runtime_snapshot_enabled:
                     policy_events.submit_coalesced((session_id, "gpu_prewarm"), prewarm_pair_from_gpu, event)
                 elif decision.get("should_recheck_pressure"):
@@ -4284,6 +4415,8 @@ class ExperimentWorker:
                 # response becomes visible to OpenClaw. A Tool not already
                 # prewarmed by think_end resumes on the next SSH invocation.
                 with wait_lock:
+                    if page_prefetch is not None:
+                        page_prefetch.cancel(runtime_lifecycle, request_id)
                     # Claim completion before checking residency. Otherwise a
                     # queued eager pause can run between a resident check and
                     # this marker, snapshotting Runtime after the response is
@@ -5704,6 +5837,9 @@ class ExperimentWorker:
                          native_artifacts.validation
                          if arm.agent.driver is AgentDriver.OPENCLAW and native_artifacts
                          else None
+                     ),
+                     "snapshot_page_profile_root": (
+                         str(page_profile_root) if page_profile_selected else None
                      ),
                      "timeline": timeline}
         finally:

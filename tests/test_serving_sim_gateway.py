@@ -562,6 +562,7 @@ def worker_prewarm_environment():
         self=SimpleNamespace(_restore_with_one_victim=restore),
         prepare_restored_tool=lambda **kwargs: tool_ready.append(kwargs), tool_ready=tool_ready,
         events=SimpleNamespace(write=events.append), policy_events=executor,
+        page_prefetch=None,
         arm_cancel=None,
         pause_for_model_wait=lambda _event: None)
     source = Path(__file__).resolve().parents[1] / "clawbox/experiments/worker.py"

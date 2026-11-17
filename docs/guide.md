@@ -674,6 +674,58 @@ exact successful conversation audit is required. Replay rejections and failed
 requests retain their exact diagnostic content in either mode. Changing this
 field requires a new run ID, but no host apply, image rebuild, or retraining.
 
+For a small, directed snapshot-page access study, add an explicit profiling
+block and launch through the same experiment command:
+
+```yaml
+execution:
+  snapshot_page_profile:
+    case_ids: [tobymao__sqlglot-3842]
+    roles: [runtime, tool]
+    interval_seconds: 2.0
+    max_windows_per_generation: 1800
+    force_model_wait_checkpoints: true
+    checkpoint_tiers: [warm, cold, warm]
+```
+
+Run one session at a time so another VM cannot reference the same shared Base
+PFNs during a page-idle window. The forced option uses real model waits and the
+ordinary pair checkpoint/restore path, but deliberately changes snapshot timing;
+do not compare its throughput with a formal run. Leave the whole block absent
+for normal experiments. Launch must use `--sudo`; validation fails before VM
+arrival when the kernel page-idle bitmap or pagemap access is unavailable. The
+result's `page-access` directory contains compressed exact per-page
+`accessed_windows` and `present_windows` arrays plus the lineage/range map.
+
+To run the bounded GPU-event page-preparation experiment, copy a frozen hotset
+manifest onto the experiment host and add:
+
+```yaml
+execution:
+  snapshot_page_management:
+    mode: gpu_event
+    hotset_manifest: /absolute/path/hotset.json
+    trigger_event: prefill_start
+    prefetch_budget_mib: 1024
+    per_vm_prefetch_mib: 32
+    max_inflight_mib: 128
+    io_workers: 2
+    prefetch_bandwidth_mib_s: 256
+    max_ranges_per_vm: 512
+    signal_max_age_seconds: 5
+```
+
+The manifest contains guest-physical ranges. Each restore resolves them through
+that VM's current incremental lineage, so COLD/WARM movement and hard-linked
+ancestors do not stale the file mapping. This first version prepares COLD
+snapshots only: it expands the ordinary zstd-page snapshot early, preserves its
+compression-reuse manifest, and reads selected authoritative file ranges into
+the Linux page cache. WARM accounting and lifecycle state remain unchanged;
+demand restore cancels remaining range reads. Use a new run ID. This requires
+`serving_sim`, GPU-aware agent-and-tool snapshot pause, tiered storage,
+incremental-COW, and zstd-page compression, but no image rebuild or host apply.
+Leave the block absent for the baseline and normal experiments.
+
 ## 5. Validate, launch, and inspect
 
 ```bash
