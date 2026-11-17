@@ -26,7 +26,9 @@ def final_reports(out: Path) -> dict:
     validity = json.loads((out / 'validity.json').read_text())
     if validity.get('prompt_source') != 'actual':
         raise RuntimeError('simulator final report does not confirm actual Agent prompts')
-    return {k: validity.get(k) for k in ('lag', 'warning_threshold_exceeded', 'prompt_source')}
+    # Keep native timing caveats (including non_physical). Current sim-release
+    # reports lag measurements without a warning_threshold_exceeded verdict.
+    return validity
 
 
 def serving_sim_cluster_layouts(
@@ -115,6 +117,10 @@ class ServingSimProcess:
         ]
         if self.spec.tokenizer_dir:
             command += ['--tokenizer-dir', self.spec.tokenizer_dir]
+        for name in ('decode_time_scale', 'tpot_ms'):
+            value = getattr(self.spec, name)
+            if value is not None:
+                command += ['--' + name.replace('_', '-'), str(value)]
         return command
 
     def _entries(self) -> list[tuple[int, dict, object, dict | None, object | None]]:
@@ -219,6 +225,12 @@ class ServingSimProcess:
                                 f"simulator cluster {index} endpoint is not owned by this launch"
                             )
                         if info.get('ready') and info.get('accepted_requests') == 0:
+                            expected_decode = {name: getattr(self.spec, name)
+                                for name in ('decode_time_scale', 'tpot_ms')
+                                if getattr(self.spec, name) is not None}
+                            if info.get('decode_time') != expected_decode:
+                                raise RuntimeError(f'simulator cluster {index} decode timing differs '
+                                                   'from requested configuration')
                             if (info.get('clock', {}).get('k') != 1
                                     or info.get('cpu_affinity') != sorted(layout['cpu_affinity'])):
                                 raise RuntimeError(
@@ -345,9 +357,6 @@ class ServingSimProcess:
                     'prompt_source': ('actual' if all(
                         item.get('prompt_source') == 'actual' for item in validities
                     ) else None),
-                    'warning_threshold_exceeded': any(
-                        item.get('warning_threshold_exceeded') for item in validities
-                    ),
                     'clusters': [
                         {'cluster_id': index, **item}
                         for index, item in enumerate(validities)
@@ -433,9 +442,6 @@ def finalize_saved_service(root: Path) -> dict:
             'prompt_source': ('actual' if all(
                 item.get('prompt_source') == 'actual' for item in validities
             ) else None),
-            'warning_threshold_exceeded': any(
-                item.get('warning_threshold_exceeded') for item in validities
-            ),
             'clusters': [
                 {'cluster_id': row.get('cluster_id', index), **row['validity']}
                 for index, (row, _) in enumerate(saved)

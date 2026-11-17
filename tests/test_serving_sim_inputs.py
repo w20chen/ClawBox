@@ -12,7 +12,7 @@ from clawbox.experiments.spec_types import InferenceBackend, WorkloadSource
 from clawbox.replay.import_trace import import_trace
 
 
-def prepared_source(tmp_path):
+def prepared_source(tmp_path, *, scaffold='openclaw', history=None):
     source = tmp_path / 'original.jsonl'
     rows = [dict(type='trace_metadata', trace_format_version=5, benchmark='swe-rebench',
                  scaffold='openclaw', model='recorded-model', instance_id='case')]
@@ -28,14 +28,44 @@ def prepared_source(tmp_path):
                                    completion_tokens=12+index,
                                    raw_response=dict(choices=[dict(message=message,
                                        finish_reason='stop' if index else 'tool_calls')]))))
+    if history is not None:
+        for row, count in zip(rows[1:], history):
+            row['data']['history_tokens'] = count
     source.write_text(''.join(json.dumps(row)+'\n' for row in rows), encoding='utf-8')
     replay = tmp_path / 'replay.jsonl'
     import_trace(source, replay)
+    if scaffold != 'openclaw':
+        # The public importer accepts OpenClaw only. Build an offline fixture
+        # for prepare_serving_sim with matching source provenance.
+        import hashlib
+        rows[0]['scaffold'] = scaffold
+        source.write_text(''.join(json.dumps(row)+'\n' for row in rows), encoding='utf-8')
+        replay_rows = [json.loads(line) for line in replay.read_text().splitlines()]
+        replay_rows[0]['source_sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+        replay.write_text(''.join(json.dumps(row)+'\n' for row in replay_rows), encoding='utf-8')
     spec = load_experiment(Path('examples/experiments/getting-started.yaml'))
     case = spec.workload.cases[0].model_copy(update=dict(
         case_id='case', source_reference=str(source), replay_trace_reference=str(replay)))
     spec = spec.model_copy(update={'workload': spec.workload.model_copy(update={'cases': (case,)})})
     return source, replay, spec
+
+
+def test_bundle_preserves_tracelab_history_without_synthesizing_it(tmp_path):
+    source, _, spec = prepared_source(tmp_path, scaffold='tracelab-synthetic', history=[3200, 0])
+    original = source.read_bytes()
+    prepare_serving_sim(spec, tmp_path / 'bundle')
+    trace = next((tmp_path / 'bundle/traces').glob('*.jsonl'))
+    rows = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert [row['data']['history_tokens'] for row in rows[1:]] == [3200, 0]
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize('history', [None, [-1, 0], [True, 0], [1.5, 0]])
+def test_invalid_tracelab_history_fails_before_publishing(tmp_path, history):
+    _, _, spec = prepared_source(tmp_path, scaffold='tracelab-synthetic', history=history)
+    with pytest.raises(ValueError, match='history_tokens'):
+        prepare_serving_sim(spec, tmp_path / 'bundle')
+    assert not (tmp_path / 'bundle').exists()
 
 
 def test_bundle_preserves_token_evidence_and_cpu_tool_contract(tmp_path):

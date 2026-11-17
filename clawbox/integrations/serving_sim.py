@@ -80,6 +80,11 @@ def main(argv=None):
     parser.add_argument('--diagnostic-interval-seconds', type=float, default=1.,
                         help='process and event-loop sample interval in seconds (default: 1)')
     parser.add_argument('--topology', default='8A')
+    speed = parser.add_mutually_exclusive_group()
+    speed.add_argument('--decode-time-scale', type=float,
+                       help='positive finite decode-time multiplier; non-physical, default: calibrated timing')
+    speed.add_argument('--tpot-ms', type=float,
+                       help='positive finite target milliseconds per output token; non-physical, excludes decode-time-scale')
     parser.add_argument('--trace-catalog', type=Path)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--persistence', choices=['native', 'final'], default='native',
@@ -94,8 +99,15 @@ def main(argv=None):
     parser.add_argument('--ssl-certfile')
     args = parser.parse_args(argv)
     try:
-        require_host()
         import math
+        for name in ('decode_time_scale', 'tpot_ms'):
+            value = getattr(args, name)
+            if value is not None:
+                if args.command != 'serve':
+                    raise ValueError(f'--{name.replace("_", "-")} applies to serve only')
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(f'{name} must be positive and finite')
+        require_host()
         import resource
         if args.nofile < 1 or not math.isfinite(args.diagnostic_interval_seconds) or args.diagnostic_interval_seconds <= 0:
             raise ValueError('nofile and diagnostic interval must be positive and finite')
@@ -156,6 +168,7 @@ def main(argv=None):
                              persistence=args.persistence,
                              diagnostic_interval_seconds=args.diagnostic_interval_seconds,
                              v0=args.v0, k=args.k, tokenizer_dir=args.tokenizer_dir,
+                             decode_time_scale=args.decode_time_scale, tpot_ms=args.tpot_ms,
                              api_keys=[key] if key else None)
             uvicorn.run(app, host=args.host, port=args.port,
                         ssl_keyfile=args.ssl_keyfile, ssl_certfile=args.ssl_certfile)

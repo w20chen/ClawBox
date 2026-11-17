@@ -901,6 +901,8 @@ repeat it when changing the simulator listener range.
 | `sim_root`, `venv`, `trace_catalog` | Required absolute Linux paths | Verified unmodified GPU source, existing simulator environment, and GPU-side catalog. CPU scheduling does not parse the catalog. |
 | `cpu_affinity`, `cores` | Required | Distinct real logical CPU IDs and their count; this is the total real CPU budget across all clusters. IDs must be outside configured VM compute CPU sets and within supervisor affinity. With multiple clusters, each process gets one CPU and assignments wrap round-robin. |
 | `topology` | Required | Native simulated GPU topology for each independent cluster, e.g. `8A`; separate from real CPU budget. |
+| `decode_time_scale` | `null` (calibrated timing) | Positive finite multiplier for the decode part of each native step. Excludes `tpot_ms`; requires the upstream hybrid step model. Non-physical; prefill and block copy/zero work remain unchanged. Manual `serve`: `--decode-time-scale`. |
+| `tpot_ms` | `null` (calibrated timing) | Positive finite target milliseconds per output token, replacing the decode part of each step. Excludes `decode_time_scale`; requires the upstream hybrid step model. Non-physical; queueing, prefill, maintenance and transport still affect observed timing. Manual `serve`: `--tpot-ms`. |
 | `cluster_count` | `1` | Number of independent simulator clusters. Managed clusters use consecutive ports beginning at `base_url`; the entire range must fit below 65536 and be unused. Use multiple `8A` clusters to add capacity, not one enlarged topology. |
 | `routing` | `sticky_balanced_by_case` | The only supported pool route. Sorted cases assign each unique trace round-robin once; all sessions and Tool audits for that trace remain on the same cluster. |
 | `persistence` | `final` | `native` or `final`; current sim-release uses the same native incremental-input flushing and shutdown-only final summaries for both. ClawBox verifies successful native close. |
@@ -920,6 +922,11 @@ launcher also exposes `--nofile` (65536) and
 `--diagnostic-interval-seconds` (1.0 seconds) for manual services. A finalized
 report is distinct from timing validity: inspect native `validity.json` and
 `correctness.gpu_validity` before making performance claims.
+These reports retain native `non_physical` settings and per-cluster lag; no
+fixed-threshold warning verdict is synthesized. `/v1/clawbox/simulator/info`
+also reports `decode_time` and `non_physical`, both empty when speed overrides
+are absent. Managed startup verifies the requested decode settings. Speed
+overrides do not change `k=1`, recorded output token counts or arrivals.
 
 Changes require a new run ID and matching qualification, but no guest image
 rebuild or prediction retraining. Host apply is needed only if the saved host
@@ -949,7 +956,13 @@ only at session finalization when needed. The GPU service retains the recordings
 CPU sessions retain only actual requests, replies and live process identities.
 Native GPU scheduling and filtered signal APIs remain unchanged.
 
-The adapter targets sim-release `ae5c94517a32fe735ce93a62efe2748587f39cdf`.
+The adapter targets sim-release `ab16142d9835052d5966f3c19679ce6d22789004`.
+Its standard topology enables shared-prefix checkpoints; retain the revision
+and topology digest when comparing runs. The updated Mooncake shim requires
+setup/build in the new checkout. Original `history_tokens` values are preserved
+in prepared GPU traces. TraceLab synthetic sources missing that field must be
+regenerated upstream before preparation; ClawBox never invents missing history.
+This does not add TraceLab support to the OpenClaw-only trace importer.
 It explicitly uses `prompt_source=actual`: prefill and KV state depend on the
 Agent's actual messages. Trace-prompt replay, accelerated warm-up and
 `serve-many` are not exposed by this integration. Retain `k=1` and fresh

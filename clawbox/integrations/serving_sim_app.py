@@ -247,6 +247,9 @@ def attach_management(app, *, input_digest: str):
                           missing_reasoning_calls=sum(r.reasoning_tokens is None for r in calls))
                           for tid, calls in service.refs.traces.items()},
                       topology_digest=hashlib.sha256(topology.encode()).hexdigest(),
+                      decode_time={key: service.cfg[key] for key in ('decode_time_scale', 'tpot_ms')
+                                   if service.cfg.get(key) is not None},
+                      non_physical=service.cfg.get('validity', {}).get('non_physical', {}),
                       signals=dict(**service.feed.head(), service_events_path=EVENTS_PATH),
                       cpu_affinity=sorted(os.sched_getaffinity(0)),
                       pid=os.getpid(), nofile=nofile,

@@ -1192,13 +1192,13 @@ an explicit interface setting is preserved. No upstream source patch is applied.
 Reserve its actual CPU budget separately from experiment VM CPUs.
 `--cores` bounds real simulator CPUs; `--topology` selects simulated GPUs.
 
-For sim-release `ae5c94517a32fe735ce93a62efe2748587f39cdf`, upgrade using a new
+For sim-release `ab16142d9835052d5966f3c19679ce6d22789004`, upgrade using a new
 GPU checkout and a separate simulator environment; retain the previous checkout,
 environment and run outputs. Clone on Linux to preserve native build scripts:
 
 ```bash
 git clone --branch sim-release https://github.com/HCAHOI/agent-sched-bench-gpu.git /absolute/agent-sched-bench-gpu
-git -C /absolute/agent-sched-bench-gpu checkout --detach ae5c94517a32fe735ce93a62efe2748587f39cdf
+git -C /absolute/agent-sched-bench-gpu checkout --detach ab16142d9835052d5966f3c19679ce6d22789004
 export SIM_VENV=/absolute/simulator-venv
 python3 -m clawbox.integrations.serving_sim setup --sim-root /absolute/agent-sched-bench-gpu --cores 4
 python3 -m clawbox.integrations.serving_sim check --sim-root /absolute/agent-sched-bench-gpu --cores 4
@@ -1209,6 +1209,16 @@ Rust simulator extension and the native shims. Existing pinned tokenizer caches
 can be reused. Point the new experiment at this checkout/environment and use a
 new run ID with fresh qualification; the simulator upgrade alone needs no VM
 image rebuild, host apply or retraining.
+
+This release changes the standard `8A` GPU topology: shared-prefix checkpoints
+are enabled by default. Record the new simulator revision and topology digest;
+do not mix its results with an older GPU baseline. The Mooncake native shim also
+changed, so run `setup` for the new checkout before `check` (a Python-only source
+update is insufficient). Existing OpenClaw bundles remain usable. A TraceLab
+synthetic source must contain `history_tokens` for every model call; if absent,
+regenerate the source with current sim-release and prepare a new bundle instead
+of filling missing history with zero. The OpenClaw importer does not import
+TraceLab synthetic workloads.
 
 ClawBox keeps actual Agent prompts for prefill/KV simulation and normal `k=1`
 pacing. It does not enable the upstream trace-prompt or accelerated warm-up
@@ -1241,6 +1251,8 @@ inference:
       cpu_affinity: [240, 241, 242, 243]
       cores: 4
       topology: 8A
+      decode_time_scale: null
+      tpot_ms: null
       cluster_count: 1
       routing: sticky_balanced_by_case
       persistence: final
@@ -1248,6 +1260,23 @@ inference:
       startup_timeout_seconds: 180
       shutdown_timeout_seconds: 720
 ```
+
+Leave both speed fields `null` for calibrated timing. To study a different GPU
+decode speed explicitly, set **one** field: `decode_time_scale: 2.0` multiplies
+the decode part of each step by two; `tpot_ms: 20.0` targets 20 milliseconds per
+output token. Both require positive finite values and use the upstream hybrid
+step model. Prefill, block copy/zero work, queueing and transport still contribute
+latency, so `tpot_ms` is not an exact client-observed token interval or whole-call
+duration. Both are non-physical settings, recorded in service metadata and native
+`validity.json`; they are not calibrated hardware predictions. Manual `serve`
+accepts the matching `--decode-time-scale` or `--tpot-ms` option. A speed change
+requires a new run ID and qualification, but no host apply, VM image rebuild or
+retraining. Keep the same explicit speed setting across compared arms.
+
+Current sim-release records lag measurements without the former fixed-threshold
+warning verdict. Inspect `lag` in each cluster's `validity.json` and the retained
+`correctness.gpu_validity` reports; successful finalization alone does not establish
+timing fidelity.
 
 With `serving_sim_launch`, run `clawbox experiment qualify` and then
 `clawbox experiment run` as below; skip the manual `serve` commands and manual

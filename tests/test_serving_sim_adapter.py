@@ -173,6 +173,10 @@ def test_adapter_auth_readiness_and_original_routes(monkeypatch):
             assert data['adapter'] == 'clawbox' and data['accepted_requests'] == 0
             assert data['catalog_digest'] == 'catalog' and data['clock']['k'] == 1
             assert data['prompt_source'] == 'actual'
+            assert data['decode_time'] == data['non_physical'] == {}
+            application.state.service.cfg.update(tpot_ms=20, validity={'non_physical': {'tpot_ms': 20}})
+            timed = (await client.get(INFO_PATH, headers=headers)).json()
+            assert timed['decode_time'] == timed['non_physical'] == {'tpot_ms': 20}
             assert data['service_id'] == data['signals']['epoch']
             # Upstream's original endpoint still requires its original filter.
             assert (await client.get('/request-signals/events', headers=headers)).status_code == 422

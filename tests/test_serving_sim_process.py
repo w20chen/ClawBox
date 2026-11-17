@@ -17,7 +17,9 @@ def configuration():
 
 @pytest.mark.parametrize('field,value', [('cores', 3), ('cpu_affinity', [0, 0, 1, 2]),
     ('sim_root', 'relative'), ('cache_dir', 'relative'), ('hf_hub_cache', 'relative'),
-    ('shutdown_timeout_seconds', 0), ('nofile', 0)])
+    ('shutdown_timeout_seconds', 0), ('nofile', 0),
+    ('tpot_ms', 0), ('tpot_ms', float('inf')), ('tpot_ms', True),
+    ('decode_time_scale', -1), ('decode_time_scale', float('nan'))])
 def test_launch_rejects_invalid_environment_contract(field, value):
     config = configuration()
     config['serving_sim_launch'][field] = value
@@ -70,6 +72,36 @@ def test_single_cluster_keeps_the_existing_cpu_and_artifact_layout(tmp_path):
     assert layout['output'] == tmp_path / 'gpu-service/output'
 
 
+@pytest.mark.parametrize('knobs', [{}, {'tpot_ms': 20.}, {'decode_time_scale': 2.}])
+def test_decode_timing_reaches_every_managed_cluster(tmp_path, knobs):
+    config = configuration()
+    config['serving_sim_launch'].update(cluster_count=2, **knobs)
+    service = ServingSimProcess(config, tmp_path)
+    for layout in service.layouts:
+        command = service._command(layout)
+        for name in ('decode_time_scale', 'tpot_ms'):
+            flag = '--' + name.replace('_', '-')
+            if name in knobs:
+                assert float(command[command.index(flag) + 1]) == knobs[name]
+            else:
+                assert flag not in command
+        assert command[command.index('--k') + 1] == '1'
+
+
+def test_decode_timing_modes_are_exclusive():
+    config = configuration()
+    config['serving_sim_launch'].update(tpot_ms=20., decode_time_scale=2.)
+    with pytest.raises(ValueError, match='mutually exclusive'):
+        InferenceSpec(backend='serving_sim', configuration=config)
+
+
+@pytest.mark.parametrize('flags', [['--tpot-ms', 'nan'], ['--decode-time-scale', '0']])
+def test_manual_decode_timing_rejects_invalid_values(flags, capsys):
+    from clawbox.integrations.serving_sim import main
+    assert main(['serve', '--sim-root', '/sim', *flags]) == 2
+    assert 'positive and finite' in capsys.readouterr().err
+
+
 @pytest.mark.parametrize('invalid_cluster', [None, 1])
 def test_multi_cluster_stop_requires_and_aggregates_every_final_report(
     tmp_path, invalid_cluster,
@@ -91,7 +123,7 @@ def test_multi_cluster_stop_requires_and_aggregates_every_final_report(
             finalized=True, native_close_succeeded=index != invalid_cluster,
         )))
         (layout['output']/'validity.json').write_text(
-            '{"prompt_source":"actual","warning_threshold_exceeded":false}'
+            '{"prompt_source":"actual","lag":{"p99_s":0.4},"non_physical":{"tpot_ms":20}}'
         )
         (layout['output']/'realized.json').write_text('[]')
         (layout['output']/'realized-inputs.jsonl').touch()
@@ -103,6 +135,11 @@ def test_multi_cluster_stop_requires_and_aggregates_every_final_report(
         assert result['validity']['cluster_count'] == 2
         assert result['validity']['prompt_source'] == 'actual'
         assert len(result['validity']['clusters']) == 2
+        assert 'warning_threshold_exceeded' not in result['validity']
+        for row in result['validity']['clusters']:
+            assert row['non_physical'] == {'tpot_ms': 20}
+            assert row['lag'] == {'p99_s': .4}
+            assert 'warning_threshold_exceeded' not in row
     else:
         assert not result['finalized']
         assert result['clusters'][0]['finalized']

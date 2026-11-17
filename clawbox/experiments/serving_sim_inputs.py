@@ -136,6 +136,12 @@ def prepare_serving_sim(spec, output: Path, *, source_map: dict | None = None) -
         for index, action in enumerate(actions):
             row = copy.deepcopy(by_id[action.action_id])
             data = row["data"]
+            if meta[0].get('scaffold') == 'tracelab-synthetic' and 'history_tokens' not in data:
+                raise ValueError(f'{source}:{action.action_id}: TraceLab source lacks history_tokens; '
+                                 'regenerate it with current sim-release and update the matching CPU replay, '
+                                 'then prepare a new bundle')
+            if 'history_tokens' in data and (type(data['history_tokens']) is not int or data['history_tokens'] < 0):
+                raise ValueError(f'{source}:{action.action_id}: history_tokens must be a nonnegative integer')
             raw = data["raw_response"]
             if isinstance(raw, str):
                 raw = json.loads(raw)

@@ -143,6 +143,8 @@ class ServingSimLaunchSpec(StrictFrozenModel):
     cpu_affinity: tuple[int, ...] = Field(min_length=1)
     cores: int = Field(gt=0)
     topology: str = Field(min_length=1)
+    decode_time_scale: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    tpot_ms: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     cluster_count: int = Field(default=1, ge=1)
     routing: Literal['sticky_balanced_by_case'] = 'sticky_balanced_by_case'
     persistence: Literal['native', 'final'] = 'final'
@@ -155,6 +157,8 @@ class ServingSimLaunchSpec(StrictFrozenModel):
 
     @model_validator(mode='after')
     def launch_contract(self):
+        if self.decode_time_scale is not None and self.tpot_ms is not None:
+            raise ValueError('decode_time_scale and tpot_ms are mutually exclusive')
         for name in ('sim_root', 'venv', 'trace_catalog', 'tokenizer_dir', 'cache_dir', 'hf_hub_cache'):
             value = getattr(self, name)
             if value is not None and not PurePosixPath(value).is_absolute():
