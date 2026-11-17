@@ -82,6 +82,25 @@ def test_newest_lineage_version_excludes_overlapped_ancestor_pages(tmp_path):
     assert metrics["authoritative_bytes"] == 4 * page
 
 
+def test_guest_physical_address_may_exceed_backing_file_length(tmp_path):
+    page = 4096
+    snapshot = tmp_path / "guest.mem"
+    backing = tmp_path / "base.mem"
+    backing.write_bytes(b"A" * (4 * page))
+    guest_base = 1024 * 1024 * 1024
+    _lineage(snapshot, [{
+        "name": "000000.mem", "external_path": str(backing),
+        "ranges": [{"gpa": guest_base, "offset": 0, "length": 4 * page}],
+    }], 4 * page)
+
+    selected, metrics = resolve_lineage_ranges(snapshot, chunk_bytes=page)
+
+    assert [(item.offset, item.length) for item in selected] == [
+        (0, page), (page, page), (2 * page, page), (3 * page, page),
+    ]
+    assert metrics["authoritative_bytes"] == 4 * page
+
+
 def test_shared_physical_range_wins_and_is_read_once(tmp_path):
     page = 4096
     shared = tmp_path / "shared.mem"

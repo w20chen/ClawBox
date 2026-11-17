@@ -119,7 +119,12 @@ def resolve_lineage_ranges(
             if (type(gpa) is not int or type(offset) is not int or type(length) is not int
                     or gpa < 0 or offset < 0 or length <= 0
                     or gpa % PAGE or offset % PAGE or length % PAGE
-                    or gpa + length > logical or offset + length > logical):
+                    # GPA is a guest-physical address, not an offset into the
+                    # sparse backing file.  Real Cube snapshots commonly map
+                    # a 3 GiB file into guest addresses from 1 GiB through
+                    # beyond 4 GiB.  Only the file range is bounded by the
+                    # backing file's logical length.
+                    or offset + length > logical):
                 raise RuntimeError(f"invalid or unaligned lineage range in {sidecar}")
             owned.append((gpa, offset, length))
         for gpa, offset, length in sorted(owned):
