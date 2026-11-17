@@ -511,7 +511,7 @@ def test_configure_clears_saved_dependency_install_gate_by_default(
     assert cli.main([
         "experiment", "configure", str(source), str(output), *options,
     ]) == 0
-    capsys.readouterr()
+    assert "Dependency installs: unlimited" in capsys.readouterr().out
     configured = yaml.safe_load(output.read_text(encoding="utf-8"))
     assert configured["execution"]["dependency_install_concurrency"] is None
 
@@ -526,7 +526,10 @@ def test_configure_can_explicitly_enable_dependency_install_gate(
         "examples/experiments/getting-started.yaml", str(output),
         "--dependency-install-concurrency", "17",
     ]) == 0
-    capsys.readouterr()
+    assert (
+        "Dependency installs: max 17 active (explicit gate)"
+        in capsys.readouterr().out
+    )
     configured = yaml.safe_load(output.read_text(encoding="utf-8"))
     assert configured["execution"]["dependency_install_concurrency"] == 17
 

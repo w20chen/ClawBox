@@ -50,6 +50,14 @@ def positive_float_or_auto(value: str) -> float | str:
 def emit_overview(value: dict[str, Any]) -> None:
     if 'dimensions' in value:
         print(f"Experiment: {value['experiment_id']} | recipe: {value['recipe']} | trials: {value['arm_count']}")
+        dependency_limit = value["execution"].get(
+            "dependency_install_concurrency"
+        )
+        print(
+            "Dependency installs: unlimited"
+            if dependency_limit is None
+            else f"Dependency installs: max {dependency_limit} active (explicit gate)"
+        )
         print('Arm | Admission | Runtime | Placement | Idle reclaim | Shared memory | Checkpoint | Deployment | Coordination')
         print('Fixed conditions: ' + json.dumps(value['conditions'], sort_keys=True))
         for arm in value['arms']:
@@ -81,6 +89,12 @@ def emit_overview(value: dict[str, Any]) -> None:
         print(f"Per Agent: Runtime={runtime['vcpu']} vCPU/{runtime['memory_gib']:g} GiB, "
               f"Tool={tool['vcpu']} vCPU/{tool['memory_gib']:g} GiB, "
               f"pair={value['pair_memory_gib']:g} GiB")
+    dependency_limit = value["execution"].get("dependency_install_concurrency")
+    print(
+        "Dependency installs: unlimited"
+        if dependency_limit is None
+        else f"Dependency installs: max {dependency_limit} active (explicit gate)"
+    )
     for warning in value.get("warnings", []):
         print(f"Warning: {warning}")
     if value.get("compute_nodes"):

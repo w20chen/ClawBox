@@ -792,6 +792,9 @@ def experiment_overview(spec: ExperimentSpec) -> dict[str, Any]:
             "random_seed": spec.execution.random_seed,
             "arm_timeout_seconds": spec.execution.arm_timeout_seconds,
             "command_timeout_seconds": spec.execution.command_timeout_seconds,
+            "dependency_install_concurrency": (
+                spec.execution.dependency_install_concurrency
+            ),
             "memory_sample_interval_seconds": (
                 spec.execution.memory_sample_interval_seconds
             ),

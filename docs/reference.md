@@ -103,7 +103,9 @@ Newly configured experiments always write
 historical positive gate. This leaves apt/pip commands unlimited. Pass
 `--dependency-install-concurrency N` only when an outbound package path needs a
 measured positive limit. Either choice requires a new run ID; it does not
-require host apply, image rebuild, or retraining.
+require host apply, image rebuild, or retraining. Human-readable `configure` and
+`describe` output always identifies the effective dependency-install setting as
+`unlimited` or as an explicit active-install limit.
 
 `sudo bash scripts/clawbox-pypi-cache {start|status|stop}` manages the host PyPI
 cache. Docker and curl are required. `start` waits for its HTTP status endpoint;

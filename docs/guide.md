@@ -468,7 +468,9 @@ and execution time. The default arm timeout is 3600 seconds.
 `execution.dependency_install_concurrency: null`, even if the base YAML saved an
 older positive gate. Use `--dependency-install-concurrency N` only for an
 intentional package-path protection experiment; a small bound can serialize a
-large replay independently of VM or Tool admission.
+large replay independently of VM or Tool admission. The human-readable
+`configure` and `describe` summaries print the effective setting as either
+`unlimited` or an explicit active-install limit; review that line before launch.
 
 For a corpus scan, set `workload.session_assignment: unique`, set
 `execution.concurrency_levels` to the number of cases, and set
