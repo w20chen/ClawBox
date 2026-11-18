@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from enum import Enum
-from threading import RLock
+from threading import Lock, RLock
 from collections.abc import Callable
 from typing import Any, Mapping
 
@@ -98,6 +98,7 @@ class CubeSandboxLifecycle:
                  snapshot_reuse_probability: float | None = None,
                  warm_restore_seconds_per_gib: float | None = None,
                  cold_restore_seconds_per_gib: float | None = None,
+                 next_use_residency: bool = False,
                  snapshot_page_profiler: Any = None,
                  snapshot_page_event: Callable[[Mapping[str, Any]], None] | None = None) -> None:
         if snapshot_storage not in {"tiered", "warm-only"}:
@@ -142,6 +143,10 @@ class CubeSandboxLifecycle:
         self.snapshot_reuse_probability = snapshot_reuse_probability
         self.warm_restore_seconds_per_gib = warm_restore_seconds_per_gib
         self.cold_restore_seconds_per_gib = cold_restore_seconds_per_gib
+        self.next_use_residency = next_use_residency
+        self._snapshot_next_use_monotonic_s: float | None = None
+        self._snapshot_next_use_revision = 0
+        self._snapshot_next_use_lock = Lock()
         self.snapshot_reservation_bytes = snapshot_reservation_bytes
         self.numa_borrower = numa_borrower
         self.configured_memory_bytes = configured_memory_bytes
@@ -160,6 +165,28 @@ class CubeSandboxLifecycle:
         self._restore_fault_sampler = None
         self.snapshot_page_profiler = snapshot_page_profiler
         self.snapshot_page_event = snapshot_page_event
+
+    def set_snapshot_next_use(self, deadline: float | None, revision: int = 0) -> None:
+        """Publish the current queued.est_wait_s-derived absolute deadline."""
+        # GPU queue updates are frequent. Never wait for a checkpoint/restore
+        # that holds the lifecycle lock; a dedicated short lock orders only
+        # deadline revisions and the pool update takes its metadata lock.
+        with self._snapshot_next_use_lock:
+            if revision < self._snapshot_next_use_revision:
+                return
+            self._snapshot_next_use_monotonic_s = deadline
+            self._snapshot_next_use_revision = revision
+        key = self._snapshot_key
+        # Running VMs either have no snapshot or retain a WARM predecessor that
+        # cannot be evicted. Their next checkpoint reads the scalar directly,
+        # so avoid a global pool-lock acquisition on every GPU queue update.
+        if (
+            key is not None
+            and self._state is SandboxState.SWAPPED
+            and self._snapshot_tier is SnapshotTier.WARM
+            and self.snapshot_pool is not None
+        ):
+            self.snapshot_pool.update_next_use(key, deadline, revision)
 
     def _emit_snapshot_page_event(self, event: Mapping[str, Any] | None) -> None:
         if event is not None and self.snapshot_page_event is not None:
@@ -467,6 +494,7 @@ class CubeSandboxLifecycle:
                     key, self.snapshot_reservation_bytes, timeout_s=0,
                     retention_value_seconds=self._retention_value_seconds(
                         self.configured_memory_bytes or self.snapshot_reservation_bytes),
+                    next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
                 )
                 self._pending_snapshot_keys.add(key)
             try:
@@ -566,6 +594,7 @@ class CubeSandboxLifecycle:
                                     key, self.snapshot_reservation_bytes,
                                     timeout_s=0 if predecessor is not None or self.default_snapshot_tier is not None else 120,
                                     retention_value_seconds=retention_value,
+                                    next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
                                 )
                             self._pending_snapshot_keys.add(key)
                         except WarmCapacityError:
@@ -663,6 +692,8 @@ class CubeSandboxLifecycle:
                             retention_value_seconds=self._retention_value_seconds(
                                 int(manifest["logical_bytes"])
                             ),
+                            next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
+                            next_use_revision=self._snapshot_next_use_revision,
                             **self._pool_allocation_fields(manifest),
                             **self._pool_lineage_fields(manifest),
                         )
@@ -680,6 +711,13 @@ class CubeSandboxLifecycle:
                     self._snapshot_tier = tier
                     self._tier = tier
                 self._state = SandboxState.SWAPPED
+                if tier is SnapshotTier.WARM and self.snapshot_pool is not None:
+                    # Close the commit/state-publication race with a concurrent
+                    # GPU deadline update that deliberately skipped the pool.
+                    self.snapshot_pool.update_next_use(
+                        key, self._snapshot_next_use_monotonic_s,
+                        self._snapshot_next_use_revision,
+                    )
                 if self.numa_borrower is not None and self.sandbox_id is not None:
                     # Pause keeps a Cube tombstone/shim for resume, so its
                     # cgroup may remain populated even though guest memory is
@@ -788,6 +826,8 @@ class CubeSandboxLifecycle:
                                 retention_value_seconds=self._retention_value_seconds(
                                     int(manifest["logical_bytes"])
                                 ),
+                                next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
+                                next_use_revision=self._snapshot_next_use_revision,
                                 **self._pool_allocation_fields(manifest),
                                 **self._pool_lineage_fields(manifest),
                             )
@@ -804,6 +844,11 @@ class CubeSandboxLifecycle:
                         self._snapshot_tier = tier
                         self._tier = tier
                         self._state = SandboxState.SWAPPED
+                        if tier is SnapshotTier.WARM and self.snapshot_pool is not None:
+                            self.snapshot_pool.update_next_use(
+                                key, self._snapshot_next_use_monotonic_s,
+                                self._snapshot_next_use_revision,
+                            )
                         if (
                             self.numa_borrower is not None
                             and self.sandbox_id is not None
@@ -1231,7 +1276,187 @@ class CubeSandboxLifecycle:
                 "prepare_service_seconds": time.monotonic() - started_mono,
             }
 
+    def _promote_cold_snapshot_if_fit(self) -> None:
+        """Move a complete COLD lineage to WARM only when free space fits it.
+
+        Promotion is deliberately non-evicting: restore must not displace a
+        different WARM snapshot. The ordinary restore path runs afterward and
+        pins/retains the newly committed WARM generation.
+        """
+        if not self.next_use_residency:
+            return
+        with self._lock:
+            if (
+                self._state is not SandboxState.SWAPPED
+                or self._snapshot_tier is not SnapshotTier.COLD
+                or self._snapshot_key is None
+            ):
+                return
+            key = self._snapshot_key
+            before = self._state
+            started_wall, started_mono = time.time(), time.monotonic()
+            stage_seconds: dict[str, float] = _StageSeconds()
+            host_memory_before = self._observe_physical()
+            if (
+                self.snapshot_pool is None
+                or self.snapshot_reservation_bytes is None
+                or not self.warm_snapshot_root
+                or not self.cold_snapshot_root
+                or self.sandbox_id is None
+            ):
+                self._record(
+                    "promote", before, before, started_wall, started_mono,
+                    status="skipped", host_memory_before=host_memory_before,
+                    tier_from=SnapshotTier.COLD.value,
+                    tier_to=SnapshotTier.COLD.value,
+                    snapshot_generation=key.generation,
+                    snapshot_metrics={
+                        "outcome": "skipped",
+                        "reason": "warm_promotion_not_configured",
+                    },
+                )
+                return
+            try:
+                with self._measure_stage(stage_seconds, "snapshot_promotion_reserve_s"):
+                    self.snapshot_pool.reserve_without_spill(
+                        key, self.snapshot_reservation_bytes,
+                    )
+            except WarmCapacityError:
+                self._record(
+                    "promote", before, before, started_wall, started_mono,
+                    status="skipped", host_memory_before=host_memory_before,
+                    stage_seconds=stage_seconds,
+                    tier_from=SnapshotTier.COLD.value,
+                    tier_to=SnapshotTier.COLD.value,
+                    snapshot_generation=key.generation,
+                    snapshot_metrics={
+                        "outcome": "skipped",
+                        "reason": "insufficient_free_warm_capacity",
+                        "reservation_bytes": self.snapshot_reservation_bytes,
+                    },
+                )
+                return
+
+            source = self._replica_memory_path or (
+                f"{self.cold_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
+                f"{self.role}-g{key.generation}.mem"
+            )
+            destination = (
+                f"{self.warm_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
+                f"{self.role}-g{key.generation}.mem"
+            )
+            relocated = False
+            committed = False
+            promotion_metrics: dict[str, Any] = {
+                "outcome": "promoted",
+                "source_path": source,
+                "reservation_bytes": self.snapshot_reservation_bytes,
+            }
+            try:
+                if self.snapshot_compression == "zstd-page":
+                    from .snapshot_compression import decompress_snapshot
+                    with self._measure_stage(stage_seconds, "snapshot_promotion_decompress_s"):
+                        decompression = decompress_snapshot(
+                            source, binary=self.snapshot_compression_binary,
+                        )
+                    promotion_metrics["decompression"] = decompression
+                    if decompression and decompression.get("reuse_manifest_path"):
+                        self._compression_reuse_manifest = str(
+                            decompression["reuse_manifest_path"]
+                        )
+                with self._transfer("promote", stage_seconds), self._measure_stage(
+                    stage_seconds, "api_promote_s",
+                ):
+                    relocation = self.client.relocate_snapshot(
+                        self.sandbox, tier=SnapshotTier.WARM.value,
+                        memory_snapshot_path=destination,
+                        generation=key.generation,
+                        **({"storage_domain": self.storage_domain} if self.storage_domain else {}),
+                    )
+                relocated = True
+                from .snapshot import read_snapshot_metadata
+                with self._measure_stage(stage_seconds, "snapshot_promotion_metadata_s"):
+                    native_metrics = read_snapshot_metadata(
+                        destination,
+                        require_lineage=self.snapshot_mechanism == "incremental-cow",
+                    )
+                promoted = self._annotate_snapshot_lineage(
+                    native_metrics, key=key, parent=self._snapshot_parent_key,
+                    tier=SnapshotTier.WARM,
+                )
+                promotion_metrics.update({
+                    "relocation": dict(relocation),
+                    "snapshot": promoted,
+                })
+                self.snapshot_pool.commit(
+                    key, path=destination,
+                    logical_bytes=int(promoted["logical_bytes"]),
+                    allocated_bytes=int(promoted["allocated_bytes"]),
+                    transferred_bytes=(
+                        int(promoted["transferred_bytes"])
+                        if promoted.get("transferred_bytes") is not None else None
+                    ),
+                    spiller=self._spill_to_cold,
+                    template_id=self.template,
+                    shared_base_identity=promoted.get("external_base_identity"),
+                    shared_base_allocated_bytes=int(
+                        promoted.get("external_base_allocated_bytes") or 0
+                    ),
+                    private_delta_bytes=int(
+                        promoted.get("private_delta_bytes")
+                        or promoted["allocated_bytes"]
+                    ),
+                    dependency_count=int(promoted.get("dependency_count") or 0),
+                    expected_reuse_probability=self.snapshot_reuse_probability,
+                    retention_value_seconds=self._retention_value_seconds(
+                        int(promoted["logical_bytes"])
+                    ),
+                    next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
+                    next_use_revision=self._snapshot_next_use_revision,
+                    **self._pool_allocation_fields(promoted),
+                    **self._pool_lineage_fields(promoted),
+                )
+                committed = True
+                self._warm_paths.add(destination)
+                self._replica_memory_path = destination
+                self._snapshot_tier = SnapshotTier.WARM
+                self._tier = SnapshotTier.WARM
+                self.snapshot_pool.update_next_use(
+                    key, self._snapshot_next_use_monotonic_s,
+                    self._snapshot_next_use_revision,
+                )
+                self._record(
+                    "promote", before, before, started_wall, started_mono,
+                    host_memory_before=host_memory_before,
+                    stage_seconds=stage_seconds,
+                    tier_from=SnapshotTier.COLD.value,
+                    tier_to=SnapshotTier.WARM.value,
+                    snapshot_generation=key.generation,
+                    snapshot_path=destination,
+                    snapshot_metrics=promotion_metrics,
+                )
+            except Exception as exc:
+                if not committed:
+                    self.snapshot_pool.abort(key)
+                if relocated and not committed:
+                    # The native relocation may already be authoritative. Do
+                    # not pretend the old COLD identity is still restorable.
+                    self._state = SandboxState.UNKNOWN
+                self._record(
+                    "promote", before, self._state, started_wall, started_mono,
+                    status="error", error_type=type(exc).__name__,
+                    host_memory_before=host_memory_before,
+                    stage_seconds=stage_seconds,
+                    tier_from=SnapshotTier.COLD.value,
+                    tier_to=SnapshotTier.WARM.value,
+                    snapshot_generation=key.generation,
+                    snapshot_path=destination,
+                    snapshot_metrics={**promotion_metrics, "outcome": "failed"},
+                )
+                raise
+
     def restore(self) -> float:
+        self._promote_cold_snapshot_if_fit()
         with self._snapshot_access():
             if self.sandbox_id is None or self._state is not SandboxState.SWAPPED:
                 raise LifecycleError("CubeSandbox is not swapped out")

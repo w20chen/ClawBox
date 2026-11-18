@@ -86,7 +86,7 @@ SharedMemory = subset('SharedMemory', ResourcesSpec, RESOURCE_FIELDS['shared_mem
 Checkpoint = subset('Checkpoint', ResourcesSpec, RESOURCE_FIELDS['checkpoint'],
                     mechanism=(Literal['full-copy', 'incremental-cow'], 'incremental-cow'),
                     storage=(Literal['disk', 'warm-only', 'tiered'], 'disk'),
-                    residency=(Literal['lru', 'value'], 'lru'))
+                    residency=(Literal['lru', 'value', 'next-use'], 'lru'))
 
 
 class Deployment(StrictFrozenModel):
@@ -232,8 +232,16 @@ def lower_arm(design, name, m):
         raise ValueError(f'{name}: measured-cost selection needs reclaim or pressure borrowing and empirical memory_action_costs')
     if shared['borrow'] != 'off' and not r['shared_memory_borrow_limit_mib']:
         raise ValueError(f'{name}: borrowing requires a positive environment shared_memory_borrow_limit_mib')
-    if snapshots and ck['residency'] == 'value' and ck['storage'] != 'tiered':
-        raise ValueError(f'{name}: value residency requires idle reclaim and tiered storage')
+    if snapshots and ck['residency'] in {'value', 'next-use'} and ck['storage'] != 'tiered':
+        raise ValueError(
+            f"{name}: {ck['residency']} residency requires idle reclaim and tiered storage"
+        )
+    if snapshots and ck['residency'] == 'next-use' and (
+            idle['policy'] != 'gpu' or idle['scope'] != 'agent_and_tool'
+            or design.inference.backend.value != 'serving_sim'):
+        raise ValueError(
+            f'{name}: next-use residency requires serving_sim and GPU-aware agent_and_tool idle reclaim'
+        )
     if snapshots and ck['storage'] != 'disk' and (not r['warm_memory_capacity_mib'] or not r['warm_snapshot_root']):
         raise ValueError(f'{name}: WARM storage requires configured pool capacity and path')
     peer_storage = (r.get('snapshot_scheduling_storage') or {}).get('topology') == 'peer-local-ssd'
@@ -287,7 +295,9 @@ def lower_arm(design, name, m):
              gpu_reclaim_min_remaining_seconds=idle['gpu_reclaim_min_remaining_seconds'],
              gpu_signal_max_age_seconds=idle['gpu_signal_max_age_seconds'],
              gpu_first_token_prewarm=idle['gpu_first_token_prewarm'],
-             template_aware_placement=pl['template_affinity'], snapshot_aware_residency=snapshots and ck['residency'] == 'value',
+             template_aware_placement=pl['template_affinity'],
+             snapshot_aware_residency=snapshots and ck['residency'] == 'value',
+             snapshot_next_use_residency=snapshots and ck['residency'] == 'next-use',
              mechanisms=m, resource_overrides=r,
              execution_overrides={key: x[key] for key in (*PLACEMENT_FIELDS, 'placement_policy')})
     return p, r, x
@@ -398,7 +408,7 @@ def recipe_arms(recipe, *, checkpoint_axis=None):
             raise ValueError('checkpoint recipe requires --checkpoint-axis encoding|storage|residency')
         field, values = {'encoding': ('mechanism', ('full-copy', 'incremental-cow')),
                          'storage': ('storage', ('disk', 'warm-only', 'tiered')),
-                         'residency': ('residency', ('lru', 'value'))}[checkpoint_axis]
+                         'residency': ('residency', ('lru', 'value', 'next-use'))}[checkpoint_axis]
         return [arm('checkpoint-'+value, **{'checkpoint__'+field: value}) for value in values]
     if recipe == 'integrated':
         neutral = {'deployment__resident_capacity_accounting': False,
@@ -441,6 +451,8 @@ def fixed_recipe_arms(recipe, *, common, checkpoint_axis=None):
         switches.update({'shared_memory.borrow': 'pressure', 'checkpoint.storage': 'tiered'})
     if recipe == 'checkpoint' and checkpoint_axis == 'residency':
         switches['checkpoint.storage'] = 'tiered'
+        switches['idle_reclaim.policy'] = 'gpu'
+        switches['idle_reclaim.scope'] = 'agent_and_tool'
     neutral = override_mechanisms(common, switches)
     result = []
     for arm in recipe_arms(recipe, checkpoint_axis=checkpoint_axis):
@@ -472,6 +484,14 @@ def design_overview(spec):
             requirements.append('snapshot/restore qualification; actual outstanding model requests')
         if p.template_aware_placement:
             requirements.append('physical template-base sharing qualification')
+        if p.snapshot_next_use_residency:
+            requirements.append(
+                'serving_sim queued.est_wait_s feed; GPU-aware agent_and_tool reclaim; '
+                'qualified cross-tier snapshot relocation'
+            )
+            warnings.append(
+                'next-use uses the queue/prefill estimate, not full model-response completion time.'
+            )
         costs = resolved.resources.snapshot_residency_costs
         if p.snapshot_aware_residency and costs and costs.cold_restore_seconds_per_gib <= costs.warm_restore_seconds_per_gib:
             warnings.append('Measured COLD restore is no slower than WARM: retention value is zero.')

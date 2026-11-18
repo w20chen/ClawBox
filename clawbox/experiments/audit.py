@@ -35,7 +35,7 @@ def _policy_key(policy: object) -> tuple[object, ...]:
     return (
         policy.admission, policy.reclamation, policy.eviction, policy.restore,
         policy.runtime_control, policy.template_aware_placement,
-        policy.snapshot_aware_residency,
+        policy.snapshot_aware_residency, policy.snapshot_next_use_residency,
     )
 
 

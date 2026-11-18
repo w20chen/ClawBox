@@ -136,6 +136,28 @@ def test_snapshot_retention_value_uses_logical_state_not_private_delta() -> None
     assert lifecycle._retention_value_seconds(4 * 1024**3) == pytest.approx(1.2)
 
 
+def test_next_use_update_does_not_wait_for_lifecycle_io_lock():
+    lifecycle = CubeSandboxLifecycle(
+        CubeSandboxClient(sandbox_class=_Sandbox), template="tpl",
+        node_name="node-a", ownership=_owner(),
+    )
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_lifecycle_lock():
+        with lifecycle._lock:
+            held.set()
+            assert release.wait(1)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        holder = executor.submit(hold_lifecycle_lock)
+        assert held.wait(1)
+        lifecycle.set_snapshot_next_use(123.0, revision=1)
+        assert lifecycle._snapshot_next_use_monotonic_s == 123.0
+        release.set()
+        holder.result(timeout=1)
+
+
 class _Commands:
     def __init__(self, owner) -> None:
         self.owner = owner
@@ -2911,3 +2933,131 @@ def test_public_snapshot_qualification_exercises_selected_scope(tmp_path, monkey
     assert ("checkpoint" in runtime_operations) is pair
     assert ("restore" in runtime_operations) is pair
     assert not _Sandbox.items
+
+
+def _cold_next_use_lifecycle(tmp_path, monkeypatch, *, capacity=100, compressed=False):
+    import clawbox.cube.snapshot as snapshot_module
+    from clawbox.cube.lifecycle import SandboxState
+
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(capacity, next_use_aware=True)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=80,
+        snapshot_mechanism="full-copy",
+        snapshot_compression="zstd-page" if compressed else "none",
+        snapshot_compression_binary="/bin/true",
+        next_use_residency=True,
+    )
+    key = SnapshotKey(lifecycle.ownership.session_id, lifecycle.role, 1)
+    lifecycle.sandbox_id = "sandbox-promote"
+    lifecycle.sandbox = SimpleNamespace(state="paused")
+    lifecycle._state = SandboxState.SWAPPED
+    lifecycle._generation = 1
+    lifecycle._snapshot_key = key
+    lifecycle._snapshot_tier = SnapshotTier.COLD
+    lifecycle._tier = SnapshotTier.COLD
+    lifecycle._replica_memory_path = str(
+        tmp_path / "cold" / "sandbox-promote" / "tool-g1.mem"
+    )
+    lifecycle.set_snapshot_next_use(120, revision=1)
+    monkeypatch.setattr(snapshot_module, "read_snapshot_metadata", lambda *_a, **_k: {
+        "logical_bytes": 60,
+        "allocated_bytes": 60,
+        "transferred_bytes": 60,
+    })
+    return lifecycle, client, pool, key
+
+
+def test_next_use_cold_restore_promotes_whole_snapshot_before_connect(tmp_path, monkeypatch):
+    lifecycle, client, pool, key = _cold_next_use_lifecycle(tmp_path, monkeypatch)
+    calls = []
+
+    def relocate(_sandbox, **kwargs):
+        calls.append(("relocate", kwargs["tier"], kwargs["memory_snapshot_path"]))
+        return {
+            "tier": kwargs["tier"], "generation": kwargs["generation"],
+            "memory_snapshot_path": kwargs["memory_snapshot_path"],
+        }
+
+    def connect(sandbox_id, **_kwargs):
+        calls.append(("connect", sandbox_id))
+        return SimpleNamespace(state="running")
+
+    client.relocate_snapshot = relocate
+    client.connect_sandbox = connect
+    lifecycle.restore()
+
+    assert [item[0] for item in calls] == ["relocate", "connect"]
+    manifest = pool.manifest(key)
+    assert manifest.tier is SnapshotTier.WARM
+    assert manifest.retained_by_vm
+    assert manifest.path.startswith(str(tmp_path / "warm"))
+    assert lifecycle._snapshot_tier is SnapshotTier.WARM
+    promotion = next(t for t in lifecycle.timings if t["operation"] == "promote")
+    assert promotion["status"] == "ok"
+    assert promotion["tier_from"] == "cold" and promotion["tier_to"] == "warm"
+
+
+def test_next_use_cold_restore_does_not_spill_to_make_promotion_space(tmp_path, monkeypatch):
+    lifecycle, client, pool, _key = _cold_next_use_lifecycle(tmp_path, monkeypatch)
+    other = SnapshotKey("other", "tool", 1)
+    pool.reserve(other, 30)
+    pool.commit(
+        other, path="/warm/other", logical_bytes=30,
+        allocated_bytes=30, transferred_bytes=30,
+    )
+    calls = []
+    client.relocate_snapshot = lambda *_a, **_k: calls.append("relocate")
+    client.connect_sandbox = lambda sandbox_id, **_k: (
+        calls.append("connect") or SimpleNamespace(state="running")
+    )
+
+    lifecycle.restore()
+
+    assert calls == ["connect"]
+    assert pool.manifest(other).path == "/warm/other"
+    promotion = next(t for t in lifecycle.timings if t["operation"] == "promote")
+    assert promotion["status"] == "skipped"
+    assert promotion["snapshot_metrics"]["reason"] == "insufficient_free_warm_capacity"
+
+
+def test_next_use_promotion_failure_aborts_capacity_reservation(tmp_path, monkeypatch):
+    lifecycle, client, pool, _key = _cold_next_use_lifecycle(tmp_path, monkeypatch)
+    client.relocate_snapshot = lambda *_a, **_k: (_ for _ in ()).throw(
+        RuntimeError("relocation failed")
+    )
+    with pytest.raises(RuntimeError, match="relocation failed"):
+        lifecycle.restore()
+    assert pool.reserved_bytes == 0
+    assert lifecycle.state.value == "swapped"
+    assert next(t for t in lifecycle.timings if t["operation"] == "promote")["status"] == "error"
+
+
+def test_next_use_compressed_cold_snapshot_expands_before_promotion(tmp_path, monkeypatch):
+    import clawbox.cube.snapshot_compression as compression_module
+    lifecycle, client, pool, key = _cold_next_use_lifecycle(
+        tmp_path, monkeypatch, compressed=True,
+    )
+    calls = []
+    monkeypatch.setattr(
+        compression_module, "decompress_snapshot",
+        lambda *_a, **_k: calls.append("decompress") or {"wall_seconds": .1},
+    )
+
+    def relocate(_sandbox, **kwargs):
+        calls.append("relocate")
+        return {
+            "tier": kwargs["tier"], "generation": kwargs["generation"],
+            "memory_snapshot_path": kwargs["memory_snapshot_path"],
+        }
+
+    client.relocate_snapshot = relocate
+    client.connect_sandbox = lambda *_a, **_k: (
+        calls.append("connect") or SimpleNamespace(state="running")
+    )
+    lifecycle.restore()
+    assert calls[:3] == ["decompress", "relocate", "connect"]
+    assert pool.manifest(key).expanded

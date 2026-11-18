@@ -131,6 +131,110 @@ def commit(pool: WarmSnapshotPool, index: int, size: int) -> None:
                 allocated_bytes=size, transferred_bytes=size)
 
 
+def commit_next_use(
+    pool: WarmSnapshotPool, index: int, size: int, deadline: float | None,
+    spilled: list | None = None,
+) -> None:
+    pool.reserve(key(index), size)
+    pool.commit(
+        key(index), path=f"/warm/{index}", logical_bytes=size,
+        allocated_bytes=size, transferred_bytes=size,
+        next_use_monotonic_s=deadline,
+        spiller=(spilled.append if spilled is not None else None),
+    )
+
+
+def test_next_use_admission_evicts_strictly_later_snapshots_latest_first():
+    spilled = []
+    pool = WarmSnapshotPool(100, next_use_aware=True)
+    commit_next_use(pool, 1, 40, 20, spilled)
+    commit_next_use(pool, 2, 40, 50, spilled)
+    pool.reserve_for_admission(
+        key(3), 50, timeout_s=.01, next_use_monotonic_s=10,
+    )
+    assert [item.key for item in spilled] == [key(2)]
+    assert pool.reserved_bytes == 50
+    assert pool.snapshot()["residency_policy"] == "next_use"
+
+
+@pytest.mark.parametrize("victim,candidate", [(10, 10), (9, 10), (None, 10)])
+def test_next_use_admission_rejects_equal_earlier_or_unknown_victim(victim, candidate):
+    pool = WarmSnapshotPool(100, next_use_aware=True)
+    commit_next_use(pool, 1, 100, victim, [])
+    with pytest.raises(WarmAdmissionRejected):
+        pool.reserve_for_admission(
+            key(2), 1, timeout_s=.01, next_use_monotonic_s=candidate,
+        )
+    assert pool.manifest(key(1)).pinned == 0
+
+
+def test_next_use_admission_requires_enough_actual_reclaimable_bytes():
+    spilled = []
+    pool = WarmSnapshotPool(120, next_use_aware=True)
+    # The shared identity remains owned by the second manifest, so spilling
+    # the latest first snapshot reclaims no physical bytes.
+    shared = "1:1"
+    for index, deadline in ((1, 40), (2, 30)):
+        pool.reserve(key(index), 50)
+        pool.commit(
+            key(index), path=f"/warm/{index}", logical_bytes=50,
+            allocated_bytes=50, transferred_bytes=50,
+            next_use_monotonic_s=deadline, spiller=spilled.append,
+            owned_layer_identities=(shared,),
+            owned_layer_files={shared: ("/warm/shared", 50)},
+        )
+    pool.reserve_for_admission(
+        key(3), 80, timeout_s=.01, next_use_monotonic_s=10,
+    )
+    assert [item.key for item in spilled] == [key(1), key(2)]
+
+
+def test_next_use_fit_needs_no_estimate_and_revision_updates_are_ordered():
+    pool = WarmSnapshotPool(100, next_use_aware=True)
+    pool.reserve_for_admission(key(1), 50, timeout_s=.01)
+    pool.commit(
+        key(1), path="/warm/1", logical_bytes=50, allocated_bytes=50,
+        transferred_bytes=50, next_use_monotonic_s=20, next_use_revision=2,
+    )
+    pool.update_next_use(key(1), 99, revision=1)
+    assert pool.manifest(key(1)).next_use_monotonic_s == 20
+    pool.update_next_use(key(1), 30, revision=3)
+    assert pool.manifest(key(1)).next_use_monotonic_s == 30
+
+
+def test_next_use_physical_safety_spill_bypasses_deadline_filter():
+    spilled = []
+    pool = WarmSnapshotPool(
+        100, borrow_capacity_bytes=100, borrow_resident_headroom_bytes=10,
+        next_use_aware=True,
+    )
+    commit_next_use(pool, 1, 70, None, spilled)
+    pool.reserve_borrow("vm", 20)
+    pool.observe_shared_live(30, settle_borrow="vm")
+    assert pool.spill_observed_excess()[0].key == key(1)
+    assert [item.key for item in spilled] == [key(1)]
+
+
+def test_slow_spill_does_not_hold_admission_lock():
+    checked = Event()
+    pool = WarmSnapshotPool(100, next_use_aware=True)
+
+    def spill(_item):
+        assert pool._admission_lock.acquire(blocking=False)
+        pool._admission_lock.release()
+        checked.set()
+
+    pool.reserve(key(1), 100)
+    pool.commit(
+        key(1), path="/warm/1", logical_bytes=100, allocated_bytes=100,
+        transferred_bytes=100, next_use_monotonic_s=20, spiller=spill,
+    )
+    pool.reserve_for_admission(
+        key(2), 100, timeout_s=.01, next_use_monotonic_s=10,
+    )
+    assert checked.is_set()
+
+
 def test_snapshot_aware_rejects_lower_value_candidate_without_spilling():
     pool = WarmSnapshotPool(100, snapshot_aware=True)
     pool.reserve(key(1), 100)

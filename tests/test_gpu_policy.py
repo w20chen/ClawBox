@@ -10,6 +10,12 @@ from clawbox.experiments.spec import PolicySpec
 class Lifecycle:
     resident = True
 
+    def __init__(self):
+        self.next_use = []
+
+    def set_snapshot_next_use(self, deadline, revision=0):
+        self.next_use.append((deadline, revision))
+
 
 def coordinator(**options):
     policy = PolicySpec(
@@ -247,3 +253,58 @@ def test_gpu_policy_does_not_change_wait_only_baseline():
     waiting(c)
     assert not signal(c, event="think_end")["accepted"]
     assert c.victim_for_restore("other").session_id == "session"
+
+
+def test_next_use_deadline_is_age_adjusted_and_published_to_both_vms(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("clawbox.experiments.policy.time.monotonic", lambda: now[0])
+    c = coordinator(snapshot_next_use_residency=True)
+    waiting(c)
+    state = c._sessions["session"]
+    assert state.lifecycle.next_use[-1][0] is None
+    assert state.runtime_lifecycle.next_use[-1][0] is None
+
+    signal(c, est_wait_s=20, signal_age_seconds=3, signal_sequence=1)
+    assert state.lifecycle.next_use[-1][0] == pytest.approx(117)
+    assert state.runtime_lifecycle.next_use[-1][0] == pytest.approx(117)
+
+    now[0] = 102
+    signal(c, est_wait_s=5, signal_sequence=2)
+    assert state.lifecycle.next_use[-1][0] == pytest.approx(107)
+    assert state.runtime_lifecycle.next_use[-1][0] == pytest.approx(107)
+
+    signal(c, est_wait_s=None, signal_sequence=3)
+    assert state.lifecycle.next_use[-1][0] is None
+    c.complete_model_wait("session", "request")
+    assert state.runtime_lifecycle.next_use[-1][0] is None
+
+
+def test_next_use_publication_is_outside_global_progress_lock():
+    entered = Event()
+    release = Event()
+
+    class BlockingLifecycle(Lifecycle):
+        def set_snapshot_next_use(self, deadline, revision=0):
+            if deadline is not None:
+                entered.set()
+                assert release.wait(1)
+            super().set_snapshot_next_use(deadline, revision)
+
+    c = coordinator(snapshot_next_use_residency=True)
+    c.register("session", BlockingLifecycle())
+    c.register_runtime("session", Lifecycle())
+    c.begin_model_wait("session", "request")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        pending = executor.submit(signal, c, est_wait_s=20)
+        assert entered.wait(1)
+        acquired = Event()
+
+        def take_progress_lock():
+            with c.demand.progress_lock:
+                acquired.set()
+
+        lock_user = executor.submit(take_progress_lock)
+        assert acquired.wait(.1)
+        release.set()
+        assert pending.result(timeout=1)["accepted"]
+        lock_user.result(timeout=1)

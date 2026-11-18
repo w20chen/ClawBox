@@ -253,6 +253,41 @@ families cover admission, runtime control, memory reclaim, placement, idle
 reclaim, shared memory, coordination, checkpointing, integrated policies, and
 resident capacity. `custom` keeps an editable design.
 
+### Compare next-use snapshot residency
+
+The checkpoint residency axis includes `next-use` alongside `lru` and `value`.
+It requires `serving_sim`, GPU-aware idle reclaim, pair (`agent_and_tool`)
+checkpointing, tiered WARM/COLD storage, and the qualified cross-tier Cube
+relocation support installed in [Update checkpoint and restore](#update-checkpoint-and-restore-on-an-existing-host).
+For a custom design, the relevant editable fields are:
+
+```yaml
+inference:
+  backend: serving_sim
+mechanisms:
+  idle_reclaim:
+    policy: gpu
+    scope: agent_and_tool
+  checkpoint:
+    storage: tiered
+    residency: next-use
+```
+
+New checkpoints first reserve only their configured upper bound in WARM. When
+space is short, the pool moves the WARM checkpoint with the latest predicted
+next use to COLD, repeating only while its absolute deadline is strictly later
+than the new checkpoint's deadline. The deadline is the age-adjusted
+`queued.est_wait_s` queue/prefill estimate; it is not a full response-completion
+prediction. Missing/equal/earlier estimates or insufficient reclaimable bytes
+put the new checkpoint directly in COLD. On restore, a COLD lineage is promoted
+as a whole only when currently free WARM space can reserve the complete VM
+upper bound; restore promotion never evicts another WARM checkpoint.
+
+Use a new run ID and run qualification. Selecting this policy needs no predictor
+retraining or guest-image rebuild. It needs no host apply when the configured
+WARM/COLD paths and matching relocation-capable Cube components are already
+installed; otherwise update the idle host components first.
+
 ### Full and LLC placement ablation
 
 Generate a new Full configuration from your verified Full reference with

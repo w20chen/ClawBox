@@ -372,7 +372,7 @@ validation checks their dependencies.
 | `placement` | `policy: round_robin` (`os_default`, `round_robin`, `explicit`, `load_aware`); `template_affinity: false`; `placement_cpu_overcommit: 1024.0`; `template_balance_slack: 0.10`; `session_compute_nodes: []`; Tool-call CPU fields below |
 | `idle_reclaim` | `policy: off` (`off`, `wait`, `gpu`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024`; `gpu_reclaim_min_remaining_seconds: 1.0`; `gpu_signal_max_age_seconds: 5.0`; `gpu_first_token_prewarm: true`. GPU policy requires `serving_sim` and `agent_and_tool`; see the inference options below. |
 | `shared_memory` | `borrow: off` (`off`, `hard`, `pressure`); `borrow_cooldown_seconds: 5`; `return_cooldown_seconds: 5`; `shared_memory_resident_headroom_mib: null` |
-| `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`); transfer limits below |
+| `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`, `next-use`); transfer limits below |
 | `deployment` | `mode: managed` (`managed`, `os-default`); `resident_capacity_accounting: false`; `lifecycle_reservation_scale: 1.0` |
 | `coordination` | `action_selection: reclaim_first` (`reclaim_first`, `measured_cost`) |
 
@@ -398,6 +398,28 @@ requires shared-memory borrowing and must be smaller than
 so eligible WARM snapshots can spill to COLD when live growth consumes the
 reserve. Changing it requires a new run ID, but no host apply, image rebuild,
 retraining, or repeated capability qualification.
+
+`checkpoint.residency: next-use` is active only with tiered storage,
+`idle_reclaim.policy: gpu`, `idle_reclaim.scope: agent_and_tool`, and
+`inference.backend: serving_sim`. Each accepted `queued.est_wait_s` observation
+is reduced by transport/queue-event age and converted to an absolute monotonic
+deadline for both Runtime and Tool. This signal estimates queue plus prefill;
+it does not include remaining decode or response delivery and is not a complete
+LLM-response ETA.
+
+If the new checkpoint already fits, WARM admission does not require an
+estimate. Otherwise, only unpinned, non-retained WARM generations with known
+deadlines strictly later than the candidate (`ti > t0`) are eligible. They are
+relocated latest-deadline first until their actual reclaimable allocated bytes
+cover the deficit. Equal, earlier, or missing victim deadlines are never
+guessed; if eligible bytes are insufficient, the candidate is written directly
+to COLD. Physical-safety and restore-expansion spills bypass this comparison.
+On COLD restore, the pool makes a no-spill reservation for the complete VM
+snapshot upper bound. Success relocates the complete lineage to WARM before
+Cube connects the VM; failure leaves the mixed/COLD lineage unchanged. This
+policy requires matching Cube relocation support and qualification. Changing it
+requires a new run ID, but no retraining or guest-image rebuild; host apply is
+needed only when storage paths/capacity or installed native components change.
 
 Resident-capacity accounting requires managed deployment, Tool admission off,
 and no shared-memory borrowing or proactive reclaim. Its scale must be greater

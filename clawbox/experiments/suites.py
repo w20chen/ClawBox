@@ -58,8 +58,12 @@ def expand_suite(raw: dict, *, replace: bool = False) -> dict:
             eviction="wait_aware_pressure" if snapshots else "none",
             restore="reactive" if snapshots else "none",
             template_aware_placement=template, snapshot_aware_residency=snapshot,
+            snapshot_next_use_residency=False,
             memory_protection=False, cpu_release_boost=False, idle_release_ranking=False,
             runtime_snapshot=True, resource_overrides={}, execution_overrides={}, mechanisms={},
+            gpu_reclaim_min_remaining_seconds=1.0,
+            gpu_signal_max_age_seconds=5.0,
+            gpu_first_token_prewarm=True,
         ))
 
     if suite == "admission":
@@ -97,7 +101,10 @@ def expand_suite(raw: dict, *, replace: bool = False) -> dict:
         # unsupported fields are rejected by PolicySpec itself.
         actual = root["policies"]
         if len(actual) != len(policies) or any(
-            set(a) - set(expected) or any(a.get(key, False if key in ("template_aware_placement", "snapshot_aware_residency") else None) != value
+            set(a) - set(expected) or any(a.get(key, False if key in (
+                "template_aware_placement", "snapshot_aware_residency",
+                "snapshot_next_use_residency",
+            ) else None) != value
                 for key, value in expected.items())
             for a, expected in zip(actual, policies)
         ):

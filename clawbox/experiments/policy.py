@@ -25,6 +25,7 @@ class Pausable(Protocol):
     @property
     def resident(self) -> bool: ...
     def checkpoint_and_evict(self, *, tier: SnapshotTier | None = None) -> float | None: ...
+    def set_snapshot_next_use(self, deadline: float | None, revision: int = 0) -> None: ...
 
 
 @dataclass(slots=True)
@@ -47,6 +48,7 @@ class SessionState:
     gpu_prefill_observed_monotonic_s: float | None = None
     gpu_prewarm_requested: bool = False
     gpu_signal_sequences: dict[str, int] = field(default_factory=dict)
+    snapshot_next_use_revision: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +313,10 @@ class PolicyCoordinator:
             state.gpu_prefill_observed_monotonic_s = None
             state.gpu_prewarm_requested = False
             state.gpu_signal_sequences.clear()
+            state.snapshot_next_use_revision += 1
+            revision = state.snapshot_next_use_revision
             self._condition.notify_all()
+        self._publish_snapshot_next_use(state, None, revision)
 
     def observe_gpu_signal(self, session_id: str, wait_id: str, event: dict) -> dict:
         """Use online GPU observations without inventing a completion deadline.
@@ -389,6 +394,9 @@ class PolicyCoordinator:
             if phase == "finish" and role in {"A", "D"}:
                 state.eviction_eligible = False
             remaining = self._gpu_prefill_remaining(state, now)
+            next_use_deadline = now + remaining if remaining is not None else None
+            state.snapshot_next_use_revision += 1
+            next_use_revision = state.snapshot_next_use_revision
             threshold = self.policy.gpu_reclaim_min_remaining_seconds
             previously_reclaimable = (
                 previous_remaining is not None and previous_remaining >= threshold
@@ -415,13 +423,19 @@ class PolicyCoordinator:
             self._gpu_policy_log_suppressed_total += int(not should_log)
             self._gpu_pressure_recheck_count += int(should_recheck_pressure)
             self._condition.notify_all()
-            return {**result, "accepted": True, "phase": phase,
-                    "phase_changed": phase_changed,
-                    "should_recheck_pressure": should_recheck_pressure,
-                    "should_log": should_log,
-                    "queued_observations_suppressed": suppressed,
-                    "estimated_prefill_remaining_seconds": remaining,
-                    "prewarm_requested": state.gpu_prewarm_requested}
+            response = {**result, "accepted": True, "phase": phase,
+                        "phase_changed": phase_changed,
+                        "should_recheck_pressure": should_recheck_pressure,
+                        "should_log": should_log,
+                        "queued_observations_suppressed": suppressed,
+                        "estimated_prefill_remaining_seconds": remaining,
+                        "prewarm_requested": state.gpu_prewarm_requested}
+        # Keep per-VM metadata publication out of the global progress lock.
+        # A busy checkpoint must not stall signal handling for every session.
+        self._publish_snapshot_next_use(
+            state, next_use_deadline, next_use_revision,
+        )
+        return response
 
     def gpu_signal_metrics(self) -> dict[str, Any]:
         """Return aggregate acceptance/logging counts, including the final tail."""
@@ -459,6 +473,15 @@ class PolicyCoordinator:
             return None
         return max(0.0, state.gpu_prefill_estimate_s - age)
 
+    def _publish_snapshot_next_use(
+        self, state: SessionState, deadline: float | None, revision: int,
+    ) -> None:
+        if not self.policy.snapshot_next_use_residency:
+            return
+        state.lifecycle.set_snapshot_next_use(deadline, revision)
+        if state.runtime_lifecycle is not None:
+            state.runtime_lifecycle.set_snapshot_next_use(deadline, revision)
+
     def complete_model_wait(self, session_id: str, wait_id: str) -> None:
         with self.demand.progress_lock:
             state = self._sessions[session_id]
@@ -466,12 +489,15 @@ class PolicyCoordinator:
                 return
             state.response_ready = True
             state.eviction_eligible = False
+            state.snapshot_next_use_revision += 1
+            revision = state.snapshot_next_use_revision
             # Admission may already have atomically claimed this waiting pair.
             # Let that checkpoint finish before the gateway publishes its
             # response; the response callback can then restore Runtime first.
             while state.eviction_in_progress:
                 self._condition.wait()
             self._condition.notify_all()
+        self._publish_snapshot_next_use(state, None, revision)
 
     def unregister(self, session_id: str) -> None:
         with self._condition:

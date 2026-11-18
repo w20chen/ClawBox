@@ -865,6 +865,7 @@ class PolicySpec(StrictFrozenModel):
     restore: RestorePolicy
     template_aware_placement: bool = False
     snapshot_aware_residency: bool = False
+    snapshot_next_use_residency: bool = False
     memory_protection: bool = False
     cpu_release_boost: bool = False
     idle_release_ranking: bool = False
@@ -891,6 +892,7 @@ class PolicySpec(StrictFrozenModel):
             or self.runtime_control not in {RuntimeControl.OFF, RuntimeControl.NO_CONTROL}
             or self.reclamation is not ReclamationPolicy.RESIDENT
             or self.template_aware_placement or self.snapshot_aware_residency
+            or self.snapshot_next_use_residency
         ):
             raise ValueError("os-default deployment requires resident VMs with admission and runtime control off")
         if self.eviction not in {EvictionPolicy.NONE, EvictionPolicy.WAIT_AWARE_PRESSURE, EvictionPolicy.GPU_AWARE_PRESSURE}:
@@ -910,6 +912,18 @@ class PolicySpec(StrictFrozenModel):
         ):
             raise ValueError(
                 "snapshot_aware_residency requires snapshot_pause with an eviction policy"
+            )
+        if self.snapshot_aware_residency and self.snapshot_next_use_residency:
+            raise ValueError(
+                "snapshot value and next-use residency policies are mutually exclusive"
+            )
+        if self.snapshot_next_use_residency and (
+            self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
+            or self.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE
+            or not self.runtime_snapshot
+        ):
+            raise ValueError(
+                "snapshot_next_use_residency requires GPU-aware agent_and_tool snapshot pause"
             )
         return self
 
@@ -1148,6 +1162,27 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError(
                     "snapshot_aware_residency requires snapshot_reuse_probability for "
                     + ", ".join(missing_reuse)
+                )
+        if any(policy.snapshot_next_use_residency for policy in self.policies):
+            if self.inference.backend is not InferenceBackend.SERVING_SIM:
+                raise ValueError(
+                    "snapshot_next_use_residency requires inference.backend=serving_sim"
+                )
+            if self.resources.snapshot_storage != "tiered":
+                raise ValueError(
+                    "snapshot_next_use_residency requires tiered snapshot storage"
+                )
+            if self.resources.default_snapshot_tier is not SnapshotTier.WARM:
+                raise ValueError(
+                    "snapshot_next_use_residency requires WARM as the default snapshot destination"
+                )
+            if (
+                not self.resources.warm_memory_capacity_mib
+                or not self.resources.warm_snapshot_root
+                or not self.resources.cold_snapshot_root
+            ):
+                raise ValueError(
+                    "snapshot_next_use_residency requires WARM capacity and both WARM/COLD roots"
                 )
         if scheduling == "snapshot_only" and any(
             p.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE for p in self.policies

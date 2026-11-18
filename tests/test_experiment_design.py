@@ -54,6 +54,31 @@ def test_gpu_reclaim_requires_simulator_and_pair_scope():
         ExperimentSpec.model_validate(raw)
 
 
+def test_next_use_residency_is_public_and_enforces_its_signal_contract():
+    raw = base()
+    raw['inference']['backend'] = 'serving_sim'
+    raw['mechanisms']['idle_reclaim'].update(
+        policy='gpu', scope='agent_and_tool',
+    )
+    raw['mechanisms']['checkpoint'].update(
+        storage='tiered', residency='next-use',
+    )
+    spec = ExperimentSpec.model_validate(raw)
+    policy = spec.policies[0]
+    assert policy.snapshot_next_use_residency
+    assert not policy.snapshot_aware_residency
+    assert policy.eviction.value == 'gpu_aware_pressure'
+    assert spec.resources.default_snapshot_tier.value == 'warm'
+    overview = design_overview(spec)['arms'][0]
+    assert any('queued.est_wait_s' in item for item in overview['requirements'])
+    assert any('not full model-response' in item for item in overview['warnings'])
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+
+    raw['mechanisms']['idle_reclaim']['policy'] = 'wait'
+    with pytest.raises(ValueError, match='GPU-aware agent_and_tool'):
+        ExperimentSpec.model_validate(raw)
+
+
 def test_configure_gpu_provider_and_bundle_option(tmp_path):
     from clawbox.cli import main
     source = tmp_path / 'base.yaml'
@@ -174,6 +199,9 @@ def design(recipe='custom', axis=None):
     if recipe in {'shared-memory', 'coordination', 'checkpoint', 'integrated'}:
         m['idle_reclaim']['policy'] = 'wait'
         m['checkpoint']['storage'] = 'tiered'
+    if recipe == 'checkpoint' and axis == 'residency':
+        m['idle_reclaim'].update(policy='gpu', scope='agent_and_tool')
+        raw['inference']['backend'] = 'serving_sim'
     if recipe == 'coordination':
         m['shared_memory']['borrow'] = 'pressure'
     if recipe == 'integrated':
@@ -221,7 +249,7 @@ def test_resident_warm_headroom_is_public_and_disabled_with_borrowing():
     ('resident-capacity', None, 3), ('admission', None, 3), ('runtime', None, 4), ('placement', None, 3),
     ('idle-reclaim', None, 3), ('shared-memory', None, 3), ('coordination', None, 2), ('memory-reclaim', None, 2),
     ('checkpoint', 'encoding', 2), ('checkpoint', 'storage', 3),
-    ('checkpoint', 'residency', 2), ('integrated', None, 3), ('custom', None, 1),
+    ('checkpoint', 'residency', 3), ('integrated', None, 3), ('custom', None, 1),
 ])
 def test_every_recipe_roundtrips_and_expands(recipe, axis, count):
     spec = design(recipe, axis)
@@ -785,6 +813,9 @@ def test_fixed_methods_reset_inherited_switches_and_roundtrip(recipe, axis):
     common['shared_memory']['borrow'] = 'pressure'
     common['coordination']['action_selection'] = 'measured_cost'
     common['checkpoint'].update(storage='warm-only', residency='value')
+    if recipe == 'checkpoint' and axis == 'residency':
+        raw['inference']['backend'] = 'serving_sim'
+        common['idle_reclaim'].update(policy='gpu', scope='agent_and_tool')
     arms = fixed_recipe_arms(recipe, common=common, checkpoint_axis=axis)
     raw['comparison'] = dict(recipe=recipe, arms=arms)
     spec = ExperimentSpec.model_validate(raw)

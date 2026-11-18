@@ -717,7 +717,10 @@ def snapshot_roundtrip_test(spec: ExperimentSpec, *, artifact_root: Path, _node=
                 # external template RAM base is retained in self-contained COLD
                 # lineage before WARM files are removed. Fixed base cache pages
                 # are already charged and are not spillable snapshot victims.
-                pool.spill_for_admission(pool.capacity_bytes - pool.accounted_bytes + 1)
+                pool.spill_for_admission(
+                    pool.capacity_bytes - pool.accounted_bytes + 1,
+                    enforce_admission_policy=False,
+                )
                 cold_relocation_verified = True
             if _peer_nodes:
                 if runtime is None or lifecycle.resident or runtime.resident:

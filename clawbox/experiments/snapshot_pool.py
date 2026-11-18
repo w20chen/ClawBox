@@ -50,6 +50,8 @@ class SnapshotManifest:
     dependency_count: int = 0
     expected_reuse_probability: float | None = None
     retention_value_seconds: float = 0.0
+    next_use_monotonic_s: float | None = None
+    next_use_revision: int = 0
     compressed_allocated_bytes: int = 0
     raw_allocated_bytes: int = 0
     expansion_allocated_bytes: int = 0
@@ -78,6 +80,7 @@ class WarmSnapshotPool:
                  snapshot_transfer_concurrency: int | None = None,
                  transfer_timeout_seconds: float = 120,
                  snapshot_aware: bool = False,
+                 next_use_aware: bool = False,
                  clock: Callable[[], float] = time.monotonic) -> None:
         if capacity_bytes < 0:
             raise ValueError("capacity_bytes must be non-negative")
@@ -115,7 +118,10 @@ class WarmSnapshotPool:
         self.transfer_concurrency = transfer_concurrency
         self.snapshot_transfer_concurrency = snapshot_transfer_concurrency
         self.transfer_timeout_seconds = transfer_timeout_seconds
+        if snapshot_aware and next_use_aware:
+            raise ValueError("snapshot value and next-use policies are mutually exclusive")
         self.snapshot_aware = snapshot_aware
+        self.next_use_aware = next_use_aware
         self._transfer_slots = BoundedSemaphore(transfer_concurrency)
         # Cube create, checkpoint, restore, spill and NUMA rebind still share
         # one host-wide lifecycle budget.  A smaller snapshot budget prevents
@@ -146,6 +152,7 @@ class WarmSnapshotPool:
         self._spillers: dict[SnapshotKey, Callable[[SnapshotManifest], None]] = {}
         self._warm_admissions = 0
         self._value_rejections = 0
+        self._next_use_rejections = 0
         self._spill_count = 0
 
     @contextmanager
@@ -400,6 +407,8 @@ class WarmSnapshotPool:
                dependency_count: int = 0,
                expected_reuse_probability: float | None = None,
                retention_value_seconds: float = 0.0,
+               next_use_monotonic_s: float | None = None,
+               next_use_revision: int = 0,
                compressed_allocated_bytes: int = 0,
                raw_allocated_bytes: int | None = None,
                expansion_allocated_bytes: int = 0,
@@ -451,6 +460,8 @@ class WarmSnapshotPool:
                 dependency_count=dependency_count,
                 expected_reuse_probability=expected_reuse_probability,
                 retention_value_seconds=retention_value_seconds,
+                next_use_monotonic_s=next_use_monotonic_s,
+                next_use_revision=next_use_revision,
                 compressed_allocated_bytes=compressed_allocated_bytes,
                 raw_allocated_bytes=raw_allocated_bytes,
                 expansion_allocated_bytes=expansion_allocated_bytes,
@@ -499,14 +510,16 @@ class WarmSnapshotPool:
                 existing = self._expansion_reservations.get(key, 0)
             additional = max(0, upper_bound_bytes - existing)
             try:
+                # Pin victims under the pool lock, then perform relocation
+                # without the admission lock. A spiller acquires its own VM
+                # lifecycle lock; holding admission here would invert the
+                # lifecycle->admission order used by checkpoint writers.
+                spill = self.spill_for_admission(
+                    additional, exclude={key},
+                    candidate_retention_value_seconds=float("inf"),
+                    enforce_admission_policy=False,
+                )
                 with self._admission_lock:
-                    # Expansion is required to restore an already-selected
-                    # generation. It is not a new residency candidate whose
-                    # value may be compared with victims.
-                    spill = self.spill_for_admission(
-                        additional, exclude={key},
-                        candidate_retention_value_seconds=float("inf"),
-                    )
                     with self._lock:
                         item = self._manifests.get(key)
                         if item is None:
@@ -619,28 +632,37 @@ class WarmSnapshotPool:
 
     def reserve_for_admission(self, key: SnapshotKey, upper_bound_bytes: int,
                               *, timeout_s: float = 120,
-                              retention_value_seconds: float = 0.0) -> None:
-        """Keep spill-and-reserve atomic against other admissions.
+                              retention_value_seconds: float = 0.0,
+                              next_use_monotonic_s: float | None = None) -> None:
+        """Spill eligible state, then atomically reserve against other writers.
 
-        Writers commit without the admission lock. If capacity is temporarily
-        reserved or pinned, wait for their completion instead of failing an
-        otherwise valid parallel checkpoint.
+        Slow relocation intentionally runs without the admission lock. The
+        final reserve rechecks capacity; temporary reservations or victim pins
+        are retried up to ``timeout_s``.
         """
         deadline = time.monotonic() + timeout_s
         while True:
             try:
+                # Slow relocation runs after victims are pinned but without
+                # the admission lock. This avoids admission->lifecycle versus
+                # lifecycle->admission deadlocks; the final reserve remains
+                # atomic and retries if another writer used the freed bytes.
+                self.spill_for_admission(
+                    upper_bound_bytes, exclude={key},
+                    candidate_retention_value_seconds=retention_value_seconds,
+                    candidate_next_use_monotonic_s=next_use_monotonic_s,
+                )
                 with self._admission_lock:
-                    self.spill_for_admission(
-                        upper_bound_bytes, exclude={key},
-                        candidate_retention_value_seconds=retention_value_seconds,
-                    )
                     self.reserve(key, upper_bound_bytes)
                     with self._lock:
                         self._warm_admissions += 1
                 return
             except WarmAdmissionRejected:
                 with self._lock:
-                    self._value_rejections += 1
+                    if self.next_use_aware:
+                        self._next_use_rejections += 1
+                    else:
+                        self._value_rejections += 1
                 raise
             except WarmSnapshotTooLarge:
                 raise
@@ -651,14 +673,25 @@ class WarmSnapshotPool:
                 with self._changed:
                     self._changed.wait(timeout=min(remaining, 0.2))
 
+    def reserve_without_spill(self, key: SnapshotKey, upper_bound_bytes: int) -> None:
+        """Atomically reserve currently free WARM space without evicting anything."""
+        with self._admission_lock:
+            self.reserve(key, upper_bound_bytes)
+            with self._lock:
+                self._warm_admissions += 1
+
     def spill_for_admission(self, required_bytes: int, *,
                             exclude: set[SnapshotKey] | None = None,
                             candidate_retention_value_seconds: float = 0.0,
+                            candidate_next_use_monotonic_s: float | None = None,
+                            enforce_admission_policy: bool = True,
                             ) -> tuple[SnapshotManifest, ...]:
         """Relocate and retire the deterministic pinned LRU prefix."""
         victims = self.lru_victims(
             required_bytes, exclude=exclude,
             candidate_retention_value_seconds=candidate_retention_value_seconds,
+            candidate_next_use_monotonic_s=candidate_next_use_monotonic_s,
+            enforce_admission_policy=enforce_admission_policy,
         )
         completed: list[SnapshotManifest] = []
         try:
@@ -688,12 +721,12 @@ class WarmSnapshotPool:
 
     def spill_observed_excess(self) -> tuple[SnapshotManifest, ...]:
         """Restore configured headroom after aggregate shared-live growth."""
-        with self._admission_lock:
-            # This is a physical safety action, not a value comparison against
-            # a new candidate. Any spillable generation may move to COLD.
-            return self.spill_for_admission(
-                0, candidate_retention_value_seconds=float("inf")
-            )
+        # This is a physical safety action, not a value comparison against a
+        # new candidate. Any spillable generation may move to COLD.
+        return self.spill_for_admission(
+            0, candidate_retention_value_seconds=float("inf"),
+            enforce_admission_policy=False,
+        )
 
     def abort(self, key: SnapshotKey) -> None:
         with self._lock:
@@ -742,6 +775,16 @@ class WarmSnapshotPool:
         with self._lock:
             self._manifests[key].last_used_monotonic_s = self._clock()
 
+    def update_next_use(
+        self, key: SnapshotKey, next_use_monotonic_s: float | None,
+        revision: int = 0,
+    ) -> None:
+        with self._lock:
+            item = self._manifests.get(key)
+            if item is not None and revision >= item.next_use_revision:
+                item.next_use_monotonic_s = next_use_monotonic_s
+                item.next_use_revision = revision
+
     def retain_for_vm(self, key: SnapshotKey) -> None:
         """A running lazy restore still references these physical WARM pages."""
         with self._lock:
@@ -772,12 +815,16 @@ class WarmSnapshotPool:
 
     def lru_victims(self, required_bytes: int, *, exclude: set[SnapshotKey] | None = None,
                     candidate_retention_value_seconds: float = 0.0,
+                    candidate_next_use_monotonic_s: float | None = None,
+                    enforce_admission_policy: bool = True,
                     ) -> tuple[SnapshotManifest, ...]:
         """Return and pin deterministic victims needed for admission.
 
-        Legacy mode is strict LRU. Snapshot-aware mode evicts the lowest
-        expected restore-time saving per allocated byte and rejects a lower
-        value candidate so its lifecycle can write it directly to SSD.
+        Legacy mode is strict LRU. Value-aware mode evicts the lowest expected
+        restore-time saving per allocated byte. Next-use mode evicts only
+        snapshots whose predicted next use is strictly later than the new
+        candidate, in latest-use-first order. Either policy can reject a new
+        candidate so its lifecycle writes it directly to SSD.
         """
         if required_bytes < 0:
             raise ValueError("required_bytes must be non-negative")
@@ -801,11 +848,18 @@ class WarmSnapshotPool:
             deficit = max(0, self._usage_locked() + required_bytes - self.capacity_bytes)
             if deficit == 0:
                 return ()
+            compare_next_use = self.next_use_aware and enforce_admission_policy
+            if compare_next_use and candidate_next_use_monotonic_s is None:
+                raise WarmAdmissionRejected(
+                    "candidate has no valid queued.est_wait_s next-use estimate"
+                )
             def victim_order(item: SnapshotManifest):
                 stable = (
                     item.last_used_monotonic_s,
                     item.key.session_id, item.key.role, item.key.generation,
                 )
+                if compare_next_use:
+                    return (-item.next_use_monotonic_s, *stable)
                 if not self.snapshot_aware:
                     return stable
                 density = item.retention_value_seconds / max(1, item.allocated_bytes)
@@ -813,7 +867,11 @@ class WarmSnapshotPool:
             candidates = sorted(
                 (item for key, item in self._manifests.items()
                  if (key not in excluded and key not in self._expansion_reservations
-                     and item.pinned == 0 and not item.retained_by_vm)),
+                     and item.pinned == 0 and not item.retained_by_vm
+                     and (not compare_next_use or (
+                         item.next_use_monotonic_s is not None
+                         and item.next_use_monotonic_s > candidate_next_use_monotonic_s
+                     )))),
                 key=victim_order,
             )
             victims: list[SnapshotManifest] = []
@@ -838,10 +896,15 @@ class WarmSnapshotPool:
             if reclaimed < deficit:
                 for item in victims:
                     item.pinned -= 1
+                if compare_next_use:
+                    raise WarmAdmissionRejected(
+                        "no strictly later-use WARM snapshots can cover the admission deficit"
+                    )
                 raise WarmCapacityError("WARM capacity has no spillable LRU prefix")
-            if self.snapshot_aware and candidate_retention_value_seconds <= sum(
+            if (self.snapshot_aware and enforce_admission_policy
+                    and candidate_retention_value_seconds <= sum(
                 item.retention_value_seconds for item in victims
-            ):
+            )):
                 for item in victims:
                     item.pinned -= 1
                 raise WarmAdmissionRejected(
@@ -881,9 +944,13 @@ class WarmSnapshotPool:
                 "snapshot_transfer_concurrency": self.snapshot_transfer_concurrency,
                 "active_transfers": dict(self._transfers),
                 "bandwidth_measurement": "unavailable",
-                "residency_policy": "value_aware" if self.snapshot_aware else "lru",
+                "residency_policy": (
+                    "next_use" if self.next_use_aware
+                    else "value_aware" if self.snapshot_aware else "lru"
+                ),
                 "warm_admissions": self._warm_admissions,
                 "value_rejections_to_cold": self._value_rejections,
+                "next_use_rejections_to_cold": self._next_use_rejections,
                 "spill_count": self._spill_count,
                 "reserved_bytes": sum(self._reservations.values()),
                 "expansion_reserved_bytes": sum(

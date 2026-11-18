@@ -2524,6 +2524,7 @@ class ExperimentWorker:
             snapshot_transfer_concurrency=arm.resources.snapshot_transfer_concurrency,
             transfer_timeout_seconds=arm.resources.pool_transfer_timeout_seconds,
             snapshot_aware=arm.policy.snapshot_aware_residency,
+            next_use_aware=arm.policy.snapshot_next_use_residency,
         )
         first_event_started = time.monotonic()
         first_event_started_process_cpu = time.process_time()
@@ -3511,6 +3512,7 @@ class ExperimentWorker:
                     self._priority_domain.topology_summary() if self._priority_domain else None
                 ),
                 "snapshot_aware_residency": arm.policy.snapshot_aware_residency,
+                "snapshot_next_use_residency": arm.policy.snapshot_next_use_residency,
                 "snapshot_pool": snapshot_pool.snapshot(),
                 "tool_execution_observations": tool_execution_observations,
                 **observation_summary,
@@ -3821,6 +3823,7 @@ class ExperimentWorker:
             lazy_restore=arm.resources.lazy_restore,
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
+            next_use_residency=arm.policy.snapshot_next_use_residency,
             default_snapshot_tier=arm.resources.default_snapshot_tier,
             snapshot_reservation_bytes=(arm.runtime.memory_mib + 256) * 1024 * 1024,
             numa_borrower=numa_borrower,
@@ -3881,6 +3884,7 @@ class ExperimentWorker:
             lazy_restore=arm.resources.lazy_restore,
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
+            next_use_residency=arm.policy.snapshot_next_use_residency,
             default_snapshot_tier=arm.resources.default_snapshot_tier,
             snapshot_reservation_bytes=(arm.sandbox.memory_mib + 256) * 1024 * 1024,
             numa_borrower=numa_borrower,
