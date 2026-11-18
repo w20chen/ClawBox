@@ -3004,10 +3004,10 @@ def test_next_use_cold_restore_promotes_whole_snapshot_before_connect(tmp_path, 
 def test_next_use_cold_restore_does_not_spill_to_make_promotion_space(tmp_path, monkeypatch):
     lifecycle, client, pool, _key = _cold_next_use_lifecycle(tmp_path, monkeypatch)
     other = SnapshotKey("other", "tool", 1)
-    pool.reserve(other, 30)
+    pool.reserve(other, 50)
     pool.commit(
-        other, path="/warm/other", logical_bytes=30,
-        allocated_bytes=30, transferred_bytes=30,
+        other, path="/warm/other", logical_bytes=50,
+        allocated_bytes=50, transferred_bytes=50,
     )
     calls = []
     client.relocate_snapshot = lambda *_a, **_k: calls.append("relocate")
@@ -3038,10 +3038,25 @@ def test_next_use_promotion_failure_aborts_capacity_reservation(tmp_path, monkey
 
 def test_next_use_compressed_cold_snapshot_expands_before_promotion(tmp_path, monkeypatch):
     import clawbox.cube.snapshot_compression as compression_module
+    import clawbox.cube.snapshot as snapshot_module
     lifecycle, client, pool, key = _cold_next_use_lifecycle(
-        tmp_path, monkeypatch, compressed=True,
+        tmp_path, monkeypatch, capacity=130, compressed=True,
     )
     calls = []
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_a, **_k: ({
+            "logical_bytes": 120,
+            "allocated_bytes": 40,
+            "raw_allocated_bytes": 120,
+            "transferred_bytes": 120,
+            "compression": {"baseline_allocated_bytes": 120},
+        } if "decompress" not in calls else {
+            "logical_bytes": 120,
+            "allocated_bytes": 120,
+            "transferred_bytes": 120,
+        }),
+    )
     monkeypatch.setattr(
         compression_module, "decompress_snapshot",
         lambda *_a, **_k: calls.append("decompress") or {"wall_seconds": .1},
@@ -3061,3 +3076,5 @@ def test_next_use_compressed_cold_snapshot_expands_before_promotion(tmp_path, mo
     lifecycle.restore()
     assert calls[:3] == ["decompress", "relocate", "connect"]
     assert pool.manifest(key).expanded
+    promotion = next(t for t in lifecycle.timings if t["operation"] == "promote")
+    assert promotion["snapshot_metrics"]["reservation_bytes"] == 120

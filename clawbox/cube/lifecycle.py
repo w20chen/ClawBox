@@ -1316,10 +1316,34 @@ class CubeSandboxLifecycle:
                     },
                 )
                 return
+
+            source = self._replica_memory_path or (
+                f"{self.cold_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
+                f"{self.role}-g{key.generation}.mem"
+            )
+            destination = (
+                f"{self.warm_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
+                f"{self.role}-g{key.generation}.mem"
+            )
+            from .snapshot import read_snapshot_metadata
+            with self._measure_stage(stage_seconds, "snapshot_promotion_metadata_s"):
+                source_metrics = read_snapshot_metadata(
+                    source,
+                    require_lineage=self.snapshot_mechanism == "incremental-cow",
+                )
+            # COLD generations may contain a complete multi-generation lineage.
+            # Its raw physical allocation can exceed the per-checkpoint upper
+            # bound used for one new WARM delta.  Promotion moves the complete
+            # lineage, so reserve its immutable raw allocation before any
+            # decompression or relocation changes the authoritative path.
+            promotion_reservation_bytes = int(
+                source_metrics.get("raw_allocated_bytes")
+                or source_metrics["allocated_bytes"]
+            )
             try:
                 with self._measure_stage(stage_seconds, "snapshot_promotion_reserve_s"):
                     self.snapshot_pool.reserve_without_spill(
-                        key, self.snapshot_reservation_bytes,
+                        key, promotion_reservation_bytes,
                     )
             except WarmCapacityError:
                 self._record(
@@ -1332,25 +1356,16 @@ class CubeSandboxLifecycle:
                     snapshot_metrics={
                         "outcome": "skipped",
                         "reason": "insufficient_free_warm_capacity",
-                        "reservation_bytes": self.snapshot_reservation_bytes,
+                        "reservation_bytes": promotion_reservation_bytes,
                     },
                 )
                 return
-
-            source = self._replica_memory_path or (
-                f"{self.cold_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
-                f"{self.role}-g{key.generation}.mem"
-            )
-            destination = (
-                f"{self.warm_snapshot_root.rstrip('/')}/{self.sandbox_id}/"
-                f"{self.role}-g{key.generation}.mem"
-            )
             relocated = False
             committed = False
             promotion_metrics: dict[str, Any] = {
                 "outcome": "promoted",
                 "source_path": source,
-                "reservation_bytes": self.snapshot_reservation_bytes,
+                "reservation_bytes": promotion_reservation_bytes,
             }
             try:
                 if self.snapshot_compression == "zstd-page":
@@ -1374,7 +1389,6 @@ class CubeSandboxLifecycle:
                         **({"storage_domain": self.storage_domain} if self.storage_domain else {}),
                     )
                 relocated = True
-                from .snapshot import read_snapshot_metadata
                 with self._measure_stage(stage_seconds, "snapshot_promotion_metadata_s"):
                     native_metrics = read_snapshot_metadata(
                         destination,
