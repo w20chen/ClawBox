@@ -80,9 +80,18 @@ def test_semantic_source_prepare_is_pinned_and_non_destructive() -> None:
     assert '.route("/sandboxes", post(sandboxes::create_sandbox))' in create_timeout
     assert "Create / Pause / Resume / Connect use the 120s lifecycle budget" in create_timeout
     lifecycle_timeouts = (ROOT / "deploy/cubesandbox/sdk-lifecycle-timeouts.patch").read_text()
+    bidirectional_relocation = (
+        ROOT / "deploy/cubesandbox/bidirectional-snapshot-relocation.patch"
+    ).read_text()
     assert "timeout=cfg.request_timeout" in lifecycle_timeouts
     assert "timeout=self._config.request_timeout" in lifecycle_timeouts
     assert 'apply_once "$LIFECYCLE_TIMEOUT_PATCH_FILE"' in helper
+    assert "BIDIRECTIONAL_RELOCATION_PATCH_FILE" in helper
+    assert 'snapshot_tier not in {"warm", "cold"}' in bidirectional_relocation
+    assert "if storage_domain is not None" in bidirectional_relocation
+    assert 'destinationTier != "warm" && destinationTier != "cold"' in bidirectional_relocation
+    assert '"clawbox.snapshot.tier":                 destinationTier' in bidirectional_relocation
+    assert "invalid snapshot relocation placement" in bidirectional_relocation
     assert "IRQ_ACTIVE_PATCH_FILE" in helper
     assert 'apply_once "$IRQ_ACTIVE_PATCH_FILE"' in helper
     assert "enable_requested" in active_irq

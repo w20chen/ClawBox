@@ -1,0 +1,130 @@
+diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
+--- a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
++++ b/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go
+@@ -680,22 +680,23 @@ func relocatePauseSnapshot(ctx context.Context, req *types.UpdateRequest, hostIP
+ 		return rsp
+ 	}
+-	if strings.TrimSpace(req.SnapshotTier) != "cold" || req.SnapshotGeneration == 0 || strings.TrimSpace(req.MemorySnapshotPath) == "" {
++	destinationTier := strings.TrimSpace(req.SnapshotTier)
++	if (destinationTier != "warm" && destinationTier != "cold") || req.SnapshotGeneration == 0 || strings.TrimSpace(req.MemorySnapshotPath) == "" {
+ 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
+-		rsp.Ret.RetMsg = "invalid cold relocation placement"
++		rsp.Ret.RetMsg = "invalid snapshot relocation placement"
+ 		return rsp
+ 	}
+ 	targetIP := strings.TrimSpace(rec.NodeIP)
+ 	if targetIP == "" {
+ 		targetIP = strings.TrimSpace(hostIP)
+ 	}
+ 	cubeReq := &cubebox.UpdateCubeSandboxRequest{
+ 		RequestID: req.RequestID,
+ 		SandboxID: req.SandboxID,
+ 		Annotations: map[string]string{
+ 			constants.CubeAnnotationsUpdateAction:   "relocate_snapshot",
+ 			constants.CubeAnnotationPauseSnapshotID: rec.SnapshotID,
+-			"clawbox.snapshot.tier":                 "cold",
++			"clawbox.snapshot.tier":                 destinationTier,
+ 			"clawbox.snapshot.memory.path":          req.MemorySnapshotPath,
+ 			"clawbox.snapshot.generation":           strconv.FormatUint(req.SnapshotGeneration, 10),
+ 		},
+ 	}
+diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
+--- a/Cubelet/services/cubebox/relocate_snapshot.go
++++ b/Cubelet/services/cubebox/relocate_snapshot.go
+@@ -20,10 +20,10 @@ import (
+ 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
+ )
+ 
+-// relocatePauseSnapshot performs WARM -> COLD without an SSD staging file:
+-// copy to a temporary file in COLD, sync, atomically publish, persist the
+-// authoritative catalog, then remove WARM. Any failure before the catalog
+-// update leaves the original snapshot authoritative and restorable.
++// relocatePauseSnapshot moves the complete immutable lineage between WARM and
++// COLD: copy to a temporary destination, sync, atomically publish, persist the
++// authoritative catalog, then remove the source. Any failure before the
++// catalog update leaves the original snapshot authoritative and restorable.
+ func (s *service) relocatePauseSnapshot(
+ 	ctx context.Context,
+ 	req *cubebox.UpdateCubeSandboxRequest,
+@@ -30,9 +30,11 @@ func (s *service) relocatePauseSnapshot(
+ 	rsp *cubebox.UpdateCubeSandboxResponse,
+ ) (*cubebox.UpdateCubeSandboxResponse, error) {
+ 	destination, direct, err := directPauseMemoryPath(req)
+-	if err != nil || !direct || strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.tier"]) != "cold" {
++	destinationTier := strings.TrimSpace(req.GetAnnotations()["clawbox.snapshot.tier"])
++	if err != nil || !direct ||
++		(destinationTier != "warm" && destinationTier != "cold") {
+ 		if err == nil {
+-			err = fmt.Errorf("relocation requires a direct COLD destination")
++			err = fmt.Errorf("relocation requires a direct WARM or COLD destination")
+ 		}
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
+ 		rsp.Ret.RetMsg = err.Error()
+@@ -60,7 +62,16 @@ func (s *service) relocatePauseSnapshot(
+ 		return rsp, nil
+ 	}
+ 	source := filepath.Clean(entry.MemoryVol)
+-	warmRoot := filepath.Clean(strings.TrimSpace(os.Getenv("CLAWBOX_WARM_SNAPSHOT_ROOT")))
++	sourceTier := "warm"
++	sourceRootName := "CLAWBOX_WARM_SNAPSHOT_ROOT"
++	if destinationTier == "warm" {
++		sourceTier = "cold"
++		sourceRootName = "CLAWBOX_COLD_SNAPSHOT_ROOT"
++	}
++	sourceRoot := filepath.Clean(strings.TrimSpace(os.Getenv(sourceRootName)))
++	if sourceTier == "cold" && strings.HasPrefix(backend, "xfs@") {
++		sourceRoot = storage.BackendStorageRoot(backend)
++	}
+ 	sourceBacking, backingErr := filepath.EvalSymlinks(source)
+ 	if backingErr != nil {
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+@@ -67,10 +78,12 @@ func (s *service) relocatePauseSnapshot(
+ 		rsp.Ret.RetMsg = backingErr.Error()
+ 		return rsp, nil
+ 	}
+-	rel, relErr := filepath.Rel(warmRoot, sourceBacking)
+-	if warmRoot == "." || relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
++	rel, relErr := filepath.Rel(sourceRoot, sourceBacking)
++	if sourceRoot == "." || relErr != nil || rel == "." || rel == ".." ||
++		strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+-		rsp.Ret.RetMsg = "authoritative source is not in the configured WARM root"
++		rsp.Ret.RetMsg = fmt.Sprintf(
++			"authoritative source is not in the configured %s root", strings.ToUpper(sourceTier))
+ 		return rsp, nil
+ 	}
+ 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+@@ -83,7 +96,7 @@ func (s *service) relocatePauseSnapshot(
+ 		destination + ".metrics.json", tmp, tmp + ".layers", tmp + ".lineage.json"} {
+ 		if _, statErr := os.Lstat(name); statErr == nil || !os.IsNotExist(statErr) {
+ 			rsp.Ret.RetCode = errorcode.ErrorCode_Conflict
+-			rsp.Ret.RetMsg = "COLD relocation destination or staging artifact already exists"
++			rsp.Ret.RetMsg = "relocation destination or staging artifact already exists"
+ 			return rsp, nil
+ 		}
+ 	}
+diff --git a/sdk/python/cubesandbox/sandbox.py b/sdk/python/cubesandbox/sandbox.py
+--- a/sdk/python/cubesandbox/sandbox.py
++++ b/sdk/python/cubesandbox/sandbox.py
+@@ -567,17 +567,18 @@ class Sandbox:
+                           memory_snapshot_path: str,
+                           snapshot_generation: int, storage_domain: str | None = None) -> dict:
+         """Move a paused direct-memory snapshot between managed tiers."""
+-        if snapshot_tier != "cold":
+-            raise ValueError("snapshot relocation destination must be cold")
++        if snapshot_tier not in {"warm", "cold"}:
++            raise ValueError("snapshot relocation destination must be warm or cold")
+         if not memory_snapshot_path or snapshot_generation < 1:
+             raise ValueError("snapshot relocation requires a path and positive generation")
+         body = {
+             "snapshot_tier": snapshot_tier,
+             "memory_snapshot_path": memory_snapshot_path,
+             "snapshot_generation": snapshot_generation,
+-            "storage_domain": storage_domain,
+         }
++        if storage_domain is not None:
++            body["storage_domain"] = storage_domain
+         resp = self._session.post(
+             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshot/relocate",
+             json=body,
+         )
