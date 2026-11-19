@@ -184,7 +184,13 @@ def test_periodic_pending_reuses_observation_without_vm_reads(count):
 @pytest.mark.parametrize('count', [1280, 2560])
 def test_pool_periodic_summary_does_not_serialize_manifests(count, monkeypatch):
     pool = WarmSnapshotPool(count * 10)
-    pool._manifests = {i: SimpleNamespace(allocated_bytes=7) for i in range(count)}
+    pool._manifests = {
+        i: SimpleNamespace(
+            allocated_bytes=7, owned_layer_files={},
+            owned_layer_identities=(), runtime_reserved_bytes=0,
+        )
+        for i in range(count)
+    }
     monkeypatch.setattr('clawbox.experiments.snapshot_pool.asdict',
                         lambda obj: pytest.fail('periodic sample serialized a manifest'))
     assert pool.usage_snapshot()['committed_bytes'] == count * 7

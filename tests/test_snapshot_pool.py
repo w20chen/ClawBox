@@ -93,14 +93,18 @@ def test_shared_page_reclaim_updates_owned_and_managed_warm_capacity(tmp_path):
     pool.refresh_managed_warm_layers()
     assert pool.committed_bytes == pool.accounted_bytes == actual
     pool.validate_expanded(key(1), actual)
-    # Refreshing physical usage must not bypass the existing growth budget.
+    # A late physical allocation is charged instead of killing the evidence
+    # reporter; the drift remains visible for audit and pressure relief.
     with layer.open('r+b') as stream:
         stream.seek(page)
         stream.write(b'y' * page)
-    with pytest.raises(RuntimeError, match='exceeds runtime reserve'):
-        pool.refresh_managed_warm_layers()
+    pool.refresh_managed_warm_layers()
+    state = pool.usage_snapshot()
+    assert state['unreserved_owned_growth_bytes'] > 0
+    assert state['unreserved_owned_growth_events'] > 0
     with layer.open('r+b') as stream:
         assert libc.fallocate(stream.fileno(), 3, ctypes.c_longlong(page), ctypes.c_longlong(page)) == 0
+    pool.refresh_managed_warm_layers()
     pool.remove(key(1))
     pool.remove(key(2))
     assert pool.committed_bytes == actual
@@ -452,6 +456,46 @@ def test_runtime_page_materialization_consumes_preexisting_reserve() -> None:
         assert item.allocated_bytes == 50
         assert item.runtime_reserved_bytes == 55
         assert pool.accounted_bytes == 105
+
+
+def test_runtime_page_materialization_reconciles_unpredicted_tail(
+    tmp_path, monkeypatch,
+) -> None:
+    import clawbox.cube.snapshot as snapshot_module
+
+    monkeypatch.setattr(
+        snapshot_module, '_allocated_bytes',
+        lambda path, stat=None: (stat or path.stat()).st_size,
+    )
+    layer = tmp_path / 'owned.mem'
+    layer.write_bytes(b'x' * 40)
+    stat = layer.stat()
+    identity = f'{stat.st_dev}:{stat.st_ino}'
+    pool = WarmSnapshotPool(200)
+    pool.reserve(key(1), 110)
+    pool.commit(
+        key(1), path=str(layer), logical_bytes=150, allocated_bytes=10,
+        transferred_bytes=150, compressed_allocated_bytes=10,
+        raw_allocated_bytes=100, expansion_allocated_bytes=100,
+        owned_logical_bytes=50, owned_allocated_bytes=40, expanded=False,
+    )
+    with pool.consume_guard(key(1)):
+        pool.reserve_expansion_for_restore(key(1), 100, timeout_s=.01)
+        pool.finish_expansion(
+            key(1), 50, runtime_reserve_bytes=10,
+            owned_allocated_bytes=40,
+            owned_layer_files={identity: (str(layer), 40)},
+            retained_by_vm=True,
+        )
+        layer.write_bytes(b'x' * 45)
+        pool.refresh_managed_warm_layers()
+        assert pool.manifest(key(1)).runtime_reserved_bytes == 5
+        layer.write_bytes(b'x' * 55)
+        pool.refresh_managed_warm_layers()
+        state = pool.usage_snapshot()
+        assert state['committed_bytes'] == 65
+        assert state['unreserved_owned_growth_bytes'] == 5
+        assert state['unreserved_owned_growth_events'] == 1
 
 
 def test_expansion_reservation_is_idempotent_and_remove_releases_failed_stage() -> None:

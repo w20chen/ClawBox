@@ -1008,23 +1008,6 @@ class WatermarkController:
         """Apply one deterministic watermark decision; split out for audit tests."""
         local, shared, combined = self.sampler.tier_usage()
         accounted_excess = self.shared_pool.observe_shared_live(shared)
-        pool = self.shared_pool.snapshot()
-        snapshot_claim = int(pool["reserved_bytes"]) + int(pool["committed_bytes"])
-        # Current shared residency already includes its pre-run cache. Only
-        # pre-existing WARM files lie outside this sample and the run ledger.
-        external_warm = int(pool["external_warm_bytes"])
-        shared_total = shared + snapshot_claim + external_warm
-        self.peak_local_bytes = max(self.peak_local_bytes, local)
-        self.peak_shared_live_bytes = max(self.peak_shared_live_bytes, shared)
-        self.peak_combined_live_bytes = max(self.peak_combined_live_bytes, combined)
-        self.peak_shared_total_bytes = max(self.peak_shared_total_bytes, shared_total)
-        if shared_total > int(pool["capacity_bytes"]):
-            raise RuntimeError(
-                "shared NUMA physical capacity exceeded: "
-                f"live={shared} snapshot_claim={snapshot_claim} "
-                f"external_warm={external_warm} "
-                f"capacity={pool['capacity_bytes']}"
-            )
         if accounted_excess:
             try:
                 spilled = self.shared_pool.spill_observed_excess()
@@ -1047,6 +1030,25 @@ class WatermarkController:
                         item.allocated_bytes for item in spilled
                     ),
                 })
+        pool = self.shared_pool.snapshot()
+        snapshot_claim = int(pool["reserved_bytes"]) + int(pool["committed_bytes"])
+        # Current shared residency already includes its pre-run cache. Only
+        # pre-existing WARM files lie outside this sample and the run ledger.
+        # Try the existing asynchronous spill path before treating a measured
+        # overage as irrecoverable.
+        external_warm = int(pool["external_warm_bytes"])
+        shared_total = shared + snapshot_claim + external_warm
+        self.peak_local_bytes = max(self.peak_local_bytes, local)
+        self.peak_shared_live_bytes = max(self.peak_shared_live_bytes, shared)
+        self.peak_combined_live_bytes = max(self.peak_combined_live_bytes, combined)
+        self.peak_shared_total_bytes = max(self.peak_shared_total_bytes, shared_total)
+        if shared_total > int(pool["capacity_bytes"]):
+            raise RuntimeError(
+                "shared NUMA physical capacity exceeded after spill: "
+                f"live={shared} snapshot_claim={snapshot_claim} "
+                f"external_warm={external_warm} "
+                f"capacity={pool['capacity_bytes']}"
+            )
         self.high_overshoot_byte_seconds += max(0, local - self.high) * elapsed
         self.hard_overshoot_byte_seconds += max(0, local - self.hard) * elapsed
         if local > self.high:
@@ -2697,6 +2699,12 @@ class ExperimentWorker:
                     "warm_allocated_bytes": warm_physical,
                     "warm_reserved_bytes": pool["reserved_bytes"],
                     "warm_committed_bytes": pool["committed_bytes"],
+                    "warm_unreserved_growth_bytes": pool[
+                        "unreserved_owned_growth_bytes"
+                    ],
+                    "warm_unreserved_growth_events": pool[
+                        "unreserved_owned_growth_events"
+                    ],
                     "warm_external_allocated_bytes": pool["external_warm_bytes"],
                     "shared_external_initial_live_bytes": pool["external_shared_live_bytes"],
                     "shared_pool_external_occupied_bytes": pool["external_occupied_bytes"],

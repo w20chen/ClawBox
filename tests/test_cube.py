@@ -3186,3 +3186,24 @@ def test_next_use_compressed_promotion_reserves_sparse_owned_materialization(
     assert pool.manifest(key).allocated_bytes == owned_logical
     promotion = next(t for t in lifecycle.timings if t["operation"] == "promote")
     assert promotion["snapshot_metrics"]["reservation_bytes"] == owned_logical
+
+
+def test_owned_materialization_headroom_is_summed_per_overlapping_layer():
+    manifest = {
+        # Aggregate subtraction incorrectly returns zero because the fully
+        # allocated first layer masks remaining holes in the second layer.
+        "owned_logical_bytes": 100,
+        "owned_allocated_bytes": 130,
+        "lineage_layer_map": [
+            {
+                "identity": "1:1", "external": False,
+                "range_bytes": 100, "allocated_bytes": 100,
+            },
+            {
+                "identity": "1:2", "external": False,
+                "range_bytes": 40, "allocated_bytes": 30,
+            },
+        ],
+    }
+
+    assert CubeSandboxLifecycle._owned_materialization_headroom(manifest) == 10

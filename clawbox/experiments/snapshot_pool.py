@@ -56,6 +56,7 @@ class SnapshotManifest:
     raw_allocated_bytes: int = 0
     expansion_allocated_bytes: int = 0
     runtime_reserved_bytes: int = 0
+    owned_materialization_headroom_bytes: int = 0
     owned_logical_bytes: int = 0
     owned_allocated_bytes: int = 0
     expanded: bool = True
@@ -154,6 +155,8 @@ class WarmSnapshotPool:
         self._value_rejections = 0
         self._next_use_rejections = 0
         self._spill_count = 0
+        self._unreserved_owned_growth_bytes = 0
+        self._unreserved_owned_growth_events = 0
 
     @contextmanager
     def transfer(self, operation: str):
@@ -232,17 +235,29 @@ class WarmSnapshotPool:
                 raise RuntimeError(f'owned WARM layer identity changed: {path}')
             allocated = _allocated_bytes(Path(path), stat)
             change = allocated - previous
+            # A lineage can contain overlapping owned layers. Capacity is
+            # reserved per layer, but filesystem allocation can still move by
+            # a few blocks between metadata publication and this observation.
+            # Charge measured bytes instead of making an accounting drift a
+            # fatal evidence-sampler failure. The aggregate counters keep the
+            # correction auditable; observe_shared_live() turns any resulting
+            # capacity excess into an ordinary spill request.
             if change > item.runtime_reserved_bytes:
-                raise RuntimeError(
-                    f'owned snapshot growth {change} exceeds runtime reserve '
-                    f'{item.runtime_reserved_bytes}: {item.key}'
+                self._unreserved_owned_growth_bytes += (
+                    change - item.runtime_reserved_bytes
                 )
+                self._unreserved_owned_growth_events += 1
             item.allocated_bytes += change
             item.raw_allocated_bytes += change
             if not item.expanded:
                 item.compressed_allocated_bytes += change
             if change > 0:
-                item.runtime_reserved_bytes -= change
+                item.runtime_reserved_bytes = max(
+                    0, item.runtime_reserved_bytes - change,
+                )
+                item.owned_materialization_headroom_bytes = max(
+                    0, item.owned_materialization_headroom_bytes - change,
+                )
             item.owned_allocated_bytes = max(0, item.owned_allocated_bytes + change)
             item.owned_layer_files[identity] = (path, allocated)
 
@@ -372,6 +387,10 @@ class WarmSnapshotPool:
         if shared_live_bytes < 0:
             raise ValueError("shared_live_bytes must be non-negative")
         with self._lock:
+            # Reuse the same one-second refresh cache as evidence reporting.
+            # This exposes late sparse-page materialization to asynchronous
+            # pressure relief without another scan or synchronization path.
+            self.refresh_managed_warm_layers(force=False)
             self._observed_shared_live_bytes = shared_live_bytes
             if settle_borrow is not None:
                 self._unobserved_borrows.discard(settle_borrow)
@@ -412,6 +431,7 @@ class WarmSnapshotPool:
                compressed_allocated_bytes: int = 0,
                raw_allocated_bytes: int | None = None,
                expansion_allocated_bytes: int = 0,
+               owned_materialization_headroom_bytes: int = 0,
                owned_logical_bytes: int = 0,
                owned_allocated_bytes: int = 0,
                expanded: bool | None = None,
@@ -422,7 +442,8 @@ class WarmSnapshotPool:
             transferred_bytes is not None and transferred_bytes < 0
         ):
             raise ValueError("snapshot byte counts must be non-negative")
-        if compressed_allocated_bytes < 0 or expansion_allocated_bytes < 0:
+        if (compressed_allocated_bytes < 0 or expansion_allocated_bytes < 0
+                or owned_materialization_headroom_bytes < 0):
             raise ValueError("compression byte counts must be non-negative")
         if raw_allocated_bytes is None:
             raw_allocated_bytes = allocated_bytes
@@ -442,10 +463,14 @@ class WarmSnapshotPool:
             if reserved is None:
                 raise RuntimeError(f"snapshot generation is not reserved: {key}")
             inherited_bytes = predecessor.allocated_bytes if predecessor is not None else 0
-            if allocated_bytes > reserved + inherited_bytes:
+            runtime_reserved = (
+                owned_materialization_headroom_bytes if expanded else 0
+            )
+            if allocated_bytes + runtime_reserved > reserved + inherited_bytes:
                 self._reservations[key] = reserved
                 raise RuntimeError(
-                    f"allocated WARM bytes {allocated_bytes} exceed reservation {reserved}"
+                    f"allocated WARM bytes {allocated_bytes} plus runtime reserve "
+                    f"{runtime_reserved} exceed reservation {reserved}"
                 )
             now = self._clock()
             manifest = SnapshotManifest(
@@ -465,6 +490,10 @@ class WarmSnapshotPool:
                 compressed_allocated_bytes=compressed_allocated_bytes,
                 raw_allocated_bytes=raw_allocated_bytes,
                 expansion_allocated_bytes=expansion_allocated_bytes,
+                runtime_reserved_bytes=runtime_reserved,
+                owned_materialization_headroom_bytes=(
+                    owned_materialization_headroom_bytes
+                ),
                 owned_logical_bytes=owned_logical_bytes,
                 owned_allocated_bytes=owned_allocated_bytes,
                 expanded=expanded,
@@ -566,6 +595,7 @@ class WarmSnapshotPool:
     def finish_expansion(
         self, key: SnapshotKey, raw_allocated_bytes: int, *,
         runtime_upper_bound_bytes: int = 0,
+        runtime_reserve_bytes: int | None = None,
         owned_allocated_bytes: int = 0,
         retained_by_vm: bool = False,
         owned_layer_files: dict[str, tuple[str, int]] | None = None,
@@ -582,9 +612,14 @@ class WarmSnapshotPool:
                         item.retained_by_vm = True
                     return item
                 raise RuntimeError(f"snapshot expansion was not reserved: {key}")
-            runtime_reserved = max(
-                0, runtime_upper_bound_bytes - owned_allocated_bytes
+            runtime_reserved = (
+                max(0, runtime_upper_bound_bytes - owned_allocated_bytes)
+                if runtime_reserve_bytes is None
+                else runtime_reserve_bytes
             )
+            if runtime_reserved < 0:
+                self._expansion_reservations[key] = reserved
+                raise ValueError("runtime snapshot reserve must be non-negative")
             if raw_allocated_bytes + runtime_reserved > item.allocated_bytes + reserved:
                 self._expansion_reservations[key] = reserved
                 raise RuntimeError(
@@ -597,6 +632,7 @@ class WarmSnapshotPool:
             item.compressed_allocated_bytes = 0
             item.expansion_allocated_bytes = 0
             item.runtime_reserved_bytes = runtime_reserved
+            item.owned_materialization_headroom_bytes = runtime_reserved
             item.expanded = True
             item.retained_by_vm = retained_by_vm
             if owned_layer_files is not None:
@@ -890,7 +926,10 @@ class WarmSnapshotPool:
                         retained += self._managed_warm_layers[identity][1]
                     elif remaining_owners[identity] and identity in item.owned_layer_files:
                         retained += item.owned_layer_files[identity][1]
-                reclaimed += max(0, item.allocated_bytes - retained)
+                reclaimed += (
+                    max(0, item.allocated_bytes - retained)
+                    + item.runtime_reserved_bytes
+                )
                 if reclaimed >= deficit:
                     break
             if reclaimed < deficit:
@@ -930,6 +969,8 @@ class WarmSnapshotPool:
                 "external_warm_bytes": self.external_warm_bytes,
                 "external_shared_live_bytes": self.external_shared_live_bytes,
                 "external_occupied_bytes": self.external_occupied_bytes,
+                "unreserved_owned_growth_bytes": self._unreserved_owned_growth_bytes,
+                "unreserved_owned_growth_events": self._unreserved_owned_growth_events,
             }
 
     def snapshot(self) -> dict[str, object]:
@@ -952,6 +993,8 @@ class WarmSnapshotPool:
                 "value_rejections_to_cold": self._value_rejections,
                 "next_use_rejections_to_cold": self._next_use_rejections,
                 "spill_count": self._spill_count,
+                "unreserved_owned_growth_bytes": self._unreserved_owned_growth_bytes,
+                "unreserved_owned_growth_events": self._unreserved_owned_growth_events,
                 "reserved_bytes": sum(self._reservations.values()),
                 "expansion_reserved_bytes": sum(
                     self._expansion_reservations.values()

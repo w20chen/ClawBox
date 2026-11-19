@@ -979,6 +979,7 @@ class CubeSandboxLifecycle:
         self._peer_retired_warm_paths.clear()
 
     def _pool_lineage_fields(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        from .snapshot import _allocated_bytes
         owned_files = {}
         for item in manifest.get('layer_allocations') or []:
             if item.get('external') or not item.get('path'):
@@ -986,7 +987,9 @@ class CubeSandboxLifecycle:
             path = Path(item['path'])
             if path.exists():  # exclusively owned compressed layers have no raw file
                 stat = path.stat()
-                owned_files[f'{stat.st_dev}:{stat.st_ino}'] = (str(path), int(item['allocated_bytes']))
+                owned_files[f'{stat.st_dev}:{stat.st_ino}'] = (
+                    str(path), _allocated_bytes(path, stat),
+                )
         return {
             'owned_layer_identities': tuple(owned_files),
             'owned_layer_files': owned_files,
@@ -997,6 +1000,59 @@ class CubeSandboxLifecycle:
         }
 
     @staticmethod
+    def _owned_materialization_headroom(
+        manifest: Mapping[str, Any],
+        owned_layer_files: Mapping[str, tuple[str, int]] | None = None,
+    ) -> int:
+        """Remaining physical allocation, summed independently per owned layer."""
+        seen = set()
+        headroom = 0
+        found = False
+        for item in manifest.get("lineage_layer_map") or []:
+            if item.get("external"):
+                continue
+            identity = item.get("identity")
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            found = True
+            allocated = int(item.get("allocated_bytes") or 0)
+            if owned_layer_files and identity in owned_layer_files:
+                allocated = int(owned_layer_files[identity][1])
+            headroom += max(0, int(item.get("range_bytes") or 0) - allocated)
+        if found:
+            return headroom
+        # Non-lineage and older test fixtures have only aggregate accounting.
+        return max(
+            0,
+            int(manifest.get("owned_logical_bytes") or 0)
+            - int(manifest.get("owned_allocated_bytes") or 0),
+        )
+
+    def _finish_pool_expansion(
+        self, key: SnapshotKey, manifest: Mapping[str, Any],
+    ) -> SnapshotManifest:
+        """Commit one current, internally consistent physical observation."""
+        if self.snapshot_pool is None:
+            raise RuntimeError("snapshot pool is unavailable")
+        lineage = self._pool_lineage_fields(manifest)
+        owned_files = lineage["owned_layer_files"]
+        current_owned = sum(value[1] for value in owned_files.values())
+        recorded_owned = int(manifest.get("owned_allocated_bytes") or 0)
+        current_raw = max(
+            0,
+            int(manifest["allocated_bytes"]) + current_owned - recorded_owned,
+        )
+        return self.snapshot_pool.finish_expansion(
+            key, current_raw,
+            runtime_reserve_bytes=self._owned_materialization_headroom(
+                manifest, owned_files,
+            ),
+            owned_allocated_bytes=current_owned,
+            owned_layer_files=owned_files,
+        )
+
+    @staticmethod
     def _pool_allocation_fields(manifest: Mapping[str, Any]) -> dict[str, Any]:
         compression = manifest.get("compression")
         if not isinstance(compression, Mapping):
@@ -1004,6 +1060,9 @@ class CubeSandboxLifecycle:
                 "compressed_allocated_bytes": 0,
                 "raw_allocated_bytes": int(manifest["allocated_bytes"]),
                 "expansion_allocated_bytes": 0,
+                "owned_materialization_headroom_bytes": (
+                    CubeSandboxLifecycle._owned_materialization_headroom(manifest)
+                ),
                 "owned_logical_bytes": int(manifest.get("owned_logical_bytes") or 0),
                 "owned_allocated_bytes": int(manifest.get("owned_allocated_bytes") or 0),
                 "expanded": True,
@@ -1016,6 +1075,9 @@ class CubeSandboxLifecycle:
             "expansion_allocated_bytes": int(
                 compression.get("decompression_allocated_bytes")
                 or compression.get("baseline_allocated_bytes") or 0
+            ),
+            "owned_materialization_headroom_bytes": (
+                CubeSandboxLifecycle._owned_materialization_headroom(manifest)
             ),
             "owned_logical_bytes": int(manifest.get("owned_logical_bytes") or 0),
             "owned_allocated_bytes": int(manifest.get("owned_allocated_bytes") or 0),
@@ -1047,11 +1109,7 @@ class CubeSandboxLifecycle:
         # Relocation copies the effective owned ranges into a new filesystem.
         # Sparse COLD layers can therefore consume up to their logical range
         # coverage in WARM even after decompression itself preserved holes.
-        reservation += max(
-            0,
-            int(manifest.get("owned_logical_bytes") or 0)
-            - int(manifest.get("owned_allocated_bytes") or 0),
-        )
+        reservation += CubeSandboxLifecycle._owned_materialization_headroom(manifest)
         return reservation
 
     def _spill_to_cold(self, manifest: SnapshotManifest) -> None:
@@ -1087,8 +1145,8 @@ class CubeSandboxLifecycle:
                     else:
                         if (self.snapshot_pool is not None
                                 and manifest.expansion_allocated_bytes > 0):
-                            runtime_extra = max(
-                                0, manifest.owned_logical_bytes - manifest.owned_allocated_bytes
+                            runtime_extra = (
+                                manifest.owned_materialization_headroom_bytes
                             )
                             self.snapshot_pool.reserve_selected_expansion(
                                 manifest.key,
@@ -1103,16 +1161,7 @@ class CubeSandboxLifecycle:
                                 manifest.path,
                                 require_lineage=self.snapshot_mechanism == "incremental-cow",
                             )
-                            self.snapshot_pool.finish_expansion(
-                                manifest.key, int(raw_metrics["allocated_bytes"]),
-                                runtime_upper_bound_bytes=int(
-                                    raw_metrics.get("owned_logical_bytes") or 0
-                                ),
-                                owned_allocated_bytes=int(
-                                    raw_metrics.get("owned_allocated_bytes") or 0
-                                ),
-                                owned_layer_files=self._pool_lineage_fields(raw_metrics)['owned_layer_files'],
-                            )
+                            self._finish_pool_expansion(manifest.key, raw_metrics)
                 with self._transfer("spill"):
                     self.client.relocate_snapshot(
                         self.sandbox, tier=SnapshotTier.COLD.value,
@@ -1557,10 +1606,8 @@ class CubeSandboxLifecycle:
                     else:
                         if (pool_manifest is not None
                                 and pool_manifest.expansion_allocated_bytes > 0):
-                            runtime_extra = max(
-                                0,
-                                pool_manifest.owned_logical_bytes
-                                - pool_manifest.owned_allocated_bytes,
+                            runtime_extra = (
+                                pool_manifest.owned_materialization_headroom_bytes
                             )
                             with self._measure_stage(
                                 stage_seconds, "snapshot_expansion_reserve_s",
@@ -1600,16 +1647,8 @@ class CubeSandboxLifecycle:
                             with self._measure_stage(
                                 stage_seconds, "snapshot_expansion_commit_s",
                             ):
-                                self.snapshot_pool.finish_expansion(
-                                    self._snapshot_key,
-                                    int(raw_metadata["allocated_bytes"]),
-                                    runtime_upper_bound_bytes=int(
-                                        raw_metadata.get("owned_logical_bytes") or 0
-                                    ),
-                                    owned_allocated_bytes=int(
-                                        raw_metadata.get("owned_allocated_bytes") or 0
-                                    ),
-                                    owned_layer_files=self._pool_lineage_fields(raw_metadata)['owned_layer_files'],
+                                self._finish_pool_expansion(
+                                    self._snapshot_key, raw_metadata,
                                 )
                                 self._capture_storage(
                                     storage_observations, "after_raw_accounting",
