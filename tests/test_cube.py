@@ -3129,3 +3129,60 @@ def test_next_use_compressed_promotion_reserves_reused_parent_expansion(
     assert pool.manifest(key).allocated_bytes == 220
     promotion = next(t for t in lifecycle.timings if t["operation"] == "promote")
     assert promotion["snapshot_metrics"]["reservation_bytes"] == 220
+
+
+def test_next_use_compressed_promotion_reserves_sparse_owned_materialization(
+    tmp_path, monkeypatch,
+):
+    import clawbox.cube.snapshot_compression as compression_module
+    import clawbox.cube.snapshot as snapshot_module
+
+    decompressed = 747_794_432
+    owned_logical = 1_812_430_848
+    lifecycle, client, pool, key = _cold_next_use_lifecycle(
+        tmp_path, monkeypatch, capacity=1_900_000_000, compressed=True,
+    )
+    calls = []
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_a, **_k: ({
+            "logical_bytes": 2_500_000_000,
+            "allocated_bytes": 200_000_000,
+            "raw_allocated_bytes": 500_000_000,
+            "owned_logical_bytes": owned_logical,
+            "owned_allocated_bytes": decompressed,
+            "transferred_bytes": 200_000_000,
+            "compression": {
+                "baseline_allocated_bytes": 500_000_000,
+                "compressed_allocated_bytes": 200_000_000,
+                "decompression_allocated_bytes": decompressed,
+            },
+        } if "decompress" not in calls else {
+            "logical_bytes": 2_500_000_000,
+            "allocated_bytes": owned_logical,
+            "owned_logical_bytes": owned_logical,
+            "owned_allocated_bytes": owned_logical,
+            "transferred_bytes": owned_logical,
+        }),
+    )
+    monkeypatch.setattr(
+        compression_module, "decompress_snapshot",
+        lambda *_a, **_k: calls.append("decompress") or {"wall_seconds": .1},
+    )
+    client.relocate_snapshot = lambda _sandbox, **kwargs: (
+        calls.append("relocate") or {
+            "tier": kwargs["tier"],
+            "generation": kwargs["generation"],
+            "memory_snapshot_path": kwargs["memory_snapshot_path"],
+        }
+    )
+    client.connect_sandbox = lambda *_a, **_k: (
+        calls.append("connect") or SimpleNamespace(state="running")
+    )
+
+    lifecycle.restore()
+
+    assert calls == ["decompress", "relocate", "connect"]
+    assert pool.manifest(key).allocated_bytes == owned_logical
+    promotion = next(t for t in lifecycle.timings if t["operation"] == "promote")
+    assert promotion["snapshot_metrics"]["reservation_bytes"] == owned_logical

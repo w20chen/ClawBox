@@ -1024,7 +1024,7 @@ class CubeSandboxLifecycle:
 
     @staticmethod
     def _promotion_reservation_bytes(manifest: Mapping[str, Any]) -> int:
-        """Return the physical WARM allocation after COLD decompression."""
+        """Return the physical WARM allocation after decompression and relocation."""
         reservation = int(
             manifest.get("raw_allocated_bytes") or manifest["allocated_bytes"]
         )
@@ -1044,6 +1044,14 @@ class CubeSandboxLifecycle:
                 reservation,
                 int(manifest["allocated_bytes"]) - compressed + decompressed,
             )
+        # Relocation copies the effective owned ranges into a new filesystem.
+        # Sparse COLD layers can therefore consume up to their logical range
+        # coverage in WARM even after decompression itself preserved holes.
+        reservation += max(
+            0,
+            int(manifest.get("owned_logical_bytes") or 0)
+            - int(manifest.get("owned_allocated_bytes") or 0),
+        )
         return reservation
 
     def _spill_to_cold(self, manifest: SnapshotManifest) -> None:
