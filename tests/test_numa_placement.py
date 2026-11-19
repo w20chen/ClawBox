@@ -1,3 +1,4 @@
+from experiment_fixtures import policy as fixture_policy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier, Event
@@ -7,11 +8,9 @@ import time
 import pytest
 
 from clawbox.experiments.admission import DemandLedger
-from clawbox.experiments.baselines import resolve_baseline
 from clawbox.experiments.numa_placement import CpuMonitor, SessionPlacement
 from clawbox.experiments.policy import PolicyCoordinator, AdmissionTimeout
 from clawbox.experiments.spec import ExecutionSpec, ExperimentSpec
-from clawbox.experiments.configure import configure_experiment
 from test_supernode import nodes
 
 MIB=1024**2
@@ -21,7 +20,7 @@ def scheduler(*, used=(0,0), cpu=(0.,0.), overcommit=1, capacity=20):
     ledger=DemandLedger(sample=lambda:(sum(used)*MIB,100*MIB),capacity=capacity*MIB)
     domains={}
     for i in range(2):
-        coordinator=PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(),
+        coordinator=PolicyCoordinator(fixture_policy('fixed-resident'),
             budget_mib=10,emergency_free_mib=0,operation_headroom_mib=0,
             physical_sample=lambda i=i:(used[i]*MIB,100*MIB),
             demand_ledger=ledger,demand_scope=f'n{i}')
@@ -312,18 +311,6 @@ def test_impossible_memory_request_fails_without_waiting_for_timeout():
     assert not ledger.claims
 
 
-def test_spec_rejects_vm_pair_that_cannot_fit_compute_high_watermark():
-    constrained = tuple(node.model_copy(update={
-        'low_watermark_mib': 2048,
-        'high_watermark_mib': 3072,
-    }) for node in nodes())
-    with pytest.raises(ValueError, match='VM pair plus policy operation headroom'):
-        configure_experiment(
-            Path('examples/experiments/getting-started.yaml'),
-            baseline_names=['uncontrolled-resident'],
-            compute_nodes=[node.model_dump() for node in constrained],
-            pool_memory_gib=6,
-        )
 
 
 def test_cpu_monitor_measures_deltas_and_reports_missing_pressure(tmp_path):
@@ -338,17 +325,6 @@ def test_cpu_monitor_measures_deltas_and_reports_missing_pressure(tmp_path):
         CpuMonitor({'n':'1'},proc=tmp_path)
 
 
-def test_os_default_is_a_real_placement_policy_not_pool_toggle():
-    spec=configure_experiment(Path('examples/experiments/getting-started.yaml'),
-        compute_nodes=[n.model_dump() for n in nodes()],placement_policy='os_default',
-        pool_memory_gib=64)
-    assert spec.execution.placement_policy=='os_default'
-    assert spec.resources.compute_nodes
-    raw=spec.model_dump(mode='json')
-    raw['resources'].update(warm_numa_node=2,warm_memory_capacity_mib=131072,
-                            shared_memory_borrow_limit_mib=65536)
-    with pytest.raises(ValueError,match='unbound allocation'):
-        ExperimentSpec.model_validate(raw)
 
 
 @pytest.mark.parametrize('value',[0,float('inf'),float('nan')])

@@ -18,6 +18,7 @@ class Lifecycle:
 
 
 def coordinator(**options):
+    options.setdefault('gpu_prewarm_events', ('think_end', 'first_token'))
     policy = PolicySpec(
         name="gpu", admission="predicted", reclamation="snapshot_pause",
         eviction="gpu_aware_pressure", restore="reactive", **options,
@@ -158,7 +159,7 @@ def test_first_answer_token_prewarms_once_when_enabled():
 
 
 def test_first_token_prewarm_can_be_disabled():
-    c = coordinator(gpu_first_token_prewarm=False)
+    c = coordinator(gpu_prewarm_events=('think_end',))
     waiting(c)
     assert not signal(c, event="first_token", role="A")["should_prewarm"]
     assert signal(c, event="think_end", role="A")["should_prewarm"]

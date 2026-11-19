@@ -1,0 +1,36 @@
+kind: clawbox-baseline
+name: neutral
+environment:
+  # Replace identities and budgets with your verified host/template values.
+  runtime: {template_alias: runtime-example-arm64, vcpu: 2, memory_mib: 1024}
+  sandbox: {template_alias: tool-example-arm64, vcpu: 2, memory_mib: 3072, workspace: /workspace}
+  resources:
+    target_node: replace-with-your-cubesandbox-node
+    pool_memory_budget_mib: 16384
+    emergency_free_memory_mib: 1024
+    cold_snapshot_root: /data/clawbox/cold
+    snapshot_compression: zstd-page
+    base_template_cache: disabled
+agent: {driver: openclaw}
+inference: {backend: replay, configuration: {model: example-model, time_scale: 1.0}}
+conditions: {prediction_source: kb}
+evidence: {}
+mechanisms:
+  admission: {tool: 'off'}
+  runtime: {memory_protection: false, cpu_release_boost: false, proactive_memory_reclaim: false}
+  placement: {policy: round_robin, template_affinity: false, tool_call_cpu_policy: c0}
+  idle_reclaim: {policy: 'off', scope: tool}
+  restore: {prewarm_events: []}
+  shared_memory: {borrow: 'off'}
+  checkpoint: {mechanism: incremental-cow, storage: disk, residency: lru}
+  deployment: {mode: managed}
+  coordination: {action_selection: reclaim_first}
+execution:
+  sandbox_create_concurrency: 8
+  dependency_install_concurrency: null
+  arm_timeout_seconds: 300
+  command_timeout_seconds: 60
+measurement:
+  memory_sample_interval_seconds: 0.2
+  stabilization_seconds: 1
+  observe_predictions: false

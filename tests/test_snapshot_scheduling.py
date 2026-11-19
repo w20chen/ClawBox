@@ -1,3 +1,4 @@
+from experiment_fixtures import worker_fixture
 import os
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from clawbox.experiments.spec import (
     SnapshotBranchingSpec,
     SnapshotSchedulingStorageSpec,
     expand_matrix,
-    load_experiment,
+
 )
 
 
@@ -176,10 +177,10 @@ def test_interrupted_run_cleanup_removes_only_matching_run_storage(tmp_path: Pat
 
 
 def test_snapshot_branching_requires_an_absolute_cold_snapshot_root():
-    raw = load_experiment(
-        ROOT / "examples" / "experiments" / "snapshot-scheduling-correctness-kunpeng.yaml"
+    raw = worker_fixture(
+        ROOT / "tests" / "fixtures" / "experiments" / "snapshot-scheduling-correctness-kunpeng.yaml"
     ).model_dump(mode="json")
-    raw.update(schema_version=3, design=None, suite=None, suite_ablations=False)
+    raw.update(schema_version=3, design=None)
     raw["resources"]["cold_snapshot_root"] = None
     raw["policies"] = [raw["policies"][0]]
     with pytest.raises(ValueError, match="cold_snapshot_root"):
@@ -202,7 +203,7 @@ def test_formal_specs_are_fixed_16_by_8_with_two_repetitions():
         ("snapshot-scheduling-compute-kunpeng.yaml", "compute-memory"),
         ("snapshot-scheduling-disk-kunpeng.yaml", "local-disk"),
     ):
-        spec = load_experiment(ROOT / "examples" / "experiments" / name)
+        spec = worker_fixture(ROOT / "tests" / "fixtures" / "experiments" / name)
         arms = expand_matrix(spec)
         assert len(arms) == 6
         assert {(arm.policy.name, arm.repetition) for arm in arms} == {
@@ -221,8 +222,8 @@ def test_formal_specs_are_fixed_16_by_8_with_two_repetitions():
 
 
 def test_branching_manifest_is_hashed_without_replay_parsing():
-    spec = load_experiment(
-        ROOT / "examples" / "experiments" / "snapshot-scheduling-correctness-kunpeng.yaml"
+    spec = worker_fixture(
+        ROOT / "tests" / "fixtures" / "experiments" / "snapshot-scheduling-correctness-kunpeng.yaml"
     )
     for result in (validate_inputs(spec), validate_launch_inputs(spec)):
         assert len(result["traces"]) == 1
@@ -231,8 +232,8 @@ def test_branching_manifest_is_hashed_without_replay_parsing():
 
 
 def test_branching_qualification_is_bounded_but_covers_both_nodes():
-    spec = load_experiment(
-        ROOT / "examples" / "experiments" / "snapshot-scheduling-compute-kunpeng.yaml"
+    spec = worker_fixture(
+        ROOT / "tests" / "fixtures" / "experiments" / "snapshot-scheduling-compute-kunpeng.yaml"
     )
     qualified = qualification_spec(spec)
     arms = expand_matrix(qualified)

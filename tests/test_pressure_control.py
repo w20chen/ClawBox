@@ -1,3 +1,4 @@
+from experiment_fixtures import policy as fixture_policy
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -9,7 +10,6 @@ import pytest
 from clawbox.experiments.pressure import PressureControl, Phase, MIB
 from clawbox.experiments.spec import PressureControlSpec
 from clawbox.experiments.spec_types import RuntimeControl
-from clawbox.experiments.baselines import resolve_baseline
 from clawbox.experiments.policy import PolicyCoordinator, AdmissionRequest
 from clawbox.experiments.policy_control import _Session
 
@@ -391,7 +391,7 @@ class VM:
 
 
 def coordinator():
-    c = PolicyCoordinator(resolve_baseline('predicted-wait-snapshot').as_policy(),
+    c = PolicyCoordinator(fixture_policy('predicted-wait-snapshot'),
         budget_mib=256, emergency_free_mib=0, operation_headroom_mib=0,
         physical_sample=lambda: (256*MIB, 1024*MIB))
     return c
@@ -459,8 +459,10 @@ def test_start_endpoint_rejects_stale_generation_and_late_start():
 def test_supported_modes_are_explicit_and_cgroup_ablations_resident():
     assert not RuntimeControl.NO_CONTROL.adaptive
     for name in ('phase_memcg', 'release_cpu'):
-        p = resolve_baseline(name).as_policy()
-        assert p.runtime_control.value == name
+        p = fixture_policy(name)
+        assert p.runtime_control.value == "explicit"
+        assert p.memory_protection == (name == "phase_memcg")
+        assert p.cpu_release_boost == (name == "release_cpu")
         assert (p.reclamation.value == 'snapshot_pause') == p.runtime_control.coordinates_release
 
 

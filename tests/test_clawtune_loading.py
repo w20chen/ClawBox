@@ -35,20 +35,18 @@ def _write_source(source):
     )
 
 
-@pytest.mark.parametrize("adapter", ["clawtune", "native", "scheduler", "scheduler_then_tuning"])
+@pytest.mark.parametrize("adapter", ["clawtune", "native"])
 @pytest.mark.parametrize("already_on_path", [False, True])
 def test_explicit_clawtune_source_wins_over_sibling_checkout(tmp_path, adapter, already_on_path):
     _check_source_selection(tmp_path, adapter, "explicit", already_on_path)
 
 
-@pytest.mark.parametrize("adapter", ["clawtune", "native", "scheduler"])
+@pytest.mark.parametrize("adapter", ["clawtune", "native"])
 @pytest.mark.parametrize("selection", ["sibling", "installed"])
 def test_clawtune_fallback_source(tmp_path, adapter, selection):
     _check_source_selection(tmp_path, adapter, selection)
 
 
-def test_scheduler_legacy_source_wins_over_sibling_checkout(tmp_path):
-    _check_source_selection(tmp_path, "scheduler", "legacy")
 
 
 def _check_source_selection(tmp_path, adapter, selection, already_on_path=False):
@@ -64,9 +62,7 @@ def _check_source_selection(tmp_path, adapter, selection, already_on_path=False)
     modules = {
         "clawtune": [("clawbox.tuning.clawtune", "_load_clawtune")],
         "native": [("clawbox.tuning.native", "_clawtune_api")],
-        "scheduler": [("clawbox.scheduler.kb", "_load_clawtune")],
     }
-    modules["scheduler_then_tuning"] = modules["scheduler"] + modules["clawtune"] + modules["native"]
     env = {key: value for key, value in os.environ.items()
            if key not in {"CLAWTUNE_SIDECAR_SRC", "CLAWTUNE_SCHEDULER_SRC"}}
     if selection == "explicit":

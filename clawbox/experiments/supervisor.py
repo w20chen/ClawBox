@@ -16,8 +16,8 @@ import psutil
 
 from clawbox.cube import CubeSandboxClient, OwnedSandboxJournal
 
-from .configure import dump_experiment
-from .baselines import ensure_supported_experiment
+from .configuration import dump_experiment
+from .spec import ensure_supported_experiment
 from .results import FailureCategory, ResultEnvelope, RunStatus, utcnow
 from .spec import ExperimentArm, ExperimentSpec, expand_matrix, load_experiment, spec_digest
 from .worker import atomic_json, atomic_marker, write_summary

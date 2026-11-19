@@ -103,7 +103,9 @@ outstanding claims. It does not measure memory bandwidth.
 CPU masks restrict eligible cores; they do not reserve them or change vCPU
 quotas. The `c0` Tool policy uses the full assigned pool. `c2` can narrow an
 eligible call to one LLC cluster and expands again on pressure or completion.
-Short, filesystem, and maintenance calls keep the full pool.
+Short, filesystem, and maintenance calls keep the full pool. B uses a pre-call
+duration prediction independently of whether memory admission is enabled. C2/B
+control polling has its own interval, separate from memory measurement.
 
 Changing `cpuset.mems` sets allocation policy and can request migration, but
 does not establish complete physical migration. Residency comes from
@@ -116,9 +118,10 @@ bytes. This is a single-host NUMA experiment, not a simulated cross-host fabric.
 Checkpointing does not interrupt active Tool commands. During an outstanding
 model request, idle reclaim can checkpoint the Tool VM or both VMs. A pending
 replay response is held until Runtime is restored; Tool can remain checkpointed
-until its next command. With GPU-aware reclaim, an observed `think_end` instead
-requests pre-restoration of Runtime followed by Tool, through the existing memory
-admission. Tool bridge readiness is checked, but command prediction, growth
+until its next command. Explicit `mechanisms.restore.prewarm_events` selects
+`think_end`, `first_token`, or both; the default empty list keeps restore reactive.
+It works with either wait or GPU reclaim and either scope. Selected events request
+Runtime then Tool restoration through existing memory admission, skipping resident VMs. Tool bridge readiness is checked, but command prediction, growth
 admission and SSH identity checks still occur at the actual command boundary.
 
 | Location | Contents |

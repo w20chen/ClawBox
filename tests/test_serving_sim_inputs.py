@@ -1,3 +1,4 @@
+from experiment_fixtures import worker_fixture
 import json
 from pathlib import Path
 
@@ -43,7 +44,7 @@ def prepared_source(tmp_path, *, scaffold='openclaw', history=None):
         replay_rows = [json.loads(line) for line in replay.read_text().splitlines()]
         replay_rows[0]['source_sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
         replay.write_text(''.join(json.dumps(row)+'\n' for row in replay_rows), encoding='utf-8')
-    spec = load_experiment(Path('examples/experiments/getting-started.yaml'))
+    spec = worker_fixture(Path('tests/fixtures/experiments/getting-started.yaml'))
     case = spec.workload.cases[0].model_copy(update=dict(
         case_id='case', source_reference=str(source), replay_trace_reference=str(replay)))
     spec = spec.model_copy(update={'workload': spec.workload.model_copy(update={'cases': (case,)})})

@@ -1,0 +1,20 @@
+kind: clawbox-workload
+name: smoke
+tasks:
+  source: recorded_trace
+  input: ../traces/smoke.jsonl
+  repetitions: 1
+  session_assignment: unique
+  cases:
+    - case_id: marker
+      source: recorded_trace
+      source_reference: ../traces/smoke.jsonl
+      replay_trace_reference: ../traces/smoke.jsonl
+      prompt: Create /workspace/result.txt containing complete.
+submission:
+  concurrency_levels: [1]
+  arrival_schedule: burst
+  random_seed: 0
+  randomized_order: false
+validation:
+  command: 'test "$(cat /workspace/result.txt)" = complete'

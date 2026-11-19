@@ -345,15 +345,15 @@ new run ID; `launch` reuses qualification when its capability inputs still match
 
 | Change | Required action |
 | --- | --- |
-| ClawBox Python, scheduling, reporting, or CLI | Update the checkout. An editable installation sees the changes in new processes; bootstrap again when dependencies change. No image rebuild. |
+| ClawBox Python, scheduling, reporting, or CLI | Update the checkout. An editable installation sees the changes in new processes; bootstrap again when dependencies or installed console entry points change. Reinstallation removes obsolete generated commands such as `clawbox-experiment-worker`. No image rebuild. |
 | Zstd snapshot helper source or a host missing the standard helper | Run `sudo bash scripts/build-zstd-page-snapshot.sh /usr/local/bin/clawbox-zstd-page-snapshot`, then rerun `experiment host check`. Use a new run ID; no service restart or VM-image rebuild. |
 | Host-side ClawTune predictor or selected prediction artifact | Update the host source/artifact and experiment evidence path. No Tool-image rebuild. Update Runtime separately if its predictor or seed must also change. |
 | Runtime predictor, seed, prepared cache, or plugin | Rebuild and register **one shared Runtime template**. Start fresh Runtime state and qualify the new template. Reuse all task-specific Tool templates. |
 | Tool collector, Tool Bridge, guest measurement contract, or guest dependencies | Rebuild the affected Tool image layers and register new Tool templates. For a corpus, use the [collector refresh](workloads.md#refresh-tool-collectors) to preserve task dependencies. |
-| VM vCPU, RAM, disk, image, or workspace | Register new templates with the intended shape/content, update the host plan or workload, and qualify. `configure` does not resize templates. |
+| VM vCPU, RAM, disk, image, or workspace | Register new templates with the intended shape/content, update the host plan or workload, and qualify. Editing baseline/workload files does not resize templates. |
 | SDK-only patch | Reinstall the patched host SDK. No service restart or VM-image rebuild. |
 | CubeSandbox server/placement/snapshot patch | Build matching Cubelet/Shim binaries, install on an idle host, recover services, and apply the host plan. Guest templates remain reusable when their content and kernel are unchanged. |
-| Host CPU lists, budgets, mounts, network settings, or Cube quotas | Check/apply the reviewed host YAML, then reconfigure the experiment. No image rebuild. |
+| Host CPU lists, budgets, mounts, network settings, or Cube quotas | Check/apply the reviewed host YAML, then update the baseline. No image rebuild. |
 | Trained KB's environment, measurement semantics, or training data | Train new immutable artifacts against the matching environment. A cold-start seed is selected explicitly and does not require workload-specific training. |
 | Only timing diagnostics, arrivals, concurrency, or scheduler parameters | Validate the new specification and use a new run ID. No image rebuild or retraining. |
 

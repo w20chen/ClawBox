@@ -63,9 +63,9 @@ alternates PennyLane and SQLGlot traces before appending the remaining projects
 lexically. It fails if it cannot fill `--count` with compatible unique traces.
 Copy the whole output directory when moving the corpus to another host.
 
-Configure it with `--workload-manifest /absolute/path/replay-corpus/workload.json`.
-This sets `workload.source: swe_rebench`, selects unique assignment, and removes
-inline cases inherited from the base specification. Offered concurrency cannot
+Set workload `tasks.input: /absolute/path/replay-corpus/workload.json`,
+`tasks.source: swe_rebench`, and clear `tasks.cases` to load the manifest.
+Set `tasks.session_assignment: unique` to execute each case once. Offered concurrency cannot
 exceed the number of cases when assignment is unique.
 
 The importer does not choose templates. Either use a Tool template containing
@@ -255,14 +255,14 @@ Template-aware placement requires physical RAM-base sharing evidence for the
 exact Tool templates. Create it once and retain the raw artifacts:
 
 ```bash
-bash scripts/clawbox --sudo experiment prove-template-sharing eval.yaml \
+bash scripts/clawbox --sudo experiment prove-template-sharing --baseline baseline.yaml --workload workload.yaml \
   --output /data/clawbox-evidence/template-sharing.json \
   --artifact-root /data/clawbox-evidence/template-sharing-raw
-bash scripts/clawbox experiment configure eval.yaml eval-with-proof.yaml \
-  --template-base-sharing-artifact /data/clawbox-evidence/template-sharing.json
+
 ```
 
-The evidence binds template IDs, image digests, VM sizes, architecture, target
+Set baseline `evidence.template_base_sharing_artifact` to the saved JSON path.
+Use a new run ID. The evidence binds template IDs, image digests, VM sizes, architecture, target
 node, and raw proof hashes. New Tool templates, a changed template-RAM mapping
 mechanism, or missing raw evidence require a new proof. Runtime-only and ordinary
 host-predictor updates do not change Tool RAM-base sharing.

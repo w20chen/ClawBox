@@ -1,9 +1,9 @@
+from experiment_fixtures import policy as fixture_policy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from clawbox.experiments.baselines import resolve_baseline
 from clawbox.experiments.memory import cgroup_memory_evidence, NodeMemorySampler
 from clawbox.experiments.policy import PolicyCoordinator, AdmissionTimeout
 from clawbox.experiments.spec import ExperimentSpec, expand_matrix
@@ -14,7 +14,7 @@ MIB = 1024**2
 
 def test_os_creation_has_no_hidden_admission_budget():
     free = [100 * MIB]
-    c = PolicyCoordinator(resolve_baseline('default-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('default-resident'),
         budget_mib=1, emergency_free_mib=1, operation_headroom_mib=100,
         os_managed_lifecycle=True, physical_sample=lambda: (50 * MIB, free[0]))
     assert c.acquire('s', 0, 0, wait_class='create') == 0
@@ -26,7 +26,7 @@ def test_os_creation_has_no_hidden_admission_budget():
 
 def test_zero_lifecycle_claim_still_checks_safety_and_releases():
     used = [0, 100*MIB]
-    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('uncontrolled-resident'),
         budget_mib=1, emergency_free_mib=1, operation_headroom_mib=0,
         physical_sample=lambda: tuple(used))
     c.acquire('s', 0, 0, wait_class='create')
@@ -41,7 +41,7 @@ def test_zero_lifecycle_claim_still_checks_safety_and_releases():
 
 def test_os_managed_is_shared_by_resident_arms_and_rejects_snapshot():
     raw = raw_spec()
-    raw['policies'] = [resolve_baseline(n).as_policy().model_dump(mode='json')
+    raw['policies'] = [fixture_policy(n).model_dump(mode='json')
         for n in ('uncontrolled-resident', 'fixed-resident', 'predicted-resident')]
     raw['resources'].update(lifecycle_admission='os-managed', proactive_cache_reclaim=False, static_tool_memory_mib=256)
     spec = ExperimentSpec.model_validate(raw)
@@ -50,7 +50,7 @@ def test_os_managed_is_shared_by_resident_arms_and_rejects_snapshot():
     with pytest.raises(ValueError, match='proactive_cache_reclaim'):
         ExperimentSpec.model_validate(raw)
     raw['resources']['proactive_cache_reclaim'] = False
-    raw['policies'].append(resolve_baseline('predicted-wait-snapshot').as_policy().model_dump(mode='json'))
+    raw['policies'].append(fixture_policy('predicted-wait-snapshot').model_dump(mode='json'))
     with pytest.raises(ValueError, match='resident policies'):
         ExperimentSpec.model_validate(raw)
 
@@ -128,7 +128,7 @@ def test_memory_trace_is_loadable_and_never_overwrites(tmp_path):
 
 def test_zero_claim_placement_has_no_configured_capacity_gate():
     from clawbox.experiments.numa_placement import SessionPlacement
-    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('uncontrolled-resident'),
         budget_mib=1, emergency_free_mib=0, operation_headroom_mib=0,
         physical_sample=lambda: (0, 100*MIB))
     placement = SessionPlacement({'node': SimpleNamespace(coordinator=c, cpus='0')},

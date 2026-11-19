@@ -32,9 +32,10 @@ def _task_digest(case) -> str:
 def _prediction_identity(spec, case) -> dict | None:
     from .spec import resolve_case_sandbox
     from .spec_types import AdmissionPolicy
-    from .prediction import prediction_input_paths
+    from .prediction import prediction_input_paths, prediction_requires_memory
     resources = spec.resources
     required = (any(p.admission is AdmissionPolicy.PREDICTED for p in spec.policies)
+                or spec.execution.tool_call_cpu_policy == 'b'
                 or resources.observe_predictions or resources.prediction_mode == 'host-live')
     if not required:
         return None
@@ -43,6 +44,7 @@ def _prediction_identity(spec, case) -> dict | None:
     sandbox = resolve_case_sandbox(case, spec.sandbox)
     paths = prediction_input_paths(Path(resources.prediction_artifact), resources.prediction_mode)
     return dict(mode=resources.prediction_mode, repository=case.repository or case.case_id,
+        require_memory=prediction_requires_memory(spec),
         sandbox={k: getattr(sandbox, k) for k in ('template_id', 'image_digest', 'vcpu', 'memory_mib', 'architecture')},
         files={str(p.resolve()): _file_digest(p) for p in paths})
 
@@ -65,7 +67,8 @@ def _prepare_prediction(spec, case, replay: Path) -> dict | None:
     from .prediction import prediction_provider_type, command_sha256
     from .training import trace_commands
     provider = prediction_provider_type(identity['mode'])(Path(spec.resources.prediction_artifact),
-        repository=identity['repository'], sandbox_identity=identity['sandbox'])
+        repository=identity['repository'], sandbox_identity=identity['sandbox'],
+        require_memory=identity['require_memory'])
     commands = trace_commands(replay)
     if identity['mode'] in {'runtime', 'cold-start'}:
         for command in commands:

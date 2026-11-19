@@ -6,8 +6,7 @@ measurements, and compares when work starts, where it runs, and when VM state is
 saved or restored.
 
 Each session contains a Runtime VM running OpenClaw and a Tool VM executing task
-commands. The supported interface is `clawbox experiment`; the legacy
-service-based control plane is not supported.
+commands. Configure and run experiments through `clawbox experiment`.
 
 ## Start here
 
@@ -23,13 +22,14 @@ service-based control plane is not supported.
   and overhead attribution.
 - [Execution model](docs/design.md): VM execution, prediction, memory accounting,
   CPU and NUMA placement, snapshots, and hardware counters.
-- [Deprecated components](docs/deprecated.md): code retained for reference but
-  excluded from the supported workflow.
+- [Option relationships](docs/option-relations.md): configuration ownership,
+  prerequisites, and supported mechanism combinations.
 
 The smallest inputs are
-[`six-dimension.yaml`](examples/experiments/six-dimension.yaml) and
+[`baseline`](examples/baselines/neutral.yaml) and
+[`workload`](examples/workloads/smoke.yaml). The workload refers to
 [`smoke.jsonl`](examples/traces/smoke.jsonl). See the
-[example index](examples/README.md) before using host-specific fixtures.
+[example index](examples/README.md) for configuration and supporting assets.
 
 From a configured checkout:
 
@@ -40,7 +40,7 @@ bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
 
 Continue with the [smoke experiment](docs/guide.md#2-run-a-smoke-experiment).
 
-Use `experiment schema` for the complete public field catalog and each
+Use `experiment schema baseline` and `experiment schema workload` for the complete public field catalog and each
 subcommand's `--help` for current options. Generated results, host audits,
 credentials, prompts, and local research files are intentionally ignored by
 Git. Checked-in examples and canonical traces are repository assets.

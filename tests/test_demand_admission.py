@@ -1,3 +1,4 @@
+from experiment_fixtures import policy as fixture_policy
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -6,7 +7,6 @@ import pytest
 
 from clawbox.experiments.admission import DemandLedger
 from clawbox.experiments.policy import PolicyCoordinator, AdmissionTimeout
-from clawbox.experiments.baselines import resolve_baseline
 
 MIB = 1024**2
 
@@ -14,7 +14,7 @@ MIB = 1024**2
 def test_changed_admission_head_wakes_its_sleeping_predecessor(monkeypatch):
     """Different memory observations must not leave every ticket behind a head."""
     c = PolicyCoordinator(
-        resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
+        fixture_policy('predicted-resident'), budget_mib=10,
         emergency_free_mib=0, operation_headroom_mib=0,
         physical_sample=lambda: (0, 100 * MIB),
     )
@@ -136,7 +136,7 @@ def test_admission_revalidates_claims_added_after_unlocked_observation():
         return 0, 100 * MIB
 
     coordinator = PolicyCoordinator(
-        resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
+        fixture_policy('predicted-resident'), budget_mib=10,
         emergency_free_mib=0, operation_headroom_mib=0,
         physical_sample=physical_sample,
     )
@@ -174,7 +174,7 @@ def test_pressure_observers_release_the_lock_during_exact_reads(operation):
             reading.set()
             assert finish.wait(2)
         return 0, 0
-    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('predicted-resident'),
                           budget_mib=10, emergency_free_mib=0, operation_headroom_mib=0)
     with c._condition:
         c.demand.add(('busy', 'tool_admission'), scope=c.demand_scope,
@@ -209,7 +209,7 @@ def test_pressure_observers_release_the_lock_during_exact_reads(operation):
 
 
 def test_tool_binding_does_not_block_other_sessions_or_revive_replaced_claim():
-    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('predicted-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     reading, finish = threading.Event(), threading.Event()
     def sample():
@@ -243,7 +243,7 @@ def test_tool_binding_does_not_block_other_sessions_or_revive_replaced_claim():
 
 
 def test_tool_binding_publishes_exact_baseline_without_global_lock():
-    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('predicted-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     observed = [10*MIB, 10*MIB]
     c.register_memory('s', tool=lambda: tuple(observed), lifecycle=lambda: (0, 0))
@@ -262,7 +262,7 @@ def test_tool_binding_publishes_exact_baseline_without_global_lock():
 
 
 def test_same_vm_concurrent_tool_reservations_share_one_aggregate_claim():
-    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('fixed-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     c.acquire('busy', 10, .1)
     c.acquire('busy', 15, .1, total_mib=20)
@@ -281,7 +281,7 @@ def test_same_vm_concurrent_tool_reservations_share_one_aggregate_claim():
 
 
 def test_zero_tool_reservation_release_matches_zero_admission_fast_path():
-    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('predicted-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
 
     c.acquire('busy', 10, .1)
@@ -296,7 +296,7 @@ def test_zero_tool_reservation_release_matches_zero_admission_fast_path():
 
 
 def test_aggregate_tool_claim_keeps_first_memory_baseline():
-    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('fixed-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     samples = [(10 * MIB, 10 * MIB)]
     c.register_memory('busy', tool=lambda: samples[-1], lifecycle=lambda: (0, 0))
@@ -315,7 +315,7 @@ def test_aggregate_tool_claim_keeps_first_memory_baseline():
 
 def test_concurrent_same_vm_admissions_commit_without_an_inflight_convoy():
     count = 24
-    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('fixed-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     barrier = threading.Barrier(count)
 
@@ -335,7 +335,7 @@ def test_concurrent_same_vm_admissions_commit_without_an_inflight_convoy():
 
 
 def test_pending_upper_bound_tracks_claim_mutations_by_scope():
-    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('fixed-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     with c._condition:
         c.demand.add(('a', 'tool'), scope='node0', amount=10*MIB,
@@ -360,7 +360,7 @@ def test_pending_upper_bound_tracks_claim_mutations_by_scope():
 
 
 def test_tool_admission_can_reuse_existing_active_claim():
-    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('fixed-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     c.register('s', type('Lifecycle', (), {'resident': True})())
     c.set_tool_active('s', True)
@@ -399,7 +399,7 @@ def test_policy_skips_per_claim_samples_when_nominal_upper_bound_fits():
         return 0, 0
     ledger = DemandLedger(sample=lambda: (0, 1000*MIB), capacity=1000*MIB)
     coordinator = PolicyCoordinator(
-        resolve_baseline('predicted-resident').as_policy(), budget_mib=1000,
+        fixture_policy('predicted-resident'), budget_mib=1000,
         emergency_free_mib=0, operation_headroom_mib=0,
         demand_ledger=ledger,
     )
@@ -422,7 +422,7 @@ def test_policy_uses_exact_claim_growth_when_upper_bound_nears_capacity():
         return tuple(group)
     ledger = DemandLedger(sample=lambda: (5*MIB, 1000*MIB), capacity=10*MIB)
     coordinator = PolicyCoordinator(
-        resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
+        fixture_policy('predicted-resident'), budget_mib=10,
         emergency_free_mib=0, operation_headroom_mib=0,
         demand_ledger=ledger, physical_sample=ledger.sample,
     )
@@ -486,7 +486,7 @@ def test_exact_claim_reads_do_not_hold_the_admission_condition():
 
     ledger = DemandLedger(sample=lambda: (5 * MIB, 1000 * MIB), capacity=10 * MIB)
     coordinator = PolicyCoordinator(
-        resolve_baseline('predicted-resident').as_policy(), budget_mib=10,
+        fixture_policy('predicted-resident'), budget_mib=10,
         emergency_free_mib=0, operation_headroom_mib=0,
         demand_ledger=ledger, physical_sample=ledger.sample,
     )
@@ -531,7 +531,7 @@ def test_global_claims_are_shared_but_local_claims_do_not_spend_other_nodes():
 
 
 def test_off_bypasses_tool_gate_but_not_lifecycle_accounting():
-    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(), budget_mib=10,
+    c = PolicyCoordinator(fixture_policy('uncontrolled-resident'), budget_mib=10,
                           emergency_free_mib=0, operation_headroom_mib=0,
                           physical_sample=lambda: (10*MIB, 100*MIB))
     c.acquire('off', 0, .01)
@@ -543,7 +543,7 @@ def test_off_bypasses_tool_gate_but_not_lifecycle_accounting():
 
 def test_two_nodes_cannot_race_past_global_budget():
     ledger = DemandLedger(sample=lambda: (0, 1000*MIB), capacity=10*MIB)
-    coords = [PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=10,
+    coords = [PolicyCoordinator(fixture_policy('fixed-resident'), budget_mib=10,
                                 emergency_free_mib=0, operation_headroom_mib=0,
                                 demand_ledger=ledger, demand_scope=f'n{i}') for i in range(2)]
     barrier = threading.Barrier(2)
@@ -561,7 +561,7 @@ def test_two_nodes_cannot_race_past_global_budget():
 
 def test_feedback_zero_deficit_uses_safe_nominal_bound(monkeypatch):
     from clawbox.experiments.policy import AdmissionRequest
-    c=PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=100,
+    c=PolicyCoordinator(fixture_policy('fixed-resident'), budget_mib=100,
                         emergency_free_mib=0, operation_headroom_mib=0)
     with c._condition:
         c.demand.add(('old','create'),scope=c.demand_scope,amount=MIB,local_amount=MIB)
@@ -573,7 +573,7 @@ def test_feedback_zero_deficit_uses_safe_nominal_bound(monkeypatch):
 
 
 def test_restore_base_is_not_mistaken_for_tool_execution_growth():
-    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(), budget_mib=100,
+    c = PolicyCoordinator(fixture_policy('predicted-resident'), budget_mib=100,
                           emergency_free_mib=0, operation_headroom_mib=0)
     group = [0, 0]
     c.register_memory('s', tool=lambda: tuple(group), lifecycle=lambda: tuple(group))
@@ -638,7 +638,7 @@ def test_controller_failure_propagates_through_admission():
     def fail():
         raise RuntimeError('controller stopped')
     ledger.check = fail
-    c = PolicyCoordinator(resolve_baseline('fixed-resident').as_policy(), budget_mib=10,
+    c = PolicyCoordinator(fixture_policy('fixed-resident'), budget_mib=10,
         emergency_free_mib=0, operation_headroom_mib=0, demand_ledger=ledger)
     with pytest.raises(RuntimeError, match='controller stopped'):
         c.acquire('s', 1, .1)
@@ -652,7 +652,7 @@ def test_blocked_creation_head_does_not_resample_existing_vm_claims(
         local_used, global_used, create_amount):
     from clawbox.experiments.policy import AdmissionRequest
     ledger = DemandLedger(sample=lambda: (global_used*MIB, 1000*MIB), capacity=200*MIB)
-    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('predicted-resident'),
         budget_mib=100, emergency_free_mib=0, operation_headroom_mib=0,
         physical_sample=lambda: (local_used*MIB, 1000*MIB), demand_ledger=ledger)
     reads = []
@@ -674,7 +674,7 @@ def test_blocked_creation_head_does_not_resample_existing_vm_claims(
 
 def test_creation_head_still_samples_pending_growth_when_it_can_change_decision():
     from clawbox.experiments.policy import AdmissionRequest
-    c = PolicyCoordinator(resolve_baseline('predicted-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('predicted-resident'),
         budget_mib=100, emergency_free_mib=0, operation_headroom_mib=0,
         physical_sample=lambda: (80*MIB, 1000*MIB))
     observed = [0]
@@ -716,7 +716,7 @@ def test_no_psi_reclaim_signal_recovers_without_assuming_guest_backing_is_freed(
 @pytest.mark.parametrize('scale,expected', [(1, 21), (.8, 26), (.75, 28)])
 def test_resident_capacity_survives_creation_until_cleanup(scale, expected):
     from math import ceil
-    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('uncontrolled-resident'),
                           budget_mib=128*1024, emergency_free_mib=0, operation_headroom_mib=0,
                           resident_capacity_accounting=True,
                           physical_sample=lambda: (0, 128*1024*MIB))
@@ -736,7 +736,7 @@ def test_resident_capacity_survives_creation_until_cleanup(scale, expected):
 
 @pytest.mark.parametrize('pure_ledger', [False, True])
 def test_resident_capacity_admission_ignores_physical_pressure_only_when_enabled(pure_ledger):
-    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('uncontrolled-resident'),
                           budget_mib=100, emergency_free_mib=10, operation_headroom_mib=0,
                           startup_headroom_mib=200,
                           resident_capacity_accounting=pure_ledger,
@@ -759,7 +759,7 @@ def test_resident_capacity_admission_ignores_physical_pressure_only_when_enabled
 def test_pure_ledger_does_not_read_physical_admission_samplers():
     def unexpected():
         raise AssertionError('physical admission must not run')
-    c = PolicyCoordinator(resolve_baseline('uncontrolled-resident').as_policy(),
+    c = PolicyCoordinator(fixture_policy('uncontrolled-resident'),
                           budget_mib=10, emergency_free_mib=10, operation_headroom_mib=0,
                           resident_capacity_accounting=True, physical_sample=unexpected)
     c.demand.sample = unexpected

@@ -12,10 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from clawbox.experiments import (
-    BASELINES, ensure_supported_experiment, expand_matrix, load_experiment,
+    ensure_supported_experiment, expand_matrix, load_experiment,
     spec_digest,
 )
-from clawbox.experiments.preset_view import DIMENSIONS, dimensions
 from clawbox.experiments.spec import ExperimentSpec, PolicySpec
 
 
@@ -49,7 +48,7 @@ def positive_float_or_auto(value: str) -> float | str:
 
 def emit_overview(value: dict[str, Any]) -> None:
     if 'dimensions' in value:
-        print(f"Experiment: {value['experiment_id']} | recipe: {value['recipe']} | trials: {value['arm_count']}")
+        print(f"Experiment: {value['experiment_id']} | baseline: {value['arms'][0]['name']} | trials: {value['arm_count']}")
         dependency_limit = value["execution"].get(
             "dependency_install_concurrency"
         )
@@ -76,118 +75,46 @@ def emit_overview(value: dict[str, Any]) -> None:
                 print(f'  Warning: {warning}')
         print('Use describe --json for full effective resources and evidence; launch verifies prerequisites.')
         return
-    """Render the pre-run resource shape for a human at the terminal."""
-    runtime = value["runtime"]
-    tool = value["tool"]
-    print(f"Experiment: {value['experiment_id']}")
-    print(f"Driver/model: {value['agent_driver']} / {value['inference_backend']}")
-    if value.get("suite"):
-        print(f"Suite: {value['suite']}; ablations={value['suite_ablations']}")
-    if value.get("heterogeneous_tool_shapes"):
-        print("Per Agent: case-specific Tool shape; see assigned totals below")
-    else:
-        print(f"Per Agent: Runtime={runtime['vcpu']} vCPU/{runtime['memory_gib']:g} GiB, "
-              f"Tool={tool['vcpu']} vCPU/{tool['memory_gib']:g} GiB, "
-              f"pair={value['pair_memory_gib']:g} GiB")
-    dependency_limit = value["execution"].get("dependency_install_concurrency")
-    print(
-        "Dependency installs: unlimited"
-        if dependency_limit is None
-        else f"Dependency installs: max {dependency_limit} active (explicit gate)"
-    )
-    for warning in value.get("warnings", []):
-        print(f"Warning: {warning}")
-    if value.get("compute_nodes"):
-        print(f"Compute placement: {value['placement_policy']} (Runtime + Tool stay together)")
-        print(
-            f"Memory scheduling: {value['memory_scheduling']}; "
-            f"lifecycle concurrency: {value['pool_transfer_concurrency']}; "
-            f"checkpoint/restore concurrency: {value['snapshot_transfer_concurrency']}"
-        )
-        for node in value["compute_nodes"]:
-            print(f"  {node['node_id']}: NUMA {node['numa_node']}, CPUs {node['cpus']}, "
-                  f"LOW/HIGH/HARD={node['low_watermark_mib']/1024:g}/"
-                  f"{node['high_watermark_mib']/1024:g}/{node['memory_capacity_mib']/1024:g} GiB")
-        if value.get("session_compute_nodes"):
-            print("  Session node IDs: " + ", ".join(value["session_compute_nodes"]))
-        print("  Aggregate capacities below are sums; admission is independent on each compute node.")
-    print(f"Lifecycle admission: {value['lifecycle_admission']}; proactive cache reclaim: {value['proactive_cache_reclaim']}")
-    print("Concurrency:")
-    for row in value["concurrency"]:
-        print(
-            f"  c{row['agents']}: {row['vm_count']} VMs, "
-            f"{row['offered_vcpu']} offered vCPU, "
-            f"{row['offered_pair_memory_gib']:g} GiB offered / "
-            f"{row['pool_memory_gib']:g} GiB pool = "
-            f"{row['offered_to_pool_ratio']:.3f}x"
-            + (" (offered configured capacity exceeds policy budget)" if row["offered_provisioned_capacity_exceeds_policy_budget"] else "")
-        )
-    execution = value["execution"]
-    safety = value["safety"]
-    schedule_detail = (
-        f"window={execution['poisson_arrival_window_fraction']:g}×median-trace"
-        if execution["arrival_schedule"] == "poisson"
-        else f"stagger={execution['stagger_interval_seconds']:g}s"
-    )
-    print(
-        f"Schedule: {execution['arrival_schedule']} "
-        f"({schedule_detail}), "
-        f"seed={execution['random_seed']}"
-    )
-    print(
-        f"Safety: host free floor={safety['emergency_free_memory_gib']:g} GiB, "
-        f"checkpoint/restore headroom={safety['checkpoint_restore_headroom_gib']:g} GiB"
-    )
-    admission = value["admission"]
-    local_capacity = admission["physical_local_capacity_gib"]
-    if admission.get("local_low_watermark_gib") is not None:
-        print(
-            "Memory scopes: "
-            f"LOCAL LOW/HIGH/HARD={admission['local_low_watermark_gib']:g}/"
-            f"{admission['local_high_watermark_gib']:g}/{local_capacity:g} GiB, "
-            f"shared pool={admission['shared_pool_capacity_gib']:g} GiB, "
-            f"live-borrow cap={admission['shared_live_borrow_limit_gib'] or 0:g} GiB, "
-            f"combined live cgroup limit={admission['combined_live_cgroup_limit_gib']:g} GiB"
-        )
-    else:
-        print(
-            "Memory scopes: "
-            f"physical LOCAL cgroup={local_capacity if local_capacity is not None else 'unknown'} GiB, "
-            f"experiment policy budget={admission['policy_budget_gib']:g} GiB, "
-            f"usable after operation headroom={admission['available_after_headroom_gib']:g} GiB"
-        )
-    static = admission["static"]
-    print(
-        f"Fixed admission: {static['per_command_mib']} MiB, "
-        f"reservation-only ceiling={static['reservation_only_slots']} concurrent commands"
-    )
-    p50 = admission.get("p50")
-    if p50:
-        if p50.get("error"):
-            print(f"Predicted admission: unavailable ({p50['error']})")
-        elif p50.get("mode") in {"runtime", "cold-start"}:
-            print(f"Predicted admission: {p50['mode']} ClawTune KB={p50['kb_path']}, reservation scale={p50['reservation_scale']:g}")
-        else:
-            print(
-                "Predicted admission: calibrated host growth range="
-                f"{p50['min_mib']:g}..{p50['max_mib']:g} MiB "
-                f"(median={p50['median_mib']:g}, entries={p50['entry_count']}), "
-                "reservation-only ceiling at max="
-                f"{p50['reservation_only_slots_at_max']} concurrent commands"
-            )
-    print("Admission ceilings above exclude measured resident VM memory; run results enforce both.")
-    print(f"Policies ({len(value['policies'])}), arms ({value['arm_count']}):")
-    for policy in value["policies"]:
-        labels = dimensions(PolicySpec.model_validate(policy))
-        print(
-            f"  {policy['name']}: " + ", ".join(f"{key}={item}" for key, item in labels.items())
-        )
-    for name, resources in value["effective_policy_resources"].items():
-        print(f"  {name}: execution pool={resources['pool_memory_gib']:g} GiB, "
-              f"shared pool={resources['shared_pool_gib']:g} GiB, "
-              f"placement={resources['placement_policy']}, lifecycle={resources['lifecycle_admission']}, "
-              f"runtime_control={resources['runtime_control']}, "
-              f"snapshot migration={'enabled' if resources['snapshot_enabled'] else 'disabled'}")
+
+
+
+def configuration_arguments(command):
+    command.add_argument('spec', type=Path, nargs='?', help='internal resolved run snapshot')
+    command.add_argument('--baseline', type=Path, help='baseline YAML with all system and policy settings')
+    command.add_argument('--workload', type=Path, help='workload YAML with tasks and submission settings')
+
+
+def configured_spec(args):
+    from clawbox.experiments.configuration import load_configuration
+    baseline, workload = getattr(args, 'baseline', None), getattr(args, 'workload', None)
+    if baseline is not None or workload is not None:
+        if baseline is None or workload is None or args.spec is not None:
+            raise ValueError('supply both --baseline and --workload, without a positional snapshot')
+        return load_configuration(baseline, workload)
+    if args.spec is None:
+        raise ValueError('supply --baseline BASELINE.yaml --workload WORKLOAD.yaml')
+    return load_experiment(args.spec)
+
+
+def materialize_configuration(args, spec):
+    from clawbox.experiments.configuration import dump_experiment
+    if getattr(args, 'baseline', None) is None:
+        return args.spec
+    directory = args.output_root / '.configurations'
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (spec_digest(spec) + '.yaml')
+    if not path.exists():
+        # An immutable, content-addressed snapshot feeds the existing launcher.
+        try:
+            temporary = directory / (path.name + '.' + uuid.uuid4().hex + '.tmp')
+            temporary.write_text(dump_experiment(spec), encoding='utf-8')
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    if spec_digest(load_experiment(path)) != spec_digest(spec):
+        raise ValueError(f'configuration snapshot mismatch: {path}')
+    return path
 
 
 def parser() -> argparse.ArgumentParser:
@@ -197,14 +124,18 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="group", required=True)
     experiment = commands.add_parser("experiment")
     sub = experiment.add_subparsers(dest="command", required=True)
-    catalog = sub.add_parser('recipes', help='list six-dimension experiment recipes')
-    catalog.add_argument('--json', action='store_true', dest='as_json')
-    sub.add_parser('schema', help='print the complete editable schema-4 JSON Schema')
+    schema = sub.add_parser('schema', help='print baseline or workload JSON Schema')
+    schema.add_argument('kind', choices=('baseline', 'workload'))
+    resolve = sub.add_parser('resolve', help='freeze a baseline and workload without launching VMs')
+    configuration_arguments(resolve)
+    resolve.add_argument('--output', type=Path, required=True)
     cache = sub.add_parser('base-cache', help='prepare fixed shared-DRAM template RAM caches before VM arrivals')
     cache_actions = cache.add_subparsers(dest='cache_action', required=True)
     cache_init = cache_actions.add_parser('init', help='resolve selected template RAM files from native catalogs into a reviewable YAML')
     cache_init.add_argument('config', type=Path)
-    cache_init.add_argument('--spec', type=Path, required=True)
+    cache_init.add_argument('--baseline', type=Path, required=True)
+    cache_init.add_argument('--workload', type=Path, required=True)
+    cache_init.set_defaults(spec=None)
     cache_init.add_argument('--template', action='append', required=True)
     cache_init.add_argument('--capacity-mib', type=int, required=True)
     cache_init.add_argument('--vmm-binary', help='explicit installed Shim file for nonstandard component roots; default: template catalog component version')
@@ -218,7 +149,7 @@ def parser() -> argparse.ArgumentParser:
     cache_cleanup.add_argument('--config', type=Path, help='also recover interrupted preparations owned by this exact plan')
     for name in ("validate", "plan", "run"):
         command = sub.add_parser(name)
-        command.add_argument("spec", type=Path)
+        configuration_arguments(command)
         if name == "validate":
             command.add_argument("--inputs", action="store_true", help="also parse workload traces and prediction files")
         if name == "run":
@@ -337,17 +268,17 @@ def parser() -> argparse.ArgumentParser:
     setup.add_argument("--warm-gib", type=int, default=128)
     setup.add_argument("--warm-node", type=int, default=1)
     doctor = sub.add_parser("doctor", help="verify services, templates, memory pool and WARM storage")
-    doctor.add_argument("spec", type=Path)
+    configuration_arguments(doctor)
     doctor.add_argument("--probe-vm", action="store_true")
     qualify = sub.add_parser("qualify", help="run a bounded real-VM capability smoke")
-    qualify.add_argument("spec", type=Path)
+    configuration_arguments(qualify)
     qualify.add_argument("--concurrency", type=int)
     qualify.add_argument("--receipt", type=Path)
     sharing = sub.add_parser(
         "prove-template-sharing",
         help="verify every Tool template once and freeze reusable physical-sharing evidence",
     )
-    sharing.add_argument("spec", type=Path)
+    configuration_arguments(sharing)
     sharing.add_argument("--output", required=True, type=Path)
     sharing.add_argument("--artifact-root", type=Path)
     sharing.add_argument(
@@ -358,7 +289,7 @@ def parser() -> argparse.ArgumentParser:
         "launch",
         help="validate, refresh host state, qualify when needed, and run or resume",
     )
-    launch.add_argument("spec", type=Path)
+    configuration_arguments(launch)
     launch.add_argument("--apply-host", type=Path, metavar="HOST.yaml",
                         help="apply a reviewed host YAML before a new/resumed run; save the verified profile beside it as .json; requires an idle VM host")
     launch.add_argument("--run-id")
@@ -372,7 +303,7 @@ def parser() -> argparse.ArgumentParser:
     importer.add_argument("--output", required=True, type=Path)
     importer.add_argument("--python", default="python3")
     sim_inputs = sub.add_parser("prepare-serving-sim", help="prepare GPU replay inputs and a trace-free CPU workload/manifest")
-    sim_inputs.add_argument("spec", type=Path)
+    configuration_arguments(sim_inputs)
     sim_inputs.add_argument("--output", required=True, type=Path)
     sim_inputs.add_argument("--source-map", type=Path, help="JSON object mapping case IDs to original format-5 files; relative paths use this file's directory")
     importer.add_argument(
@@ -436,159 +367,9 @@ def parser() -> argparse.ArgumentParser:
     describe = sub.add_parser(
         "describe", help="show VM totals, memory overcommit, policies, and arm count",
     )
-    describe.add_argument("spec", type=Path)
+    configuration_arguments(describe)
     describe.add_argument("--json", action="store_true", dest="as_json")
-    baselines = sub.add_parser(
-        "baselines", help="list legacy schema-3 presets by comparison family; use recipes for new experiments",
-    )
-    baselines.add_argument("--all", action="store_true", help="include deprecated policies")
-    baselines.add_argument("--json", action="store_true", dest="as_json")
-    configure = sub.add_parser(
-        "configure", help="create an editable experiment and explicit comparison matrix",
-    )
-    configure.add_argument("base", type=Path, help="six-dimension YAML, or an existing input with --recipe")
-    configure.add_argument("output", type=Path, help="new experiment YAML")
-    configure.add_argument(
-        "--profile", type=Path,
-        default=None,
-        help="explicitly apply a host profile; default host.json fills missing template IDs without replacing BASE IDs",
-    )
-    configure.add_argument("--force", action="store_true", help="replace the output file")
-    configure.add_argument("--experiment-id")
-    from clawbox.experiments.design import RECIPES
-    configure.add_argument('--recipe', choices=RECIPES,
-                           help='generate explicit six-dimension comparison arms (schema 4)')
-    configure.add_argument('--checkpoint-axis', choices=('encoding', 'storage', 'residency'))
-    configure.add_argument('--fixed-methods', action='store_true',
-                           help='freeze a controlled single-family study, resetting unrelated policy switches')
-    configure.add_argument('--set', action='append', default=[], dest='mechanism_settings',
-                           metavar='GROUP.FIELD=VALUE', help='edit a common mechanism or conditions.field using a YAML value')
-    configure.add_argument("--suite", choices=("admission", "numa-snapshot"),
-                           help="generate a matched two-arm comparison")
-    configure.add_argument("--ablations", action=argparse.BooleanOptionalAction, default=None,
-                           help="include intermediate arms for the selected suite")
-    configure.add_argument("--runtime-control", choices=("off", "no_control",
-                           "phase_memcg", "release_cpu"),
-                           help="optional pressure/progress control; suite deployment baseline stays off")
-    configure.add_argument("--prediction-mode", choices=("runtime", "frozen", "cold-start", "host-live"),
-                           help="runtime: trained frozen KB; cold-start: immutable seed; host-live: pair-local host learning; frozen: command table")
-    configure.add_argument("--prediction-reservation-scale", type=float,
-                           help="positive multiplier on predicted host memory growth; default 1")
-    configure.add_argument("--admission-margin-mib", type=int,
-                           help="global safety margin in MiB; default 256")
-    configure.add_argument("--runtime-poll-interval-seconds", type=float,
-                           help="Runtime control sampling interval; default 0.5")
-    configure.add_argument("--trace")
-    configure.add_argument(
-        "--workload-manifest",
-        help="manifest from experiment import-corpus; selects unique cases",
-    )
-    configure.add_argument("--case-id")
-    configure.add_argument("--prompt")
-    configure.add_argument("--repository", help="repository identity stored with the selected case")
-    configure.add_argument("--base-commit", help="repository revision expected in the Tool image")
-    configure.add_argument("--validation-command")
-    configure.add_argument("--repetitions", type=int)
-    configure.add_argument(
-        "--session-assignment", choices=("single_case", "round_robin", "unique", "grouped"),
-    )
-    configure.add_argument('--rollouts-per-case', type=int, help='independent simultaneous rollouts per case for grouped assignment (default 1)')
-    configure.add_argument("--concurrency", help="comma-separated offered levels, e.g. 1,5,60")
-    configure.add_argument(
-        "--baseline", action="append", dest="baselines",
-        choices=tuple(
-            name for name, value in BASELINES.items()
-            if value.implementation_status == "implemented"
-        ),
-        help="canonical baseline; repeat to build a comparison matrix",
-    )
-    configure.add_argument("--runtime-template-id")
-    configure.add_argument("--tool-template-id")
-    configure.add_argument("--runtime-image-reference")
-    configure.add_argument("--tool-image-reference")
-    configure.add_argument("--runtime-image-digest")
-    configure.add_argument("--tool-image-digest")
-    configure.add_argument("--runtime-vcpu", type=int)
-    configure.add_argument("--tool-vcpu", type=int)
-    configure.add_argument("--runtime-memory-gib", type=float)
-    configure.add_argument("--tool-memory-gib", type=float)
-    configure.add_argument(
-        "--tool-workspace",
-        help="absolute repository directory inside the Tool VM image",
-    )
-    configure.add_argument("--target-node")
-    configure.add_argument(
-        "--placement-policy",
-        choices=("os_default", "round_robin", "load_aware", "explicit",
-                 "affinity", "snapshot_aware"),
-    )
-    configure.add_argument("--memory-scheduling", choices=("static", "local_only", "snapshot_only", "joint"))
-    configure.add_argument("--session-compute-nodes", help="comma-separated compute node IDs for explicit placement")
-    configure.add_argument("--pool-memory-gib", type=float)
-    configure.add_argument("--emergency-free-memory-gib", type=float)
-    configure.add_argument("--checkpoint-headroom-gib", type=float)
-    configure.add_argument(
-        "--snapshot-mechanism", choices=("incremental-cow", "full-copy"),
-    )
-    configure.add_argument(
-        "--snapshot-storage", choices=("tiered", "warm-only"),
-    )
-    configure.add_argument("--warm-root")
-    configure.add_argument("--warm-memory-gib", type=float)
-    configure.add_argument("--cold-root")
-    configure.add_argument(
-        "--static-tool-memory-mib", type=static_memory_value,
-        help="fixed Tool admission in MiB, or auto for training-artifact P90",
-    )
-    configure.add_argument(
-        "--prediction-artifact",
-        help="bootstrap-v2 seed directory for cold-start; clawbox_prediction_v2 file for runtime/frozen",
-    )
-    configure.add_argument(
-        "--template-base-sharing-artifact",
-        help="reusable proof from experiment prove-template-sharing for the exact Tool templates",
-    )
-    configure.add_argument(
-        "--arrival-schedule", choices=("burst", "fixed_stagger", "poisson")
-    )
-    configure.add_argument("--stagger-seconds", type=float)
-    configure.add_argument("--poisson-arrival-window-fraction", type=float)
-    configure.add_argument(
-        "--poisson-arrival-window-seconds", type=float,
-        help=("fixed positive expected Poisson arrival window in seconds; "
-              "overrides the trace-duration fraction"),
-    )
-    configure.add_argument("--random-seed", type=int)
-    configure.add_argument("--arm-timeout-seconds", type=int)
-    configure.add_argument("--command-timeout-seconds", type=int)
-    configure.add_argument(
-        "--dependency-install-concurrency", type=int,
-        help=("positive arm-wide apt/pip command limit; omitted means unlimited "
-              "and clears a saved gate from BASE"),
-    )
-    configure.add_argument("--time-scale", type=float)
-    configure.add_argument("--inference-backend", choices=("replay", "api", "serving_sim"))
-    configure.add_argument("--serving-sim-catalog-manifest", help="prepared CPU/GPU trace bundle manifest")
-    configure.add_argument("--model")
-    configure.add_argument("--base-url")
-    configure.add_argument("--api-key-env")
-    configure.add_argument(
-        "--launch", action="store_true",
-        help="validate, qualify, and run the generated spec after writing it",
-    )
-    configure.add_argument("--run-id", help="run ID used with --launch")
-    configure.add_argument(
-        "--qualification-concurrency", type=int,
-        help="override qualification concurrency used with --launch",
-    )
-    configure.add_argument(
-        "--force-qualify", action="store_true",
-        help="rerun qualification even when the existing receipt is valid",
-    )
-    configure.add_argument(
-        "--detach", action="store_true",
-        help="start the formal run in the background when used with --launch",
-    )
+
     return root
 
 
@@ -600,7 +381,8 @@ def launch_experiment(args: argparse.Namespace) -> int:
     from clawbox.experiments.reporting import write_run_report_artifacts
     from clawbox.experiments.supervisor import status_for_run
 
-    spec = load_experiment(args.spec)
+    spec = configured_spec(args)
+    args.spec = materialize_configuration(args, spec)
     ensure_supported_experiment(spec)
     run_id = args.run_id or f"run-{uuid.uuid4().hex[:16]}"
     run_root = args.output_root / run_id
@@ -632,7 +414,7 @@ def launch_experiment(args: argparse.Namespace) -> int:
             return 0
         action = "resume"
 
-    receipt_path = getattr(args, "qualification", None) or default_receipt_path(args.spec)
+    receipt_path = getattr(args, "qualification", None) or default_receipt_path(materialize_configuration(args, spec))
     qualification_reused = False
     if not getattr(args, "force_qualify", False):
         try:
@@ -717,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not isinstance(sources, dict) or not all(isinstance(v, str) for v in sources.values()):
                     raise ValueError("--source-map requires a JSON object of case ID to source file path")
                 sources = {key: str((args.source_map.resolve().parent / value).resolve()) for key, value in sources.items()}
-            emit(prepare_serving_sim(load_experiment(args.spec), args.output, source_map=sources))
+            emit(prepare_serving_sim(configured_spec(args), args.output, source_map=sources))
             return 0
         if args.command == "import-corpus":
             from clawbox.replay.import_corpus import prepare_corpus
@@ -761,7 +543,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "base-cache":
             from clawbox.experiments import base_cache
             if args.cache_action == "init":
-                emit(base_cache.init_plan(args.config, spec_path=args.spec, templates=args.template,
+                spec = configured_spec(args)
+                emit(base_cache.init_plan(args.config, spec_path=materialize_configuration(args, spec), templates=args.template,
                                          capacity_mib=args.capacity_mib, vmm_binary=args.vmm_binary))
             elif args.cache_action == "prepare":
                 emit(base_cache.prepare(base_cache.load_plan(args.config), apply=args.apply))
@@ -872,7 +655,7 @@ def main(argv: list[str] | None = None) -> int:
             emit(snapshot_host.cleanup(storage_spec, execute=args.apply))
             return 0
         if args.command == "setup":
-            from clawbox.lab import setup as setup_host
+            from clawbox.experiments.host_runtime import setup as setup_host
 
             profile = setup_host(args)
             emit({"ready": True, "profile": profile})
@@ -881,9 +664,9 @@ def main(argv: list[str] | None = None) -> int:
             from clawbox.experiments.qualification import (
                 host_profile_for, require_host_ready,
             )
-            from clawbox.lab import wait_for_vm_ready
+            from clawbox.experiments.host_runtime import wait_for_vm_ready
 
-            spec = load_experiment(args.spec)
+            spec = configured_spec(args)
             ensure_supported_experiment(spec)
             require_host_ready(spec)
             if args.probe_vm:
@@ -896,11 +679,11 @@ def main(argv: list[str] | None = None) -> int:
                 default_receipt_path, qualify,
             )
 
-            spec = load_experiment(args.spec)
+            spec = configured_spec(args)
             ensure_supported_experiment(spec)
             receipt = qualify(
                 spec, output_base=args.output_root,
-                receipt_path=args.receipt or default_receipt_path(args.spec),
+                receipt_path=args.receipt or default_receipt_path(materialize_configuration(args, spec)),
                 concurrency=args.concurrency,
             )
             emit(receipt)
@@ -911,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
                 write_template_base_sharing_artifact,
             )
 
-            spec = load_experiment(args.spec)
+            spec = configured_spec(args)
             ensure_supported_experiment(spec)
             if spec.schema_version == 4:
                 design = deepcopy(spec.design)
@@ -951,322 +734,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "launch":
             return launch_experiment(args)
         if args.command == 'schema':
-            from clawbox.experiments.design import Design
-            emit(Design.model_json_schema())
+            from clawbox.experiments.configuration import BaselineConfig, WorkloadConfig
+            emit((BaselineConfig if args.kind == 'baseline' else WorkloadConfig).model_json_schema())
             return 0
-        if args.command == 'recipes':
-            from clawbox.experiments.design import RECIPES, recipe_arms
-            rows = []
-            for recipe in RECIPES:
-                for axis in (('encoding', 'storage', 'residency') if recipe == 'checkpoint' else (None,)):
-                    rows.append(dict(recipe=recipe, checkpoint_axis=axis,
-                                     arms=recipe_arms(recipe, checkpoint_axis=axis)))
-            if args.as_json:
-                emit(rows)
-            else:
-                for row in rows:
-                    print(row['recipe'] + (('/'+row['checkpoint_axis']) if row['checkpoint_axis'] else '')
-                          + ': ' + ', '.join(a['name'] for a in row['arms']))
-            return 0
-        if args.command == "baselines":
-            admission_required = {
-                'fixed': ['resources.static_tool_memory_mib'],
-                'predicted': ['resources.prediction_artifact'],
-            }
-            rows = []
-            for name, value in BASELINES.items():
-                if not args.all and value.implementation_status != "implemented":
-                    continue
-                required_settings = list(
-                    admission_required.get(value.admission_policy.value, [])
-                )
-                if "resources.local_memory_cgroup" not in required_settings:
-                    required_settings.append("resources.local_memory_cgroup")
-                rows.append({
-                    "name": name,
-                    "admission": value.admission_policy.value,
-                    "runtime_control": value.runtime_control.value,
-                    "reclamation": value.reclamation_policy.value,
-                    "eviction": value.eviction_policy.value,
-                    "restore": value.restore_policy.value,
-                    "idle_release_ranking": value.as_policy().coordinates_release,
-                    "snapshot_scope": (
-                        "none" if value.reclamation_policy.value == "resident"
-                        else "agent_and_tool" if value.runtime_snapshot else "tool"
-                    ),
-                    "comparison_groups": list(value.comparison_groups),
-                    "required_settings": required_settings,
-                    "status": value.implementation_status,
-                })
-            if args.as_json:
-                emit(rows)
-            else:
-                print("Legacy schema-3 presets (compare only within a listed family; use schema-4 recipes for new studies):")
-                for row in rows:
-                    labels = dimensions(BASELINES[row['name']].as_policy())
-                    if row["snapshot_scope"] != "none":
-                        labels["snapshot_scope"] = row["snapshot_scope"]
-                        labels["release_ranking"] = (
-                            "measured_cost" if row["idle_release_ranking"]
-                            else "lru"
-                        )
-                    groups = ",".join(row["comparison_groups"]) or "standalone"
-                    requirement = (
-                        f", requires {', '.join(row['required_settings'])}"
-                        if row["required_settings"] else ""
-                    )
-                    status = "" if row["status"] == "implemented" else " [DEPRECATED]"
-                    print(
-                        f"  {row['name']}{status} [{groups}]: "
-                        + ", ".join(f"{key}={item}" for key, item in labels.items())
-                        + requirement
-                    )
-            return 0
-        if args.command == "configure":
-            from clawbox.experiments.configure import (
-                configure_experiment, dump_experiment, experiment_overview,
-                gib_to_mib,
-            )
-
-            if args.output.exists() and not args.force:
-                raise ValueError(
-                    f"output already exists: {args.output}; pass --force to replace it"
-                )
-            profile: dict[str, Any] = {}
-            profile_explicit = args.profile is not None
-            args.profile = args.profile or Path.home() / '.config' / 'clawbox' / 'host.json'
-            import yaml
-            base_document = yaml.safe_load(args.base.read_text(encoding='utf-8'))
-            if not isinstance(base_document, dict):
-                raise ValueError('BASE must be a YAML mapping')
-            base_environment = base_document.get('environment', base_document)
-            base_runtime = base_environment.get('runtime') or {}
-            base_tool = base_environment.get('sandbox') or {}
-            if args.profile.is_file():
-                try:
-                    profile = json.loads(args.profile.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
-                    raise ValueError(f"cannot read host profile {args.profile}: {exc}") from exc
-                if not isinstance(profile, dict):
-                    raise ValueError(f"host profile must be an object: {args.profile}")
-            runtime_profile = profile.get("runtime") or {}
-            tool_profile = profile.get("sandbox") or {}
-            if not isinstance(runtime_profile, dict) or not isinstance(tool_profile, dict):
-                raise ValueError(f"host profile has invalid template records: {args.profile}")
-            use_runtime_profile = (args.runtime_template_id is None and bool(runtime_profile)
-                                   and (profile_explicit or not base_runtime.get('template_id')))
-            use_tool_profile = (args.tool_template_id is None and bool(tool_profile)
-                                and (profile_explicit or not base_tool.get('template_id')))
-            required_profile_fields = {
-                "template_id", "source_image_reference", "image_digest", "vcpu", "memory_mib",
-            }
-            for label, record, selected in (
-                ("runtime", runtime_profile, use_runtime_profile),
-                ("sandbox", tool_profile, use_tool_profile),
-            ):
-                if selected and (missing := sorted(required_profile_fields - set(record))):
-                    raise ValueError(
-                        f"host profile {label} record is missing: {', '.join(missing)}"
-                    )
-
-            runtime_shape = runtime_profile if use_runtime_profile else base_runtime
-            tool_shape = tool_profile if use_tool_profile else base_tool
-            runtime_profile_shape_changed = args.runtime_template_id is None and bool(runtime_shape.get('template_id')) and (
-                (args.runtime_vcpu is not None
-                 and args.runtime_vcpu != runtime_shape.get("vcpu"))
-                or (args.runtime_memory_gib is not None
-                    and gib_to_mib(args.runtime_memory_gib, name="runtime memory")
-                    != runtime_shape.get("memory_mib"))
-            )
-            tool_profile_shape_changed = args.tool_template_id is None and bool(tool_shape.get('template_id')) and (
-                (args.tool_vcpu is not None
-                 and args.tool_vcpu != tool_shape.get("vcpu"))
-                or (args.tool_memory_gib is not None
-                    and gib_to_mib(args.tool_memory_gib, name="tool memory")
-                    != tool_shape.get("memory_mib"))
-            )
-            if runtime_profile_shape_changed:
-                raise ValueError(
-                    "changing Runtime CPU or memory requires a new Runtime template"
-                )
-            if tool_profile_shape_changed:
-                raise ValueError(
-                    "changing Tool CPU or memory requires a new Tool template"
-                )
-
-            spec = configure_experiment(
-                args.base,
-                recipe=args.recipe,
-                checkpoint_axis=args.checkpoint_axis,
-                fixed_methods=args.fixed_methods,
-                mechanism_settings=args.mechanism_settings,
-                suite=args.suite,
-                suite_ablations=args.ablations,
-                runtime_control=args.runtime_control,
-                prediction_mode=args.prediction_mode,
-                prediction_reservation_scale=args.prediction_reservation_scale,
-                admission_margin_mib=args.admission_margin_mib,
-                runtime_poll_interval_seconds=args.runtime_poll_interval_seconds,
-                host_profile=profile or None,
-                compute_nodes=profile.get("compute_nodes"),
-                placement_policy=args.placement_policy,
-                session_compute_nodes=args.session_compute_nodes.split(",") if args.session_compute_nodes else None,
-                experiment_id=args.experiment_id,
-                trace=args.trace,
-                case_id=args.case_id,
-                prompt=args.prompt,
-                repository=args.repository,
-                base_commit=args.base_commit,
-                validation_command=args.validation_command,
-                repetitions=args.repetitions,
-                session_assignment=args.session_assignment,
-                concurrency=args.concurrency,
-                baseline_names=args.baselines or (),
-                runtime_template_id=(
-                    runtime_profile.get("template_id") if use_runtime_profile
-                    else args.runtime_template_id
-                ),
-                tool_template_id=(
-                    tool_profile.get("template_id") if use_tool_profile
-                    else args.tool_template_id
-                ),
-                runtime_image_reference=(
-                    args.runtime_image_reference
-                    if args.runtime_image_reference is not None
-                    else runtime_profile.get("source_image_reference")
-                    if use_runtime_profile else None
-                ),
-                tool_image_reference=(
-                    args.tool_image_reference
-                    if args.tool_image_reference is not None
-                    else tool_profile.get("source_image_reference")
-                    if use_tool_profile else None
-                ),
-                runtime_image_digest=(
-                    args.runtime_image_digest
-                    if args.runtime_image_digest is not None
-                    else runtime_profile.get("image_digest")
-                    if use_runtime_profile else None
-                ),
-                tool_image_digest=(
-                    args.tool_image_digest
-                    if args.tool_image_digest is not None
-                    else tool_profile.get("image_digest")
-                    if use_tool_profile else None
-                ),
-                runtime_vcpu=(
-                    args.runtime_vcpu
-                    if args.runtime_vcpu is not None
-                    else runtime_profile.get("vcpu") if use_runtime_profile else None
-                ),
-                tool_vcpu=(
-                    args.tool_vcpu
-                    if args.tool_vcpu is not None
-                    else tool_profile.get("vcpu") if use_tool_profile else None
-                ),
-                runtime_memory_gib=(
-                    args.runtime_memory_gib
-                    if args.runtime_memory_gib is not None
-                    else runtime_profile.get("memory_mib", 0) / 1024
-                    if use_runtime_profile else None
-                ),
-                tool_memory_gib=(
-                    args.tool_memory_gib
-                    if args.tool_memory_gib is not None
-                    else tool_profile.get("memory_mib", 0) / 1024
-                    if use_tool_profile else None
-                ),
-                tool_workspace=args.tool_workspace,
-                target_node=(
-                    args.target_node or profile.get("node") or os.getenv("CUBE_NODE")
-                ),
-                pool_memory_gib=(
-                    args.pool_memory_gib
-                    if args.pool_memory_gib is not None else
-                    profile.get("local_memory_high_watermark_mib", 0) / 1024
-                    if profile.get("local_memory_high_watermark_mib") else None
-                ),
-                emergency_free_memory_gib=args.emergency_free_memory_gib,
-                checkpoint_headroom_gib=args.checkpoint_headroom_gib,
-                local_memory_capacity_mib=profile.get("local_memory_capacity_mib"),
-                local_memory_low_watermark_mib=profile.get(
-                    "local_memory_low_watermark_mib"
-                ),
-                local_memory_high_watermark_mib=profile.get(
-                    "local_memory_high_watermark_mib"
-                ),
-                shared_memory_borrow_limit_mib=profile.get(
-                    "shared_memory_borrow_limit_mib"
-                ),
-                warm_memory_capacity_mib=(
-                    gib_to_mib(args.warm_memory_gib, name="warm memory")
-                    if args.warm_memory_gib is not None
-                    else profile.get("warm_capacity_mib")
-                ),
-                local_memory_cgroup=profile.get("local_memory_cgroup"),
-                warm_snapshot_root=args.warm_root or profile.get("warm_root"),
-                cold_snapshot_root=args.cold_root or profile.get("cold_root"),
-                local_numa_node=profile.get("local_numa_node"),
-                warm_numa_node=profile.get("warm_numa_node"),
-                snapshot_mechanism=args.snapshot_mechanism,
-                snapshot_storage=args.snapshot_storage,
-                memory_scheduling=args.memory_scheduling,
-                static_tool_memory_mib=args.static_tool_memory_mib,
-                prediction_artifact=args.prediction_artifact,
-                template_base_sharing_artifact=args.template_base_sharing_artifact,
-                arrival_schedule=args.arrival_schedule,
-                workload_manifest=args.workload_manifest,
-                stagger_seconds=args.stagger_seconds,
-                poisson_arrival_window_fraction=(
-                    args.poisson_arrival_window_fraction
-                ),
-                poisson_arrival_window_seconds=(
-                    args.poisson_arrival_window_seconds
-                ),
-                random_seed=args.random_seed,
-                arm_timeout_seconds=args.arm_timeout_seconds,
-                command_timeout_seconds=args.command_timeout_seconds,
-                dependency_install_concurrency=(
-                    args.dependency_install_concurrency
-                ),
-                time_scale=args.time_scale,
-                inference_backend=args.inference_backend,
-                serving_sim_catalog_manifest=args.serving_sim_catalog_manifest,
-                model=args.model,
-                base_url=args.base_url,
-                api_key_env=args.api_key_env,
-            )
-            overview = experiment_overview(spec)
+        if args.command == 'resolve':
+            from clawbox.experiments.configuration import dump_experiment
+            if args.output.exists():
+                raise ValueError(f'refusing to overwrite {args.output}; choose a new output path')
+            spec = configured_spec(args)
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(dump_experiment(spec, compact=True), encoding="utf-8")
-            emit_overview(overview)
-            print(f"Wrote: {args.output}")
-            if args.launch:
-                launch_args = [
-                    "--output-root", str(args.output_root),
-                    "experiment", "launch", str(args.output),
-                    *(["--run-id", args.run_id] if args.run_id else []),
-                    *(
-                        ["--qualification-concurrency",
-                         str(args.qualification_concurrency)]
-                        if args.qualification_concurrency is not None else []
-                    ),
-                    *(["--force-qualify"] if args.force_qualify else []),
-                    *(["--detach"] if args.detach else []),
-                ]
-                return main(launch_args)
-            print(f"Next: clawbox --output-root <results> experiment launch {args.output}")
+            with args.output.open('x', encoding='utf-8') as stream:
+                stream.write(dump_experiment(spec))
+            emit({'output': str(args.output), 'specDigest': spec_digest(spec)})
             return 0
         if args.command == "describe":
-            from clawbox.experiments.configure import experiment_overview
+            from clawbox.experiments.configuration import experiment_overview
 
-            spec = load_experiment(args.spec)
+            spec = configured_spec(args)
             ensure_supported_experiment(spec)
             value = experiment_overview(spec)
             emit(value) if args.as_json else emit_overview(value)
             return 0
         if args.command in {"validate", "plan"}:
-            spec = load_experiment(args.spec)
+            spec = configured_spec(args)
             ensure_supported_experiment(spec)
             arms = expand_matrix(spec)
             result: dict[str, Any] = {
@@ -1295,8 +785,11 @@ def main(argv: list[str] | None = None) -> int:
                     f"result directory already exists: {output}; "
                     f"use experiment resume {run_id}"
                 )
-            spec_path = output / "experiment.yaml" if args.command == "resume" else args.spec
-            spec = load_experiment(spec_path)
+            if args.command == 'resume':
+                spec = load_experiment(output / 'experiment.yaml')
+            else:
+                spec = configured_spec(args)
+                args.spec = materialize_configuration(args, spec)
             ensure_supported_experiment(spec)
             if args.command == "run":
                 # Keep direct lower-level use actionable without repeating the
@@ -1307,7 +800,7 @@ def main(argv: list[str] | None = None) -> int:
             receipt_path = (
                 output / "qualification.json"
                 if args.command == "resume"
-                else args.qualification or default_receipt_path(args.spec)
+                else args.qualification or default_receipt_path(materialize_configuration(args, spec))
             )
             qualification_receipt = validate_receipt(spec, receipt_path)
             if args.command == 'resume':

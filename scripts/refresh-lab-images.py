@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from clawbox.clawtune_integration import source_revision
-from clawbox.lab import template_record
+from clawbox.experiments.host_runtime import template_record
 
 
 def call(argv, **kwargs):

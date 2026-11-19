@@ -18,7 +18,7 @@ _IMMUTABLE_KB_CACHE: dict[tuple[str, str], tuple[Any, Any]] = {}
 _IMMUTABLE_KB_CACHE_LOCK = Lock()
 _IMMUTABLE_ARTIFACT_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _IMMUTABLE_ARTIFACT_CACHE_LOCK = Lock()
-_IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str], bytes] = {}
+_IMMUTABLE_PREDICTION_CACHE: dict[tuple[str, str, str, str, bool], bytes] = {}
 _IMMUTABLE_PREDICTION_CACHE_LOCK = Lock()
 _VALIDATED_COLD_START_SEED_CACHE: dict[str, tuple[dict[str, Any], str]] = {}
 _VALIDATED_COLD_START_SEED_CACHE_LOCK = Lock()
@@ -308,8 +308,11 @@ class FrozenPredictionProvider:
 class P50PredictionProvider(FrozenPredictionProvider):
     """Frozen, pre-evaluation native model predictions, keyed by exact command."""
 
+    require_memory = True
+
     def __init__(self, path: Path, *, repository: str, sandbox_identity: dict | None = None,
-                 global_cold_start: bool = False) -> None:
+                 global_cold_start: bool = False, require_memory: bool = True) -> None:
+        self.require_memory = require_memory
         artifact = _immutable_artifact(path)
         payload = artifact[1]
         repository_matches = payload.get("repository") == repository
@@ -340,6 +343,7 @@ class P50PredictionProvider(FrozenPredictionProvider):
         selected = [row for row in observed or []
                     if row.get("prediction_source") == self.prediction_source]
         result = super().provenance(selected)
+        result['memory_prediction_required'] = self.require_memory
         if self.global_cold_start:
             calibrated_identities = self.payload.get("sandbox_identities") or []
             result.update(
@@ -350,6 +354,9 @@ class P50PredictionProvider(FrozenPredictionProvider):
                 ),
                 evaluation_sandbox_identity=self.evaluation_sandbox_identity,
             )
+        if not self.require_memory:
+            result.update(observed_fallback_levels={}, observed_fallback_rate=None)
+            return result
         primary_level = (
             self.admission_prediction_policy[0]["level"]
             if hasattr(self, "admission_prediction_policy") else "lattice"
@@ -402,9 +409,19 @@ class P50PredictionProvider(FrozenPredictionProvider):
                       ("raw_command_sha256", "canonical_prediction_key", "prediction_source")}
                 for key, value in self._by_digest.items()}
 
-    def _metadata(self, item: dict, command: str, digest: str) -> dict:
+    def _model_metadata(self, item: dict, command: str, digest: str) -> dict:
+        """Keep command identity and native targets without inventing memory estimates."""
         if digest != command_sha256(command):
             raise ValueError("P50 artifact command digest mismatch")
+        return {'prediction_source': self.prediction_source,
+                'raw_command_sha256': digest, 'canonical_prediction_key': digest,
+                'predicted_incremental_memory_mib': None,
+                'models': item.get('models'), 'kb_sha256': self.payload.get('kb_sha256')}
+
+    def _metadata(self, item: dict, command: str, digest: str) -> dict:
+        metadata = self._model_metadata(item, command, digest)
+        if not self.require_memory:
+            return metadata
         selected = select_p50(item.get("models") or {},
                               short_call_evidence=item.get("short_call_evidence"))
         calibration = self.payload.get('host_calibration') or {}
@@ -507,7 +524,8 @@ class RuntimePredictionProvider(P50PredictionProvider):
         digest = command_sha256(command)
         if not isinstance(runtime_metadata, dict) or runtime_metadata.get("raw_command_sha256") != digest:
             raise PredictionUnavailable("Runtime prediction command identity mismatch")
-        cache_key = (self.sha256, self.prediction_source, self.repository or "", digest)
+        cache_key = (self.sha256, self.prediction_source, self.repository or "", digest,
+                     self.require_memory)
         with _IMMUTABLE_PREDICTION_CACHE_LOCK:
             cached = _IMMUTABLE_PREDICTION_CACHE.get(cache_key)
         if cached is not None:
@@ -535,7 +553,9 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
     """Query one standard immutable ClawTune seed for any trace repository."""
 
     def __init__(self, path: Path, *, repository: str,
-                 sandbox_identity: dict | None = None, _metadata_only: bool = False) -> None:
+                 sandbox_identity: dict | None = None, _metadata_only: bool = False,
+                 require_memory: bool = True) -> None:
+        self.require_memory = require_memory
         from clawbox.clawtune_integration import use_clawtune
         use_clawtune()
         from clawtune_kb import validate_seed
@@ -623,8 +643,9 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
         self._query_lock = Lock()
 
     def _metadata(self, item: dict, command: str, digest: str, *, admission_policy=None) -> dict:
-        if digest != command_sha256(command):
-            raise ValueError("P50 artifact command digest mismatch")
+        metadata = self._model_metadata(item, command, digest)
+        if not self.require_memory:
+            return metadata
         selected = select_cold_start_p50(
             item.get("models") or {},
             self.admission_prediction_policy if admission_policy is None else admission_policy,
@@ -661,6 +682,36 @@ class ColdStartPredictionProvider(RuntimePredictionProvider):
         }
 
 
+def prediction_requires_memory(spec) -> bool:
+    """B with off/fixed admission consumes native duration targets only."""
+    from .spec_types import AdmissionPolicy
+    policies = (spec.policy,) if hasattr(spec, 'policy') else spec.policies
+    return (spec.execution.tool_call_cpu_policy != 'b'
+            or any(p.admission is AdmissionPolicy.PREDICTED for p in policies))
+
+
+def resolve_command_prediction(arm, request: dict, provider):
+    """Fetch once for every enabled consumer, independently of memory admission."""
+    from .spec_types import AdmissionPolicy
+    if (arm.policy.admission is not AdmissionPolicy.PREDICTED
+            and arm.execution.tool_call_cpu_policy != 'b'):
+        return None
+    if provider is None:
+        raise PredictionUnavailable('predicted admission or B CPU placement requires a prediction provider')
+    mode = arm.resources.prediction_mode
+    if mode == 'host-live':
+        prediction = request.get('prediction')
+        if not isinstance(prediction, dict) or prediction.get('prediction_source') != 'host_live_clawtune':
+            raise PredictionUnavailable('host-live requires a canonical receipt prediction')
+        return prediction
+    if mode in {'runtime', 'cold-start'}:
+        command = request.get('command')
+        if not isinstance(command, str) or command_sha256(command) != request['command_sha256']:
+            raise PredictionUnavailable('runtime prediction command text/digest mismatch; update the SSH shim')
+        return provider.resolve(command, request.get('prediction'))
+    return provider.resolve_digest(str(request['command_sha256']), request.get('prediction'))
+
+
 def prediction_provider_type(mode: str):
     if mode == 'host-live':
         return HostLivePredictionProvider
@@ -673,10 +724,13 @@ def prediction_provider_type(mode: str):
 
 class HostLivePredictionProvider(ColdStartPredictionProvider):
     """Admission calibration/provenance only; the host manager owns live queries."""
-    def __init__(self, path, *, repository, sandbox_identity=None):
-        super().__init__(path, repository=repository, sandbox_identity=sandbox_identity, _metadata_only=True)
+    def __init__(self, path, *, repository, sandbox_identity=None, require_memory=True):
+        super().__init__(path, repository=repository, sandbox_identity=sandbox_identity,
+                         _metadata_only=True, require_memory=require_memory)
 
     def _metadata(self, item: dict, command: str, digest: str) -> dict:
+        if not self.require_memory:
+            return self._model_metadata(item, command, digest)
         models = item.get('models') or {}
         policy = []
         for row in self.admission_prediction_policy:

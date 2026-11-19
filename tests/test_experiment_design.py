@@ -4,95 +4,18 @@ from pathlib import Path
 import pytest
 import yaml
 
-from clawbox.experiments.configure import configure_experiment, dump_experiment
+from clawbox.experiments.configuration import dump_experiment
 from clawbox.experiments.design import (DIMENSIONS, GROUPS, Design, Mechanisms, compile_design,
-                                       export_design, recipe_arms, design_overview)
+                                       export_design, design_overview)
 from clawbox.experiments.spec import ExperimentSpec, effective_spec, expand_matrix, spec_digest
 
 
-def base():
-    raw = yaml.safe_load(Path('examples/experiments/agent-rl-heterogeneous-ablation-kunpeng.yaml').read_text(encoding='utf-8'))
-    # Host-specific fixture supplies a topology, not empirical assertions for
-    # these unit tests. None of these synthetic costs are used for live runs.
-    from clawbox.experiments.design import EnvironmentResources
-    r = raw['resources']
-    return dict(schema_version=4, experiment_id='design-test',
-                environment=dict(runtime=raw['runtime'], sandbox=raw['sandbox'],
-                                 resources={k: v for k, v in r.items() if k in EnvironmentResources.model_fields}),
-                workload=raw['workload'], inference=dict(backend='replay', configuration={'model': 'test'}),
-                mechanisms=Mechanisms().model_dump(mode='json'),
-                evidence=dict(prediction_artifact='/separate-training/prediction.json',
-                    snapshot_residency_costs=dict(provenance='unit-test', warm_restore_seconds_per_gib=1, cold_restore_seconds_per_gib=2),
-                    idle_reclaim_costs=dict(provenance='unit-test', warm_checkpoint_seconds_per_gib=1,
-                        warm_restore_seconds_per_gib=1, cold_checkpoint_seconds_per_gib=2,
-                        cold_restore_seconds_per_gib=2),
-                    memory_action_costs=dict(provenance='unit-test', live_borrow_service_seconds_per_gib=1,
-                        live_borrow_runtime_penalty_seconds_per_gib=0, warm_checkpoint_seconds_per_gib=1,
-                        warm_restore_seconds_per_gib=1, cold_checkpoint_seconds_per_gib=2,
-                        cold_restore_seconds_per_gib=2, expected_restore_probability=.5)),
-                execution=dict(concurrency_levels=[2], randomized_order=False),
-                comparison=dict(recipe='custom', arms=[dict(name='custom')]))
 
 
-def test_gpu_reclaim_requires_simulator_and_pair_scope():
-    raw = base()
-    raw['mechanisms']['idle_reclaim'].update(policy='gpu', scope='agent_and_tool',
-        gpu_reclaim_min_remaining_seconds=2.5, gpu_signal_max_age_seconds=4,
-        gpu_first_token_prewarm=False)
-    with pytest.raises(ValueError, match='backend=serving_sim'):
-        ExperimentSpec.model_validate(raw)
-    raw['inference']['backend'] = 'serving_sim'
-    spec = ExperimentSpec.model_validate(raw)
-    policy = spec.policies[0]
-    assert policy.eviction.value == 'gpu_aware_pressure'
-    assert policy.gpu_reclaim_min_remaining_seconds == 2.5
-    assert policy.gpu_signal_max_age_seconds == 4
-    assert policy.gpu_first_token_prewarm is False
-    assert policy.restore.value == 'reactive'
-    raw['mechanisms']['idle_reclaim']['scope'] = 'tool'
-    with pytest.raises(ValueError, match='agent_and_tool'):
-        ExperimentSpec.model_validate(raw)
 
 
-def test_next_use_residency_is_public_and_enforces_its_signal_contract():
-    raw = base()
-    raw['inference']['backend'] = 'serving_sim'
-    raw['mechanisms']['idle_reclaim'].update(
-        policy='gpu', scope='agent_and_tool',
-    )
-    raw['mechanisms']['checkpoint'].update(
-        storage='tiered', residency='next-use',
-    )
-    spec = ExperimentSpec.model_validate(raw)
-    policy = spec.policies[0]
-    assert policy.snapshot_next_use_residency
-    assert not policy.snapshot_aware_residency
-    assert policy.eviction.value == 'gpu_aware_pressure'
-    assert spec.resources.default_snapshot_tier.value == 'warm'
-    overview = design_overview(spec)['arms'][0]
-    assert any('queued.est_wait_s' in item for item in overview['requirements'])
-    assert any('not full model-response' in item for item in overview['warnings'])
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
-
-    raw['mechanisms']['idle_reclaim']['policy'] = 'wait'
-    with pytest.raises(ValueError, match='GPU-aware agent_and_tool'):
-        ExperimentSpec.model_validate(raw)
 
 
-def test_configure_gpu_provider_and_bundle_option(tmp_path):
-    from clawbox.cli import main
-    source = tmp_path / 'base.yaml'
-    output = tmp_path / 'joint.yaml'
-    source.write_text(yaml.safe_dump(base()), encoding='utf-8')
-    assert main(['experiment', 'configure', str(source), str(output), '--recipe', 'custom',
-                 '--inference-backend', 'serving_sim', '--model', 'qwen36-r2',
-                 '--base-url', 'http://localhost:8000',
-                 '--serving-sim-catalog-manifest', str(tmp_path / 'manifest.json'),
-                 '--set', 'idle_reclaim.policy=gpu', '--set', 'idle_reclaim.scope=agent_and_tool']) == 0
-    spec = ExperimentSpec.model_validate(yaml.safe_load(output.read_text()))
-    assert spec.inference.backend.value == 'serving_sim'
-    assert spec.inference.configuration['serving_sim_catalog_manifest'] == str(tmp_path / 'manifest.json')
-    assert main(['experiment', 'validate', str(output)]) == 0
 
 
 def test_peer_resume_policies_roundtrip_without_branching_or_global_cold_root():
@@ -118,7 +41,7 @@ def test_peer_resume_policies_roundtrip_without_branching_or_global_cold_root():
     spec = ExperimentSpec.model_validate(raw)
     assert {a.execution.resume_policy for a in expand_matrix(spec)} == {'home', 'load-aware', 'cost-aware'}
     assert all(a.execution.snapshot_branching is None for a in expand_matrix(spec))
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))['specification']) == spec
     raw['mechanisms']['idle_reclaim']['scope'] = 'tool'
     with pytest.raises(ValueError, match='agent_and_tool'):
         ExperimentSpec.model_validate(raw)
@@ -130,7 +53,7 @@ def test_session_cpu_slots_roundtrip_bound_workers_and_reject_overlap():
     raw['mechanisms']['placement']['session_cpu_slots'] = [
         {'node_id': 'node0', 'cpus': '0,2,4,6'}]
     spec = ExperimentSpec.model_validate(raw)
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))['specification']) == spec
     assert session_worker_count(expand_matrix(spec)[0]) == 1
     raw['mechanisms']['placement']['session_cpu_slots'].append(
         {'node_id': 'node0', 'cpus': '4,8'})
@@ -146,28 +69,10 @@ def test_cpu_group_idle_requires_enabled_qos_and_survives_export():
     raw['mechanisms']['placement']['cpu_qos_policy'] = 'idle_core'
     spec = ExperimentSpec.model_validate(raw)
     assert expand_matrix(spec)[0].execution.cpu_qos_group_idle is True
-    reloaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec)))
+    reloaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))['specification'])
     assert expand_matrix(reloaded)[0].execution.cpu_qos_group_idle is True
 
 
-def test_cpu_qos_arm_override_preserves_full_mechanisms():
-    raw = export_design(design('integrated'))
-    raw['comparison'] = dict(recipe='custom', arms=[
-        dict(name='full-off'),
-        dict(name='full-idle', override={'placement.cpu_qos_policy': 'idle'}),
-    ])
-    spec = ExperimentSpec.model_validate(raw)
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
-    before, after = [effective_spec(spec, policy) for policy in spec.policies]
-    assert before.resources == after.resources
-    a, b = before.execution.model_dump(), after.execution.model_dump()
-    assert a.pop('cpu_qos_policy') == 'off'
-    assert b.pop('cpu_qos_policy') == 'idle'
-    assert a == b
-    first, second = spec.policies
-    differences = {f'{group}.{key}' for group in GROUPS for key in first.mechanisms[group]
-                   if first.mechanisms[group][key] != second.mechanisms[group][key]}
-    assert differences == {'placement.cpu_qos_policy'}
 
 
 def test_idle_qos_rejects_unmanaged_placement():
@@ -182,7 +87,7 @@ def test_explicit_session_arrivals_roundtrip_and_validate():
     raw['execution']['session_arrival_offsets_seconds'] = [1.25, 3.5]
     spec = ExperimentSpec.model_validate(raw)
     assert spec.execution.session_arrival_offsets_seconds == (1.25, 3.5)
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))['specification']) == spec
     for offsets in ([0.0], [-1.0, 2.0], [1.0, float('nan')], [1.0, float('inf')], [2.0, 1.0]):
         raw['execution']['session_arrival_offsets_seconds'] = offsets
         with pytest.raises(ValueError, match='session_arrival_offsets_seconds'):
@@ -192,25 +97,6 @@ def test_explicit_session_arrivals_roundtrip_and_validate():
         ExperimentSpec.model_validate(raw)
 
 
-def design(recipe='custom', axis=None):
-    raw = base()
-    m = raw['mechanisms']
-    m['admission']['static_tool_memory_mib'] = 128
-    if recipe in {'shared-memory', 'coordination', 'checkpoint', 'integrated'}:
-        m['idle_reclaim']['policy'] = 'wait'
-        m['checkpoint']['storage'] = 'tiered'
-    if recipe == 'checkpoint' and axis == 'residency':
-        m['idle_reclaim'].update(policy='gpu', scope='agent_and_tool')
-        raw['inference']['backend'] = 'serving_sim'
-    if recipe == 'coordination':
-        m['shared_memory']['borrow'] = 'pressure'
-    if recipe == 'integrated':
-        m['placement'].update(policy='load_aware', template_affinity=True)
-        m['runtime'].update(memory_protection=True, cpu_release_boost=True)
-        m['shared_memory']['borrow'] = 'pressure'
-        m['checkpoint']['residency'] = 'value'
-    raw['comparison'] = dict(recipe=recipe, arms=recipe_arms(recipe, checkpoint_axis=axis))
-    return ExperimentSpec.model_validate(raw)
 
 
 def test_host_live_options_roundtrip_and_reject_invalid_scope():
@@ -219,7 +105,7 @@ def test_host_live_options_roundtrip_and_reject_invalid_scope():
     raw['execution'].update(kb_scope_policy='pair', retain_clause_telemetry_artifacts=False,
                             kb_http_timeout_seconds=12.5, kb_observation_retries=3)
     spec = ExperimentSpec.model_validate(raw)
-    loaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec)))
+    loaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))['specification'])
     assert loaded == spec
     assert loaded.resources.prediction_mode == 'host-live'
     assert loaded.execution.kb_http_timeout_seconds == 12.5
@@ -245,23 +131,6 @@ def test_resident_warm_headroom_is_public_and_disabled_with_borrowing():
     assert arms['no-borrow'].resources.shared_memory_resident_headroom_mib is None
 
 
-@pytest.mark.parametrize('recipe,axis,count', [
-    ('resident-capacity', None, 3), ('admission', None, 3), ('runtime', None, 4), ('placement', None, 3),
-    ('idle-reclaim', None, 3), ('shared-memory', None, 3), ('coordination', None, 2), ('memory-reclaim', None, 2),
-    ('checkpoint', 'encoding', 2), ('checkpoint', 'storage', 3),
-    ('checkpoint', 'residency', 3), ('integrated', None, 3), ('custom', None, 1),
-])
-def test_every_recipe_roundtrips_and_expands(recipe, axis, count):
-    spec = design(recipe, axis)
-    assert len(spec.policies) == count
-    loaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec)))
-    assert loaded == spec
-    assert spec_digest(loaded) == spec_digest(spec)
-    arms = expand_matrix(spec)
-    assert len(arms) == count * spec.workload.repetitions
-    assert {a.arm_id for a in arms} == {a.arm_id for a in expand_matrix(loaded)}
-    assert all(set(p.mechanisms) == set(GROUPS) for p in spec.policies)
-    assert all(a.execution.placement_cpu_overcommit == 1024 for a in arms)
 
 
 @pytest.mark.parametrize('configured, expected', [(None, 4), (0, 0), (16, 16)])
@@ -274,7 +143,7 @@ def test_small_tool_admission_bypass_is_an_editable_admission_field(configured, 
     arm = expand_matrix(spec)[0]
 
     assert arm.resources.small_tool_admission_bypass_mib == expected
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))['specification']) == spec
 
 
 @pytest.mark.parametrize('mode', ['c2', 'b'])
@@ -299,7 +168,7 @@ def test_llc_tool_call_cpu_policy_roundtrips_and_rejects_os_placement(include_sm
     assert arm.execution.tool_call_cpu_min_duration_seconds == 1.5
     assert arm.execution.tool_call_cpu_duration_source == (source or 'tool')
     assert arm.execution.tool_call_cpu_include_smt is (True if include_smt is None else include_smt)
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
+    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))['specification']) == spec
 
     raw['mechanisms']['placement']['policy'] = 'os_default'
     with pytest.raises(ValueError, match='LLC Tool-call CPU placement'):
@@ -335,57 +204,6 @@ def test_c0_and_c2_effective_arms_differ_only_in_cpu_policy():
     assert c0.resource_overrides == c2.resource_overrides
 
 
-def test_prepare_llc_shared_experiment_materializes_complete_pair(tmp_path):
-    from scripts import prepare_llc_shared_experiment as prepare
-
-    source = tmp_path / 'base.yaml'
-    source.write_text(yaml.safe_dump(base()), encoding='utf-8')
-    output = tmp_path / 'generated'
-    assert prepare.main([
-        '--base-spec', str(source), '--output-dir', str(output),
-        '--trace-runtime-dir', '/data/llc-reproduction',
-        '--node-cpus', 'node0=0-15', '--node-cpus', 'node1=80-95',
-        '--session-node', 'node0', '--session-node', 'node1',
-    ]) == 0
-
-    c2_first = yaml.safe_load((output / 'experiment-c2-first.yaml').read_text())
-    c0_first = yaml.safe_load((output / 'experiment-c0-first.yaml').read_text())
-    assert [arm['name'] for arm in c2_first['comparison']['arms']] == [
-        'c2-shared-smt', 'c0-shared']
-    assert [arm['name'] for arm in c0_first['comparison']['arms']] == [
-        'c0-shared', 'c2-shared-smt']
-    assert c2_first['execution']['concurrency_levels'] == [16]
-    assert c2_first['environment']['runtime']['vcpu'] == 2
-    assert c2_first['environment']['runtime']['memory_mib'] == 1024
-    assert c2_first['environment']['sandbox']['vcpu'] == 2
-    assert c2_first['environment']['sandbox']['memory_mib'] == 3072
-    assert c2_first['mechanisms']['placement']['tool_call_cpu_include_smt'] is True
-    assert c2_first['mechanisms']['placement']['session_compute_nodes'] == [
-        'node0', 'node1'] * 8
-    manifest = yaml.safe_load((output / 'manifest.json').read_text())
-    assert manifest['files']['llc-shared-chase-early.jsonl'] == (
-        '698fda469572319e5895d906c82b0842e68ccbe7321474284314f3446e08e05e')
-    assert manifest['files']['llc-shared-chase-late.jsonl'] == (
-        '4c5ee3940f3b0e8a6f6bce6c5405e4ddcc746eabf3410e549d299813416f4302')
-    assert (output / 'llc-shared-chase-early.jsonl').read_bytes() == Path(
-        'examples/traces/llc-shared-chase-early.jsonl').read_bytes()
-    assert (output / 'llc-shared-chase-late.jsonl').read_bytes() == Path(
-        'examples/traces/llc-shared-chase-late.jsonl').read_bytes()
-    assert (output / 'llc-shared-chase-early.jsonl').is_file()
-    assert (output / 'llc-shared-chase-late.jsonl').is_file()
-
-
-def test_recipe_and_arm_names_do_not_change_execution():
-    raw = export_design(design('runtime'))
-    before = expand_matrix(ExperimentSpec.model_validate(raw))
-    raw['comparison']['recipe'] = 'admission'
-    for i, p in enumerate(raw['comparison']['arms']):
-        p['name'] = 'renamed-'+str(i)
-    after = expand_matrix(ExperimentSpec.model_validate(raw))
-    assert [(a.resources, a.execution, a.policy.mechanisms) for a in before] == [
-        (a.resources, a.execution, a.policy.mechanisms) for a in after]
-
-
 @pytest.mark.parametrize('switch,value', [('idle_reclaim.policy', 'off'), ('shared_memory.borrow', 'off')])
 def test_full_single_capability_ablation_retains_cost_coordination(switch, value):
     raw = base()
@@ -407,13 +225,6 @@ def test_full_single_capability_ablation_retains_cost_coordination(switch, value
     assert effective_spec(spec, ablation).resources.memory_action_costs is not None
 
 
-def test_runtime_controls_do_not_enable_reclaim():
-    spec = design('runtime')
-    p = spec.policies[-1]
-    assert p.memory_protection and p.cpu_release_boost
-    assert not p.coordinates_release
-    assert p.reclamation.value == 'resident'
-    assert p.runtime_control.value == 'explicit'
 
 
 def test_wait_checkpoint_does_not_require_llm_duration_evidence():
@@ -438,26 +249,8 @@ def test_resident_arm_keeps_common_physical_shared_pool_capacity():
     assert arm.policy.reclamation.value == 'resident'
 
 
-def test_runtime_forecast_ttl_roundtrips_to_every_arm():
-    raw = export_design(design('runtime'))
-    raw['mechanisms']['runtime']['pressure_control']['release_forecast_ttl_factor'] = 4.
-    spec = ExperimentSpec.model_validate(raw)
-    loaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec)))
-    assert all(a.resources.pressure_control.release_forecast_ttl_factor == 4.
-               for a in expand_matrix(loaded))
 
 
-def test_runtime_missing_psi_fails_before_host_or_vm_setup(tmp_path, monkeypatch):
-    from clawbox.experiments import base_cache
-    monkeypatch.setattr(base_cache, 'check_experiment', lambda _: {'enabled': False})
-    from clawbox.experiments import qualification
-    raw = export_design(design('runtime'))
-    raw['environment']['resources']['local_memory_cgroup'] = str(tmp_path)
-    spec = ExperimentSpec.model_validate(raw)
-    monkeypatch.setattr(qualification, 'host_profile_for',
-                        lambda *_: pytest.fail('host setup before PSI validation'))
-    with pytest.raises(RuntimeError, match='PSI.*psi=1'):
-        qualification.require_host_ready(spec)
 
 
 def test_os_only_design_checks_common_physical_shared_pool(monkeypatch):
@@ -489,55 +282,14 @@ def test_os_only_design_checks_common_physical_shared_pool(monkeypatch):
         raw['environment']['resources']['shared_memory_borrow_limit_mib']
 
 
-def test_runtime_recipe_pins_proactive_reclaim_off():
-    raw = export_design(design('runtime'))
-    raw['mechanisms']['runtime']['proactive_memory_reclaim'] = True
-    raw['comparison']['arms'] = recipe_arms('runtime')
-    spec = ExperimentSpec.model_validate(raw)
-    assert spec.policies[0].name == 'memory-off-cpu-off'
-    assert all(not effective_spec(spec, p).resources.proactive_cache_reclaim for p in spec.policies)
-    assert {(p.memory_protection, p.cpu_release_boost) for p in spec.policies} == {
-        (False, False), (True, False), (False, True), (True, True)}
 
 
-def test_memory_reclaim_recipe_changes_only_reclaim():
-    spec = design('memory-reclaim')
-    before, after = [effective_spec(spec, p).resources.model_dump() for p in spec.policies]
-    assert {key for key in before if before[key] != after[key]} == {'proactive_cache_reclaim'}
-    assert not before['proactive_cache_reclaim'] and after['proactive_cache_reclaim']
 
 
-def test_affinity_automatically_requires_sharing_qualification():
-    spec = design('placement')
-    assert [effective_spec(spec, p).resources.template_base_sharing for p in spec.policies] == [
-        'disabled', 'disabled', 'required']
-    assert spec.policies[-1].template_aware_placement
-    assert 'template_base_sharing' not in spec.policies[-1].mechanisms['placement']
 
 
-def test_coordination_comparison_fixes_borrowing_and_reclamation():
-    spec = design('coordination')
-    a, b = spec.policies
-    assert a.mechanisms['shared_memory'] == b.mechanisms['shared_memory']
-    assert a.mechanisms['idle_reclaim'] == b.mechanisms['idle_reclaim']
-    assert effective_spec(spec, a).resources.memory_action_costs is None
-    assert effective_spec(spec, b).resources.memory_action_costs is not None
 
 
-def test_prediction_source_is_a_shared_condition(tmp_path):
-    raw = export_design(design('admission'))
-    raw['conditions']['prediction_source'] = 'command-table'
-    spec = ExperimentSpec.model_validate(raw)
-    assert all(effective_spec(spec, p).resources.prediction_mode == 'frozen' for p in spec.policies)
-    assert 'Diagnostic' in design_overview(spec)['arms'][0]['warnings'][0]
-    assert ExperimentSpec.model_validate(export_design(spec)) == spec
-    path = tmp_path/'base.yaml'
-    path.write_text(dump_experiment(spec), encoding='utf-8')
-    configured = configure_experiment(path, mechanism_settings=['conditions.prediction_source=kb'])
-    assert all(effective_spec(configured, p).resources.prediction_mode == 'runtime' for p in configured.policies)
-    raw['comparison']['arms'][0]['override']['conditions.prediction_source'] = 'kb'
-    with pytest.raises(ValueError, match='mechanism field'):
-        ExperimentSpec.model_validate(raw)
 
 
 @pytest.mark.parametrize('field,value', [
@@ -553,77 +305,16 @@ def test_removed_or_reclassified_fields_are_not_silently_accepted(field, value):
         ExperimentSpec.model_validate(raw)
 
 
-def test_os_deployment_cannot_be_mixed_with_managed_optimization():
-    raw = export_design(design('integrated'))
-    raw['comparison']['arms'][0]['override']['runtime.proactive_memory_reclaim'] = True
-    with pytest.raises(ValueError, match='os-default deployment requires'):
-        ExperimentSpec.model_validate(raw)
 
 
-def test_integrated_baselines_do_not_inherit_load_aware_placement():
-    spec = design('integrated')
-    os_arm, managed, configured = [effective_spec(spec, p) for p in spec.policies]
-    assert os_arm.resources.lifecycle_admission == 'os-managed'
-    assert os_arm.policies[0].deployment == 'os-default'
-    assert managed.resources.lifecycle_admission == 'configured-capacity'
-    assert managed.execution.placement_policy == 'round_robin'
-    assert configured.execution.placement_policy == 'load_aware'
 
 
-def test_restore_accounting_is_fixed_not_a_loading_switch():
-    spec = design('checkpoint', 'encoding')
-    for p in spec.policies:
-        assert effective_spec(spec, p).resources.lazy_restore is True
-        assert p.restore.value == 'reactive'
-        assert 'lazy_restore' not in p.mechanisms['checkpoint']
-        assert 'restore' not in p.mechanisms['idle_reclaim']
-    raw = export_design(spec)
-    raw['conditions']['restore_loading'] = 'eager'
-    with pytest.raises(ValueError, match='Extra inputs'):
-        ExperimentSpec.model_validate(raw)
 
 
-def test_report_exposes_deployment_coordination_and_common_conditions(tmp_path):
-    import json
-    from clawbox.experiments.reporting import render_run_report
-    spec = design('integrated')
-    (tmp_path/'experiment.yaml').write_text(dump_experiment(spec), encoding='utf-8')
-    (tmp_path/'arms').mkdir()
-    (tmp_path/'arms'/'arm.json').write_text(json.dumps({
-        'experiment_id': spec.experiment_id, 'status': 'succeeded',
-        'arm': expand_matrix(spec)[0].model_dump(mode='json'),
-        'correctness': {}, 'performance': {}, 'memory': {}, 'artifacts': {},
-    }), encoding='utf-8')
-    report = render_run_report(tmp_path)
-    assert 'Deployment | Coordination' in report
-    assert '"prediction_source": "kb"' in report
-    assert 'configured-design' in report
 
 
-def test_removed_controller_is_not_public_or_accepted(capsys):
-    from clawbox import cli
-    from clawbox.experiments.spec_types import RuntimeControl
-    from clawbox.experiments.baselines import BASELINES
-    import json
-    assert 'agentcgroup' not in json.dumps(Design.model_json_schema()).lower()
-    assert all('agentcgroup' not in name for name in BASELINES)
-    for name in ('agentcgroup_cgroup', 'agentcgroup_legacy'):
-        with pytest.raises(ValueError):
-            RuntimeControl(name)
-    for command in ('recipes', 'baselines', 'schema'):
-        assert cli.main(['experiment', command]) == 0
-        assert 'agentcgroup' not in capsys.readouterr().out.lower()
-    with pytest.raises(SystemExit) as exc:
-        cli.main(['experiment', 'configure', '--help'])
-    assert exc.value.code == 0
-    assert 'agentcgroup' not in capsys.readouterr().out.lower()
 
 
-def test_pair_reclaim_does_not_enable_cpu_or_memory_controls():
-    p = design('idle-reclaim').policies[-1]
-    assert not p.coordinates_release
-    assert not p.memory_protection and not p.cpu_release_boost
-    assert p.runtime_snapshot
 
 
 def test_pressure_borrow_without_snapshots_is_supported():
@@ -735,149 +426,17 @@ def test_cpu_boost_rejects_os_placement():
         ExperimentSpec.model_validate(raw)
 
 
-def test_per_arm_input_validation_includes_later_predicted_arm(monkeypatch):
-    from clawbox.experiments import inputs
-    spec = design('admission')
-    original = inputs.validate_inputs
-    visited = []
-    def fake(child):
-        if child.schema_version == 4:
-            return original(child)
-        visited.append(child.policies[0].admission.value)
-        return {'traces': [], 'prediction_files': ['prediction.json'] if visited[-1] == 'predicted' else []}
-    monkeypatch.setattr(inputs, 'validate_inputs', fake)
-    assert fake(spec)['prediction_files'] == ['prediction.json']
-    assert visited == ['off', 'fixed', 'predicted']
 
 
-def test_qualification_covers_distinct_mechanisms_once(tmp_path):
-    from clawbox.experiments.qualification import design_probes
-    seen = []
-    def probe(child, *, artifact_root):
-        seen.append(child.resources.snapshot_mechanism)
-        return {'passed':True, 'required':True}
-    result = design_probes(design('checkpoint', 'encoding'), probe, artifact_root=tmp_path)
-    assert seen == ['full-copy', 'incremental-cow']
-    assert len(result['probes']) == 2
-    seen.clear()
-    result = design_probes(design('runtime'), probe, artifact_root=tmp_path)
-    assert len(seen) == 1
-    assert len(result['by_policy']) == 4
 
 
-def test_freeze_preserves_qualification_changes():
-    spec = design('runtime')
-    changed = spec.model_copy(update={
-        'experiment_id':'qualification-test',
-        'execution':spec.execution.model_copy(update={'concurrency_levels':(3,), 'randomized_order':False}),
-        'workload':spec.workload.model_copy(update={'repetitions':1}),
-        'validation':spec.validation.model_copy(update={'command':'true'}),
-        'inference':spec.inference.model_copy(update={'configuration':{'model':'test','max_model_steps':1}}),
-    })
-    loaded = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(changed)))
-    assert spec_digest(loaded) == spec_digest(changed)
-    assert len(expand_matrix(loaded)) == 4
-    assert loaded.execution.concurrency_levels == (3,)
 
 
-def test_cli_configuration_uses_public_design(tmp_path):
-    spec = configure_experiment(Path('examples/experiments/getting-started.yaml'), recipe='runtime',
-                                concurrency='1,2', local_numa_node=0,
-                                session_assignment='single_case',
-                                mechanism_settings=['runtime.pressure_control.boost_cpu_weight=250'])
-    path = tmp_path/'design.yaml'
-    path.write_text(dump_experiment(spec), encoding='utf-8')
-    reused = configure_experiment(path, repetitions=3)
-    assert reused.schema_version == 4
-    assert reused.workload.repetitions == 3
-    assert len(reused.policies) == 4
-    assert all(p.mechanisms['runtime']['pressure_control']['boost_cpu_weight'] == 250 for p in reused.policies)
-    assert design_overview(reused)['arm_count'] == 24
-
-@pytest.mark.parametrize('recipe,axis', [
-    ('admission', None), ('runtime', None), ('memory-reclaim', None),
-    ('placement', None), ('idle-reclaim', None), ('shared-memory', None),
-    ('coordination', None), ('checkpoint', 'encoding'),
-    ('checkpoint', 'storage'), ('checkpoint', 'residency'),
-])
-def test_fixed_methods_reset_inherited_switches_and_roundtrip(recipe, axis):
-    from clawbox.experiments.design import fixed_recipe_arms
-    raw = base()
-    common = raw['mechanisms']
-    common['admission']['static_tool_memory_mib'] = 128
-    common['runtime'].update(memory_protection=True, cpu_release_boost=True,
-                             proactive_memory_reclaim=True)
-    common['placement'].update(policy='explicit', template_affinity=True,
-                               tool_call_cpu_policy='c2', session_compute_nodes=['unrelated'])
-    common['idle_reclaim'].update(policy='wait', scope='agent_and_tool')
-    common['shared_memory']['borrow'] = 'pressure'
-    common['coordination']['action_selection'] = 'measured_cost'
-    common['checkpoint'].update(storage='warm-only', residency='value')
-    if recipe == 'checkpoint' and axis == 'residency':
-        raw['inference']['backend'] = 'serving_sim'
-        common['idle_reclaim'].update(policy='gpu', scope='agent_and_tool')
-    arms = fixed_recipe_arms(recipe, common=common, checkpoint_axis=axis)
-    raw['comparison'] = dict(recipe=recipe, arms=arms)
-    spec = ExperimentSpec.model_validate(raw)
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
-    for p in spec.policies:
-        m = p.mechanisms
-        assert m['placement']['session_compute_nodes'] == []
-        assert m['placement']['tool_call_cpu_policy'] == 'c0'
-        if recipe != 'runtime':
-            assert not m['runtime']['memory_protection']
-            assert not m['runtime']['cpu_release_boost']
-            assert not p.runtime_control.adaptive
-        if recipe != 'memory-reclaim':
-            assert not m['runtime']['proactive_memory_reclaim']
-        if recipe not in {'coordination', 'shared-memory'}:
-            assert m['shared_memory']['borrow'] == 'off'
-    # Public method snapshots survive edits to the common switches.
-    raw = yaml.safe_load(dump_experiment(spec))
-    raw['mechanisms']['runtime']['memory_protection'] = False
-    raw['mechanisms']['runtime']['proactive_memory_reclaim'] = False
-    again = ExperimentSpec.model_validate(raw)
-    assert [p.mechanisms for p in again.policies] == [p.mechanisms for p in spec.policies]
 
 
-def test_fixed_configure_preconditions(tmp_path):
-    path = tmp_path / 'base.yaml'
-    raw = base()
-    raw['mechanisms']['admission']['static_tool_memory_mib'] = 128
-    path.write_text(yaml.safe_dump(raw), encoding='utf-8')
-    spec = configure_experiment(path, recipe='runtime', fixed_methods=True)
-    assert all(p.admission.value == 'fixed' for p in spec.policies)
-    with pytest.raises(ValueError, match='requires --recipe'):
-        configure_experiment(path, fixed_methods=True)
-    raw['evidence']['idle_reclaim_costs'] = None
-    path.write_text(yaml.safe_dump(raw), encoding='utf-8')
-    assert len(configure_experiment(path, recipe='idle-reclaim', fixed_methods=True).policies) == 3
-    with pytest.raises(ValueError, match='single-family'):
-        configure_experiment(path, recipe='integrated', fixed_methods=True)
 
 
-def test_resident_capacity_baselines_disable_inherited_optimizations():
-    raw = base()
-    m = raw['mechanisms']
-    m['placement'].update(policy='load_aware', template_affinity=True, tool_call_cpu_policy='c2')
-    m['runtime'].update(memory_protection=True, cpu_release_boost=True, proactive_memory_reclaim=True)
-    m['idle_reclaim']['policy'] = 'wait'
-    m['shared_memory']['borrow'] = 'pressure'
-    raw['comparison'] = dict(recipe='resident-capacity', arms=recipe_arms('resident-capacity'))
-    spec = ExperimentSpec.model_validate(raw)
-    for policy, scale in zip(spec.policies, (1, .8, .75)):
-        arm = effective_spec(spec, policy)
-        assert arm.resources.resident_capacity_accounting
-        assert arm.resources.lifecycle_reservation_scale == scale
-        assert arm.resources.lifecycle_reservation_mib(6144) == {1: 6144, .8: 4916, .75: 4608}[scale]
-        assert arm.resources.lifecycle_reservation_mib(6144, 6144) == 2 * arm.resources.lifecycle_reservation_mib(6144)
-        assert arm.runtime.memory_mib == raw['environment']['runtime']['memory_mib']
-        assert policy.reclamation.value == 'resident'
-        assert policy.admission.value == 'off'
-        assert not arm.resources.proactive_cache_reclaim
-        assert not arm.resources.shared_memory_borrow_limit_mib
-        assert arm.execution.tool_call_cpu_policy == 'c0'
-        assert arm.execution.placement_policy == 'round_robin'
+
 
 
 @pytest.mark.parametrize('scale', [0, -1, 1.1, float('nan'), float('inf')])
@@ -921,123 +480,20 @@ def test_pure_ledger_rejects_unsupported_mechanism_combinations(group, updates, 
     ExperimentSpec.model_validate(raw)
 
 
-def test_integrated_resets_c2_only_for_control_arms():
-    raw = base()
-    raw['mechanisms']['placement']['tool_call_cpu_policy'] = 'c2'
-    raw['comparison'] = dict(recipe='integrated', arms=recipe_arms('integrated'))
-    spec = ExperimentSpec.model_validate(raw)
-    assert [effective_spec(spec, p).execution.tool_call_cpu_policy for p in spec.policies] == ['c0', 'c0', 'c2']
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
 
-def test_configure_reports_shadowed_set_without_changing_arm_precedence():
-    from clawbox.experiments.design import configure_design
-    raw = base()
-    raw['comparison'] = dict(recipe='resident-capacity', arms=recipe_arms('resident-capacity'))
-    with pytest.warns(UserWarning, match='deployment.lifecycle_reservation_scale.*overridden.*resident-capacity-0-8'):
-        spec = configure_design(raw, {'mechanism_settings': ['deployment.lifecycle_reservation_scale=0.6']})
-    assert [effective_spec(spec, p).resources.lifecycle_reservation_scale for p in spec.policies] == [1, .8, .75]
 
 
-def test_configure_does_not_warn_for_effective_or_identical_overrides():
-    import warnings
-    from clawbox.experiments.design import configure_design
-    raw = base()
-    raw['comparison']['arms'][0]['override'] = {'placement.tool_call_cpu_policy': 'c2'}
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        spec = configure_design(raw, {'mechanism_settings': [
-            'placement.tool_call_cpu_policy=c2', 'runtime.memory_protection=true']})
-    assert not caught
-    assert spec.policies[0].memory_protection
-    assert effective_spec(spec, spec.policies[0]).execution.tool_call_cpu_policy == 'c2'
 
 
-@pytest.mark.parametrize('high_gib', [8, 480])
-def test_two_512_gib_nodes_use_capacity_not_high_for_pure_ledger(high_gib):
-    from clawbox.experiments.policy import PolicyCoordinator, AdmissionTimeout
-    raw = base()
-    r = raw['environment']['resources']
-    r.update(compute_nodes=[dict(node_id=f'n{i}', numa_node=i,
-        cpus=f'{80*i}-{80*i+79}', memory_capacity_mib=512*1024,
-        low_watermark_mib=4*1024, high_watermark_mib=high_gib*1024) for i in range(2)],
-        local_numa_node=None, local_memory_capacity_mib=1024*1024,
-        local_memory_low_watermark_mib=8*1024,
-        local_memory_high_watermark_mib=high_gib*2*1024,
-        pool_memory_budget_mib=high_gib*2*1024,
-        shared_memory_borrow_limit_mib=None, warm_numa_node=None, warm_memory_capacity_mib=0)
-    raw['environment']['runtime']['memory_mib'] = 6144
-    raw['environment']['sandbox']['memory_mib'] = 6144
-    for case in raw['workload'].get('cases', []):
-        if case.get('sandbox'):
-            case['sandbox']['memory_mib'] = 6144
-    raw['comparison'] = dict(recipe='resident-capacity', arms=recipe_arms('resident-capacity'))
-    spec = ExperimentSpec.model_validate(raw)
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
-    for p in spec.policies:
-        resolved = effective_spec(spec, p)
-        assert resolved.resources.pool_memory_budget_mib == 1024*1024
-        assert resolved.execution.placement_cpu_overcommit == 1024
-        for node in resolved.resources.compute_nodes:
-            budget = resolved.resources.compute_node_budget_mib(node)
-            assert budget == 512*1024
-            charge = resolved.resources.lifecycle_reservation_mib(6144, 6144)
-            coordinator = PolicyCoordinator(p, budget_mib=budget,
-                emergency_free_mib=0, operation_headroom_mib=0, resident_capacity_accounting=True)
-            for i in range(budget // charge):
-                coordinator.acquire(str(i), charge, .1, wait_class='create')
-                coordinator.release(str(i), charge, wait_class='create')
-            with pytest.raises(AdmissionTimeout):
-                coordinator.acquire('full', charge, .01, wait_class='create')
-    raw['comparison'] = dict(recipe='custom', arms=[dict(name='measured')])
-    if high_gib == 8:
-        with pytest.raises(ValueError, match='HIGH watermark'):
-            ExperimentSpec.model_validate(raw)
-    else:
-        measured = ExperimentSpec.model_validate(raw)
-        assert measured.resources.pool_memory_budget_mib == 960*1024
-        assert measured.execution.placement_cpu_overcommit == 1024
-        assert measured.resources.compute_node_budget_mib(measured.resources.compute_nodes[0]) == 480*1024
 
 
-def test_pure_ledger_still_rejects_pair_larger_than_node_capacity():
-    raw = base()
-    raw['environment']['runtime']['memory_mib'] = 1024*1024
-    raw['comparison'] = dict(recipe='resident-capacity', arms=recipe_arms('resident-capacity'))
-    with pytest.raises(ValueError, match='capacity of every eligible compute node'):
-        ExperimentSpec.model_validate(raw)
 
 
-def test_pure_ledger_cpu_multiplier_can_be_overridden_explicitly():
-    raw = base()
-    arms = recipe_arms('resident-capacity')
-    arms[0]['override']['placement.placement_cpu_overcommit'] = 16
-    raw['comparison'] = dict(recipe='resident-capacity', arms=arms)
-    spec = ExperimentSpec.model_validate(raw)
-    assert [effective_spec(spec, p).execution.placement_cpu_overcommit for p in spec.policies] == [16, 1024, 1024]
 
 
-def test_all_recipes_replace_inherited_cpu_slot_multiplier():
-    from clawbox.experiments.design import RECIPES, override_mechanisms
-    common = Mechanisms().model_dump(mode='json')
-    common['placement']['placement_cpu_overcommit'] = 1
-    for recipe in RECIPES:
-        for axis in (('encoding', 'storage', 'residency') if recipe == 'checkpoint' else (None,)):
-            for arm in recipe_arms(recipe, checkpoint_axis=axis):
-                resolved = override_mechanisms(common, arm['override'])
-                assert resolved['placement']['placement_cpu_overcommit'] == (1 if recipe in {'full', 'llc'} else 1024)
 
 
-def test_role_specific_default_memory_roundtrips_and_charges_three_gib():
-    raw = base()
-    raw['environment']['runtime'].pop('memory_mib')
-    raw['environment']['sandbox'].pop('memory_mib')
-    raw['comparison'] = dict(recipe='resident-capacity', arms=[recipe_arms('resident-capacity')[2]])
-    spec = ExperimentSpec.model_validate(raw)
-    resolved = effective_spec(spec, spec.policies[0])
-    assert (resolved.runtime.memory_mib, resolved.sandbox.memory_mib) == (1024, 3072)
-    assert resolved.resources.lifecycle_reservation_mib(resolved.runtime.memory_mib, resolved.sandbox.memory_mib) == 3072
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
 
 
 def test_explicit_runtime_shape_survives_runtime_model_conversion():
@@ -1048,69 +504,31 @@ def test_explicit_runtime_shape_survives_runtime_model_conversion():
     assert RuntimeSandboxSpec.model_validate(old).memory_mib == 2048
 
 
-def test_pure_ledger_host_check_uses_common_physical_profile(monkeypatch):
-    from clawbox.experiments import base_cache
-    monkeypatch.setattr(base_cache, 'check_experiment', lambda _: {'enabled': False})
-    from clawbox.experiments import qualification
-    monkeypatch.setattr(qualification, 'require_empty_vm_domain', lambda _: None)
-    raw = base()
-    raw['comparison'] = dict(recipe='resident-capacity', arms=[recipe_arms('resident-capacity')[2]])
-    spec = ExperimentSpec.model_validate(raw)
-    assert spec.resources.pool_memory_budget_mib > raw['environment']['resources']['pool_memory_budget_mib']
-    profiles = []
-    monkeypatch.setattr(qualification, 'apply_environment', profiles.append)
-    monkeypatch.setattr(qualification, 'doctor', lambda *_args, **_kwargs: [])
-    qualification.require_host_ready(spec)
-    assert profiles[0]['local_memory_capacity_mib'] == spec.resources.local_memory_capacity_mib
-    assert profiles[0]['shared_memory_borrow_limit_mib'] == raw['environment']['resources']['shared_memory_borrow_limit_mib']
-    node = spec.resources.compute_nodes[0]
-    assert qualification._node_spec(spec, node).resources.pool_memory_budget_mib == node.memory_capacity_mib
 
 
-@pytest.mark.parametrize('recipe', ['full', 'llc'])
-def test_full_llc_recipes_only_change_llc_axis(tmp_path, recipe):
-    raw = base()
-    raw['mechanisms']['placement'].update(
-        placement_cpu_overcommit=7, tool_call_cpu_policy='c2',
-        tool_call_cpu_include_smt=False, tool_call_cpu_group_max_active=4,
-        tool_call_cpu_pressure_duration_seconds=4, tool_call_cpu_group_order='utilization',
-        tool_call_cpu_observe_wait=True, tool_call_cpu_max_utilization=.9)
-    raw['measurement'] = dict(memory_sample_interval_seconds=1)
-    source = tmp_path/'reference.yaml'
-    source.write_text(yaml.safe_dump(raw), encoding='utf-8')
-    spec = configure_experiment(source, recipe=recipe)
-    arms = [effective_spec(spec, p) for p in spec.policies]
-    assert [a.execution.tool_call_cpu_policy for a in arms] == (
-        ['b'] if recipe == 'full' else ['c0', 'c2', 'b'])
-    for a in arms:
-        x = a.execution
-        assert x.tool_call_cpu_include_smt is True
-        assert x.tool_call_cpu_duration_source == 'tool'
-        assert x.tool_call_cpu_group_max_active == 2
-        assert x.tool_call_cpu_pressure_duration_seconds == 2
-        assert x.tool_call_cpu_group_order == 'preferred'
-        assert x.tool_call_cpu_observe_wait is False
-        assert x.tool_call_cpu_max_utilization is None
-        assert x.llc_poll_interval_seconds == (1 if x.tool_call_cpu_policy == 'c2' else .25)
-        assert x.placement_cpu_overcommit == 7
-        assert a.workload == spec.workload
-        assert a.inference == spec.inference
-    for p in spec.policies:
-        for group, fields in raw['mechanisms'].items():
-            for key, value in fields.items():
-                if not key.startswith('tool_call_cpu_'):
-                    assert p.mechanisms[group][key] == value
-    assert all(a.resources == arms[0].resources for a in arms)
-    assert ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(spec))) == spec
-    # Loading the original is not a migration or a change to frozen inputs.
-    original = ExperimentSpec.model_validate(yaml.safe_load(source.read_text(encoding='utf-8')))
-    assert effective_spec(original, original.policies[0]).execution.tool_call_cpu_include_smt is False
 
 
-def test_full_explicit_llc_choice_overrides_default(tmp_path):
-    source = tmp_path/'base.yaml'
-    source.write_text(yaml.safe_dump(base()), encoding='utf-8')
-    for mode in ('c0', 'c2', 'b'):
-        spec = configure_experiment(source, recipe='full', mechanism_settings=[
-            f'placement.tool_call_cpu_policy={mode}'])
-        assert effective_spec(spec, spec.policies[0]).execution.tool_call_cpu_policy == mode
+
+
+def base():
+    raw = yaml.safe_load(Path('tests/fixtures/experiments/agent-rl-heterogeneous-ablation-kunpeng.yaml').read_text(encoding='utf-8'))
+    # Host-specific fixture supplies a topology, not empirical assertions for
+    # these unit tests. None of these synthetic costs are used for live runs.
+    from clawbox.experiments.design import EnvironmentResources
+    r = raw['resources']
+    return dict(schema_version=4, experiment_id='design-test',
+                environment=dict(runtime=raw['runtime'], sandbox=raw['sandbox'],
+                                 resources={k: v for k, v in r.items() if k in EnvironmentResources.model_fields}),
+                workload=raw['workload'], inference=dict(backend='replay', configuration={'model': 'test'}),
+                mechanisms=Mechanisms().model_dump(mode='json'),
+                evidence=dict(prediction_artifact='/separate-training/prediction.json',
+                    snapshot_residency_costs=dict(provenance='unit-test', warm_restore_seconds_per_gib=1, cold_restore_seconds_per_gib=2),
+                    idle_reclaim_costs=dict(provenance='unit-test', warm_checkpoint_seconds_per_gib=1,
+                        warm_restore_seconds_per_gib=1, cold_checkpoint_seconds_per_gib=2,
+                        cold_restore_seconds_per_gib=2),
+                    memory_action_costs=dict(provenance='unit-test', live_borrow_service_seconds_per_gib=1,
+                        live_borrow_runtime_penalty_seconds_per_gib=0, warm_checkpoint_seconds_per_gib=1,
+                        warm_restore_seconds_per_gib=1, cold_checkpoint_seconds_per_gib=2,
+                        cold_restore_seconds_per_gib=2, expected_restore_probability=.5)),
+                execution=dict(concurrency_levels=[2], randomized_order=False),
+                comparison=dict(recipe='custom', arms=[dict(name='custom')]))

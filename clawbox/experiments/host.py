@@ -568,7 +568,7 @@ def check(config: HostConfig) -> dict:
         "Run sudo bash scripts/build-zstd-page-snapshot.sh "
         f"{config.snapshot_compression_binary}, then rerun host check.",
     )
-    from clawbox.lab import SERVICES, CONTAINERS, template_record, sdk, _snapshot_sdk_info
+    from clawbox.experiments.host_runtime import SERVICES, CONTAINERS, template_record, sdk, _snapshot_sdk_info
     for unit in SERVICES:
         probe(unit, lambda u=unit: _run("systemctl", "show", u, "-p", "LoadState", "--value") == "loaded",
               "Install the patched standalone CubeSandbox release; docs/installation.md step 2.")
@@ -648,7 +648,7 @@ def check(config: HostConfig) -> dict:
 
 
 def apply(config: HostConfig, profile: Path) -> dict:
-    from clawbox import lab
+    from clawbox.experiments import host_runtime as lab
     report = check(config)
     if not report["ready_for_apply"]:
         print(json.dumps(report, indent=2))

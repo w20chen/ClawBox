@@ -350,7 +350,7 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         + restart_command
         + "kernel_source=/lib/modules/$(uname -r)/build; test -d \"$kernel_source\"; "
         + "zcat /proc/config.gz | cmp -s - \"$kernel_source/.config\" || "
-        "{ echo 'Guest kernel/header configuration mismatch; rebuild with scripts/lab images' >&2; exit 1; }; "
+        "{ echo 'Guest kernel/header configuration mismatch; rebuild with clawbox experiment images' >&2; exit 1; }; "
         + "if ! bridge_listening; then "
         "nohup env TOOL_BRIDGE_HOST_KEY=/run/clawbox-ssh/host_key "
         "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
@@ -392,8 +392,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
-    base_url = str(configuration.get("base_url") or os.environ.get("OPENCLAW_BASE_URL", ""))
-    model = str(configuration.get("model") or os.environ.get("OPENCLAW_MODEL_REF", ""))
+    base_url = str(configuration.get("base_url") or "")
+    model = str(configuration.get("model") or "")
     repository = str(configuration.get("repository") or "unknown")
     key_env = str(configuration.get("api_key_env", "OPENCLAW_API_KEY"))
     if not _ENV_NAME.fullmatch(key_env):

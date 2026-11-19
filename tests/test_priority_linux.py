@@ -1,3 +1,4 @@
+from experiment_fixtures import policy as fixture_policy
 """Opt-in kernel tests on an idle dedicated Cube host.
 
 CLAWBOX_TEST_CGROUP=/sys/fs/cgroup/cube_sandbox/sandbox sudo -E ... pytest ...
@@ -188,7 +189,6 @@ for i in range(0,len(data),4096): data[i]=1
 def test_psi_admission_uses_real_stalls_and_reopens_after_pressure_clears(parent, tmp_path):
     import time
     from clawbox.experiments.admission import DemandLedger
-    from clawbox.experiments.baselines import resolve_baseline
     from clawbox.experiments.policy import PolicyCoordinator, AdmissionTimeout
     from clawbox.experiments.priority import PriorityDomain
 
@@ -232,7 +232,7 @@ while True:
                 break
             time.sleep(.12)
         assert 'sustained_memory_congestion' in reasons
-        coordinators = [PolicyCoordinator(resolve_baseline(name).as_policy(), budget_mib=384,
+        coordinators = [PolicyCoordinator(fixture_policy(name), budget_mib=384,
             emergency_free_mib=0, operation_headroom_mib=0, demand_ledger=ledger)
             for name in ('uncontrolled-resident', 'predicted-resident')]
         coordinators[0].acquire('off', 0, .05)

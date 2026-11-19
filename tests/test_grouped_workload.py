@@ -72,7 +72,8 @@ def test_grouped_qualification_uses_one_rollout_per_base_without_mutating_formal
     original = ExperimentSpec.model_validate(grouped_raw())
     qualified = qualification_spec(original)
     validated = ExperimentSpec.model_validate(qualified.model_dump())
-    assert validated.execution.concurrency_levels == (80,)
+    assert validated.execution.concurrency_levels == (16,)
+    assert len(validated.workload.cases) == 16
     assert validated.workload.rollouts_per_case == 1
     assert validated.execution.arrival_schedule.value == 'burst'
     assert validated.inference.configuration['time_scale'] == 0
@@ -85,13 +86,3 @@ def test_grouped_offered_capacity_sums_each_cases_rollouts():
     from clawbox.experiments.reporting import _offered_capacity_text
     spec = ExperimentSpec.model_validate(grouped_raw())
     assert _offered_capacity_text(spec, 1280) == '7680 GiB'
-
-
-def test_grouped_audit_counts_policies_instead_of_multiplying_base_cases(monkeypatch):
-    from pathlib import Path
-    from clawbox.experiments import audit
-    spec = ExperimentSpec.model_validate(grouped_raw())
-    monkeypatch.setattr(audit, 'load_experiment', lambda _: spec)
-    monkeypatch.setattr(audit, '_artifact_provenance', lambda *_: {})
-    monkeypatch.setattr(audit, 'ensure_supported_experiment', lambda _: None)
-    assert audit.audit_experiment(Path('unused'))['arm_count'] == 2

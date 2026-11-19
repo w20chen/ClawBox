@@ -1,2 +1,2 @@
-from .models import *  # noqa: F401,F403
+"""Shared settings and authentication for the tuning service."""
 

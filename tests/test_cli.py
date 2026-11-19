@@ -8,22 +8,15 @@ import yaml
 import pytest
 
 from clawbox import cli
+from experiment_fixtures import worker_fixture
+from clawbox.experiments.configuration import dump_experiment
 
-
-def legacy_base_with_idle_reclaim_costs(tmp_path: Path) -> Path:
-    raw = yaml.safe_load(Path(
-        "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
-    ).read_text(encoding="utf-8"))
-    raw["resources"]["idle_reclaim_costs"] = {
-        "provenance": "independent-checkpoint-benchmark-v1",
-        "warm_checkpoint_seconds_per_gib": 0.5,
-        "warm_restore_seconds_per_gib": 0.5,
-        "cold_checkpoint_seconds_per_gib": 1.0,
-        "cold_restore_seconds_per_gib": 1.0,
-    }
-    path = tmp_path / "legacy-with-idle-costs.yaml"
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+def frozen_example(tmp_path, name="getting-started.yaml"):
+    path = tmp_path / name
+    path.write_text(dump_experiment(worker_fixture(Path("tests/fixtures/experiments") / name)), encoding="utf-8")
     return path
+
+
 
 
 def test_images_subprocess_can_import_repository_package(monkeypatch, tmp_path) -> None:
@@ -46,18 +39,6 @@ def test_images_subprocess_can_import_repository_package(monkeypatch, tmp_path) 
     assert str(captured["env"]["PYTHONPATH"]).split(os.pathsep)[0] == repository
 
 
-def test_public_cli_contains_only_experiment_group() -> None:
-    parser = cli.parser()
-    groups = next(action for action in parser._actions if action.dest == "group")
-    assert set(groups.choices) == {"experiment"}
-    commands = next(action for action in groups.choices["experiment"]._actions
-                    if action.dest == "command")
-    assert set(commands.choices) == {
-        "baselines", "configure", "describe", "validate", "plan", "run", "status",
-        "setup", "doctor", "qualify", "resume", "abort", "destroy", "collect",
-        "trace", "import-trace", "import-corpus", "train", "images", "report", "launch", "host", "recipes", "schema",
-        "prove-template-sharing", "snapshot-storage", "base-cache", "prepare-serving-sim",
-    }
 
 
 def test_prove_template_sharing_clears_future_artifact_before_host_check(
@@ -67,7 +48,7 @@ def test_prove_template_sharing_clears_future_artifact_before_host_check(
     from clawbox.experiments.spec import ExperimentSpec
 
     raw = yaml.safe_load(Path(
-        "examples/experiments/six-dimension.yaml"
+        "tests/fixtures/experiments/six-dimension.yaml"
     ).read_text(encoding="utf-8"))
     raw["evidence"]["template_base_sharing_artifact"] = str(
         tmp_path / "future-proof.json"
@@ -110,7 +91,7 @@ def test_launch_qualifies_when_needed_then_starts_run(
     import clawbox.experiments.inputs as inputs
     import clawbox.experiments.qualification as qualification
 
-    spec_path = Path("examples/experiments/getting-started.yaml")
+    spec_path = frozen_example(tmp_path)
     receipt = tmp_path / "qualification.json"
     calls: list[object] = []
     monkeypatch.setattr(
@@ -177,7 +158,7 @@ def test_launch_rejects_an_invalid_explicit_receipt_without_requalifying(
 
     with pytest.raises(ValueError, match="explicit qualification receipt cannot be reused"):
         cli.launch_experiment(Namespace(
-            spec=Path("examples/experiments/getting-started.yaml"),
+            spec=frozen_example(tmp_path),
             output_root=tmp_path,
             qualification=receipt,
             qualification_concurrency=None,
@@ -202,7 +183,7 @@ def test_qualify_cli_delegates_preflight_and_input_validation_to_qualify(
 
     assert cli.main([
         "--output-root", str(tmp_path), "experiment", "qualify",
-        "examples/experiments/getting-started.yaml",
+        str(frozen_example(tmp_path)),
         "--concurrency", "2", "--receipt", str(receipt),
     ]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "succeeded"
@@ -227,7 +208,7 @@ def test_launch_host_apply_failure_stops_before_qualification(monkeypatch, tmp_p
     monkeypatch.setattr(host, 'apply', apply)
     monkeypatch.setattr(qualification, 'require_host_ready', lambda spec: pytest.fail('continued after failed apply'))
     with pytest.raises(RuntimeError, match='host apply failed'):
-        cli.launch_experiment(Namespace(spec=Path('examples/experiments/getting-started.yaml'),
+        cli.launch_experiment(Namespace(spec=frozen_example(tmp_path),
             output_root=tmp_path, run_id='apply-failure', apply_host=host_path))
     assert calls == ['inputs', 'apply']
 
@@ -240,7 +221,7 @@ def test_launch_existing_active_returns_status_without_requalification(
     import clawbox.experiments.qualification as qualification
     import clawbox.experiments.supervisor as supervisor
 
-    spec_path = Path("examples/experiments/getting-started.yaml")
+    spec_path = frozen_example(tmp_path)
     run_root = tmp_path / "already-running"
     run_root.mkdir()
     (run_root / "experiment.yaml").write_text(
@@ -283,7 +264,7 @@ def test_launch_existing_success_skips_host_and_qualification(
     import clawbox.experiments.reporting as reporting
     import clawbox.experiments.supervisor as supervisor
 
-    spec_path = Path("examples/experiments/getting-started.yaml")
+    spec_path = frozen_example(tmp_path)
     run_root = tmp_path / "already-done"
     run_root.mkdir()
     (run_root / "experiment.yaml").write_text(
@@ -323,35 +304,18 @@ def test_launch_existing_success_skips_host_and_qualification(
     assert capsys.readouterr().out == "existing report\n"
 
 
-def test_validate_and_plan_v2(capsys) -> None:
-    path = "examples/experiments/getting-started.yaml"
+def test_validate_and_plan_v2(capsys, tmp_path) -> None:
+    path = str(frozen_example(tmp_path))
     assert cli.main(["experiment", "validate", path]) == 0
     assert '"valid": true' in capsys.readouterr().out
     assert cli.main(["experiment", "plan", path]) == 0
     assert '"arms"' in capsys.readouterr().out
 
 
-def test_baseline_catalog_is_available_from_public_cli(capsys) -> None:
-    assert cli.main(["experiment", "baselines"]) == 0
-    output = capsys.readouterr().out
-    assert "fixed-resident" in output
-    assert "predicted-resident" in output
-    assert "predicted-wait-snapshot" in output
-    assert "tool-full-resident" not in output
-    assert "DEPRECATED" not in output
-    assert "compare only within a listed family" in output
-    assert "no_control" not in output
-    assert "snapshot_scope=agent_and_tool" in output
-    assert "release_ranking=measured_cost" not in output
-
-    assert cli.main(["experiment", "baselines", "--all"]) == 0
-    all_output = capsys.readouterr().out
-    assert "DEPRECATED" not in all_output
-    assert "prediction-only-resident" not in all_output
 
 
-def test_public_workflow_accepts_independent_runtime_ablation(capsys) -> None:
-    path = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
+def test_public_workflow_accepts_independent_runtime_ablation(capsys, tmp_path) -> None:
+    path = str(frozen_example(tmp_path, "openclaw-cube-replay-c60-overcommit.yaml"))
     assert cli.main(["experiment", "validate", path]) == 0
     assert '"valid": true' in capsys.readouterr().out
 
@@ -410,286 +374,3 @@ def test_collect_expands_compact_arm_result_reference(tmp_path, capsys) -> None:
 
     output = json.loads(capsys.readouterr().out)
     assert output["arms"] == [result]
-
-
-def test_configure_and_describe_experiment_without_running_vms(tmp_path, capsys) -> None:
-    output = tmp_path / "friendly.yaml"
-    base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
-    assert cli.main([
-        "experiment", "configure", base, str(output),
-        "--profile", str(tmp_path / "no-host-profile.json"),
-        "--experiment-id", "friendly",
-        "--concurrency", "1,5,60",
-        "--runtime-memory-gib", "1",
-        "--tool-memory-gib", "2",
-        "--tool-workspace", "/testbed",
-        "--runtime-template-id", "runtime-1g",
-        "--runtime-image-reference", "registry/runtime-1g",
-        "--runtime-image-digest", "sha256:" + "a" * 64,
-        "--tool-template-id", "tool-2g",
-        "--tool-image-reference", "registry/tool-2g",
-        "--tool-image-digest", "sha256:" + "b" * 64,
-        "--pool-memory-gib", "32",
-        "--prediction-artifact", "/data/frozen-p50.json",
-        "--baseline", "fixed-resident",
-        "--baseline", "predicted-resident",
-    ]) == 0
-    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
-    assert configured["experiment_id"] == "friendly"
-    assert configured["execution"]["concurrency_levels"] == [1, 5, 60]
-    assert configured["runtime"]["memory_mib"] == 1024
-    assert configured["sandbox"]["memory_mib"] == 2048
-    assert configured["sandbox"]["workspace"] == "/testbed"
-    assert configured["resources"]["pool_memory_budget_mib"] == 32768
-    assert configured["resources"]["prediction_artifact"] == "/data/frozen-p50.json"
-    assert [item["name"] for item in configured["policies"]] == [
-        "fixed-resident", "predicted-resident",
-    ]
-    rendered = capsys.readouterr().out
-    assert "c60: 120 VMs" in rendered
-    assert "5.625x (offered configured capacity exceeds policy budget)" in rendered
-
-    assert cli.main(["experiment", "describe", str(output), "--json"]) == 0
-    overview = json.loads(capsys.readouterr().out)
-    assert overview["pair_memory_gib"] == 3
-    assert overview["concurrency"][-1]["offered_provisioned_capacity_exceeds_policy_budget"] is True
-    assert overview["arm_count"] == 6
-    assert overview["admission"]["policy_budget_gib"] == 32
-    assert overview["admission"]["static"]["per_command_mib"] == 256
-
-
-def test_configure_can_use_validated_training_p90_for_static_admission(
-    tmp_path, capsys,
-) -> None:
-    artifact = tmp_path / "p50.json"
-    artifact.write_text(json.dumps({
-        "schema": "clawbox_prediction_v2",
-        "repository": "owner/repo",
-        "training_validated": True,
-        "static_tool_memory_calibration": {
-            "metric": "host_cgroup_memory_current_increment",
-            "recommended_mib": 347,
-        },
-    }), encoding="utf-8")
-    output = tmp_path / "auto-static.yaml"
-
-    assert cli.main([
-        "experiment", "configure", "examples/experiments/getting-started.yaml",
-        str(output), "--repository", "owner/repo",
-        "--prediction-artifact", str(artifact),
-        "--static-tool-memory-mib", "auto",
-    ]) == 0
-    capsys.readouterr()
-    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
-    assert configured["resources"]["static_tool_memory_mib"] == 347
-
-
-def test_configure_refuses_to_replace_existing_output(tmp_path, capsys) -> None:
-    output = tmp_path / "existing.yaml"
-    output.write_text("keep", encoding="utf-8")
-    base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
-    assert cli.main(["experiment", "configure", base, str(output)]) == 1
-    assert output.read_text(encoding="utf-8") == "keep"
-    assert "--force" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("recipe", [None, "custom"])
-def test_configure_clears_saved_dependency_install_gate_by_default(
-    tmp_path, capsys, recipe,
-) -> None:
-    base = yaml.safe_load(
-        Path("examples/experiments/getting-started.yaml").read_text(
-            encoding="utf-8"
-        )
-    )
-    base["execution"]["dependency_install_concurrency"] = 8
-    source = tmp_path / "gate-8.yaml"
-    source.write_text(yaml.safe_dump(base), encoding="utf-8")
-    output = tmp_path / f"ungated-{recipe or 'schema3'}.yaml"
-    options = ["--recipe", recipe] if recipe else []
-
-    assert cli.main([
-        "experiment", "configure", str(source), str(output), *options,
-    ]) == 0
-    assert "Dependency installs: unlimited" in capsys.readouterr().out
-    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
-    assert configured["execution"]["dependency_install_concurrency"] is None
-
-
-def test_configure_can_explicitly_enable_dependency_install_gate(
-    tmp_path, capsys,
-) -> None:
-    output = tmp_path / "gate-17.yaml"
-
-    assert cli.main([
-        "experiment", "configure",
-        "examples/experiments/getting-started.yaml", str(output),
-        "--dependency-install-concurrency", "17",
-    ]) == 0
-    assert (
-        "Dependency installs: max 17 active (explicit gate)"
-        in capsys.readouterr().out
-    )
-    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
-    assert configured["execution"]["dependency_install_concurrency"] == 17
-
-
-def test_configure_uses_the_setup_host_profile(tmp_path, capsys) -> None:
-    digest_a = "sha256:" + "a" * 64
-    digest_b = "sha256:" + "b" * 64
-    profile = tmp_path / "host.json"
-    profile.write_text(json.dumps({
-        "node": "node-a",
-        "runtime": {
-            "template_id": "runtime-current",
-            "source_image_reference": "registry/runtime@" + digest_a,
-            "image_digest": digest_a,
-            "memory_mib": 2048,
-            "vcpu": 2,
-        },
-        "sandbox": {
-            "template_id": "tool-current",
-            "source_image_reference": "registry/tool@" + digest_b,
-            "image_digest": digest_b,
-            "memory_mib": 4096,
-            "vcpu": 2,
-        },
-        "local_memory_cgroup": "/sys/fs/cgroup/cube_sandbox/sandbox",
-        "local_memory_capacity_mib": 65536,
-        "local_numa_node": 0,
-        "warm_root": "/mnt/clawbox-warm",
-        "warm_capacity_mib": 131072,
-        "warm_numa_node": 1,
-    }), encoding="utf-8")
-    output = tmp_path / "profiled.yaml"
-
-    assert cli.main([
-        "experiment", "configure", "examples/experiments/getting-started.yaml",
-        str(output), "--profile", str(profile), "--snapshot-storage", "warm-only",
-    ]) == 0
-    capsys.readouterr()
-    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
-    assert configured["runtime"]["template_id"] == "runtime-current"
-    assert configured["sandbox"]["template_id"] == "tool-current"
-    assert configured["resources"]["target_node"] == "node-a"
-    assert configured["resources"]["local_memory_capacity_mib"] == 65536
-    assert configured["resources"]["warm_memory_capacity_mib"] == 131072
-    assert configured["resources"]["warm_snapshot_root"] == "/mnt/clawbox-warm"
-
-
-@pytest.mark.parametrize('recipe', [None, 'custom'])
-def test_configure_preserves_saved_templates_against_implicit_host_profile(tmp_path, monkeypatch, capsys, recipe):
-    base = yaml.safe_load(Path('examples/experiments/getting-started.yaml').read_text())
-    profile = dict(local_memory_capacity_mib=16384, cold_root='/data/clawbox/cold',
-                   local_memory_cgroup='/sys/fs/cgroup/cube_sandbox/sandbox', local_numa_node=0)
-    for role in ('runtime', 'sandbox'):
-        base[role].update(template_id=role + '-verified', template_alias=None,
-            source_image_reference='registry/' + role + ':verified', image_digest='sha256:' + 'a' * 64)
-        profile[role] = {**base[role], 'template_id': role + '-old-profile',
-                         'image_digest': 'sha256:' + 'b' * 64, 'memory_mib': 8192}
-    source = tmp_path / 'base.yaml'
-    source.write_text(yaml.safe_dump(base))
-    host_profile = tmp_path / '.config/clawbox/host.json'
-    host_profile.parent.mkdir(parents=True)
-    host_profile.write_text(json.dumps(profile))
-    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path))
-    output = tmp_path / 'configured.yaml'
-    options = ['--recipe', recipe] if recipe else []
-    assert cli.main(['experiment', 'configure', str(source), str(output), '--model', 'new-model', *options]) == 0
-    configured = yaml.safe_load(output.read_text())
-    configured = configured.get('environment', configured)
-    for role in ('runtime', 'sandbox'):
-        for key in ('template_id', 'image_digest', 'source_image_reference', 'memory_mib', 'vcpu'):
-            assert configured[role][key] == base[role][key]
-    assert cli.main(['experiment', 'configure', str(source), str(tmp_path / 'resized.yaml'),
-                     '--runtime-memory-gib', '8']) == 1
-    assert 'requires a new Runtime template' in capsys.readouterr().err
-
-
-def test_configure_wait_checkpoint_needs_no_llm_prediction_or_idle_costs(tmp_path, capsys):
-    output = tmp_path / "actual-wait.yaml"
-    assert cli.main([
-        "experiment", "configure",
-        "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml",
-        str(output), "--baseline", "predicted-wait-snapshot",
-        "--prediction-artifact", "/data/frozen-p50.json",
-    ]) == 0
-    configured = yaml.safe_load(output.read_text(encoding="utf-8"))
-    assert not any("model_wait_prediction" in k for k in configured["inference"]["configuration"])
-    assert configured["policies"][0]["runtime_snapshot"] is True
-
-
-def test_llm_duration_prediction_option_is_not_supported(tmp_path, capsys):
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["experiment", "configure",
-                  "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml",
-                  str(tmp_path / "invalid.yaml"), "--model-wait-prediction-seconds", "auto"])
-    assert exc.value.code != 0
-    assert "unrecognized arguments" in capsys.readouterr().err
-
-
-def test_legacy_baseline_selection_requires_one_comparison_family(
-    tmp_path, capsys,
-) -> None:
-    output = tmp_path / "cross-family.yaml"
-    assert cli.main([
-        "experiment", "configure",
-        "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml",
-        str(output), "--baseline", "default-resident",
-        "--baseline", "predicted-resident",
-    ]) == 1
-    assert not output.exists()
-    assert "do not share a comparison family" in capsys.readouterr().err
-
-    assert cli.main([
-        "experiment", "configure",
-        "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml",
-        str(output), "--baseline", "uncontrolled-resident",
-        "--baseline", "predicted-resident",
-        "--prediction-artifact", "/data/frozen-p50.json",
-    ]) == 0
-
-
-def test_configure_rejects_vm_shape_change_without_new_template(
-    tmp_path, capsys,
-) -> None:
-    output = tmp_path / "wrong-shape.yaml"
-    base = "examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"
-    assert cli.main([
-        "experiment", "configure", base, str(output),
-        "--runtime-memory-gib", "1",
-    ]) == 1
-    assert not output.exists()
-    assert "requires a new Runtime template" in capsys.readouterr().err
-
-
-def test_configure_explicit_shape_wins_over_host_profile(
-    tmp_path, capsys,
-) -> None:
-    output = tmp_path / "wrong-shape.yaml"
-    profile = tmp_path / "host.json"
-    profile.write_text(json.dumps({
-        "runtime": {
-            "template_id": "tpl-runtime",
-            "source_image_reference": "registry/runtime:current",
-            "image_digest": "sha256:" + "a" * 64,
-            "vcpu": 2,
-            "memory_mib": 2048,
-        },
-        "sandbox": {
-            "template_id": "tpl-tool",
-            "source_image_reference": "registry/tool:current",
-            "image_digest": "sha256:" + "b" * 64,
-            "vcpu": 2,
-            "memory_mib": 4096,
-        },
-    }), encoding="utf-8")
-
-    assert cli.main([
-        "experiment", "configure",
-        "examples/experiments/getting-started.yaml", str(output),
-        "--profile", str(profile),
-        "--runtime-memory-gib", "1",
-    ]) == 1
-    assert not output.exists()
-    assert "requires a new Runtime template" in capsys.readouterr().err

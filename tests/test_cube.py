@@ -1,4 +1,5 @@
 from __future__ import annotations
+from experiment_fixtures import worker_fixture
 
 import base64
 import hashlib
@@ -25,7 +26,7 @@ from clawbox.cube import (
     OwnedSandboxJournal,
     Ownership,
 )
-from clawbox.experiments import BASELINES, ExperimentSpec
+from clawbox.experiments import ExperimentSpec
 import clawbox.experiments.worker as worker_module
 from clawbox.experiments.openclaw_driver import NativeSSHRoute
 from clawbox.experiments.policy import PolicyCoordinator
@@ -2201,6 +2202,8 @@ def test_lifecycle_consumption_waits_for_selected_spill(operation: str) -> None:
 def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_runtime_create: bool,
 ) -> None:
+    from clawbox.experiments import base_cache
+    monkeypatch.setattr(base_cache, "REGISTRY", tmp_path / "base-cache.json")
     coordinators = []
     create_claims_at_cleanup = []
     real_coordinator = worker_module.PolicyCoordinator
@@ -2510,7 +2513,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         client=CubeSandboxClient(sandbox_class=SnapshotSandbox),
     ).run()[0]
 
-    assert create_claims_at_cleanup and not any(create_claims_at_cleanup), result.correctness
+    assert create_claims_at_cleanup and not any(create_claims_at_cleanup), result.model_dump()
     if fail_runtime_create:
         assert result.status.value == "failed"
         assert len(SnapshotSandbox.created) == 1
@@ -2909,7 +2912,7 @@ def test_reserved_checkpoint_failure_keeps_unknown_snapshot_charge(tmp_path):
 def test_public_snapshot_qualification_exercises_selected_scope(tmp_path, monkeypatch, pair):
     from clawbox.experiments import qualification as q
     from clawbox.experiments.spec import load_experiment, PolicySpec
-    spec = load_experiment(Path("examples/experiments/openclaw-cube-replay-c60-overcommit.yaml"))
+    spec = worker_fixture(Path("tests/fixtures/experiments/openclaw-cube-replay-c60-overcommit.yaml"))
     resources = spec.resources.model_copy(update={
         "compute_nodes": (), "shared_memory_borrow_limit_mib": None,
         "snapshot_mechanism": "full-copy", "snapshot_storage": "warm-only",

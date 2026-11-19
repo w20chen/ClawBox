@@ -20,7 +20,6 @@ dependencies = [
   "psutil>=5.9",
   "prometheus-client>=0.20",
   "typing-extensions>=4.12",
-  "alembic>=1.13",
   "cubesandbox==0.7.0",
   # cubesandbox 0.7.0 imports e2b.envd.process for its command transport but
   # does not declare the package dependency itself.
@@ -36,8 +35,7 @@ dev = ["pytest>=8", "httpx2", "pyarrow>=15"]
 
 [project.scripts]
 clawbox = "clawbox.cli:main"
-clawbox-p90-export = "clawbox.cell.p90:export_main"
-clawbox-experiment-worker = "clawbox.experiments.worker:main"
+clawbox-p90-export = "clawbox.tuning.p90_export:export_main"
 clawbox-serving-sim = "clawbox.integrations.serving_sim:main"
 clawbox-tune-server = "clawbox.tuning.server:main"
 

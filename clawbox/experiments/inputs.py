@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .spec import ExperimentSpec, load_workload_cases, resolve_case_sandbox
 from .spec_types import AdmissionPolicy, AgentDriver, InferenceBackend
-from .prediction import prediction_input_paths, prediction_provider_type
+from .prediction import prediction_input_paths, prediction_provider_type, prediction_requires_memory
 from clawbox.replay.trace import load_trace
 from .serving_sim_inputs import serving_sim_input_identity, serving_sim_case_binding
 
@@ -164,12 +164,12 @@ def validate_launch_inputs(spec: ExperimentSpec) -> dict:
             spec.inference.configuration, live=False,
         )
         model = str(
-            configuration.get("model") or os.getenv("OPENCLAW_MODEL_REF", "")
+            configuration.get("model") or ""
         ).strip()
         if not model:
             raise ValueError(
-                "OpenClaw requires inference.configuration.model (or "
-                "OPENCLAW_MODEL_REF); configure it before any VMs are started"
+                "OpenClaw requires inference.configuration.model; "
+                "configure it before any VMs are started"
             )
     traces = []
     for case in cases:
@@ -190,13 +190,14 @@ def validate_launch_inputs(spec: ExperimentSpec) -> dict:
     files = []
     admissions = {policy.admission for policy in spec.policies}
     if spec.resources.prediction_artifact and (
-        AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions or spec.resources.prediction_mode == 'host-live'
+        AdmissionPolicy.PREDICTED in admissions or spec.execution.tool_call_cpu_policy == 'b' or spec.resources.observe_predictions or spec.resources.prediction_mode == 'host-live'
     ):
         path = Path(spec.resources.prediction_artifact)
         first = cases[0]
         tool_sandbox = first.sandbox or spec.sandbox
         provider = prediction_provider_type(spec.resources.prediction_mode)(
             path,
+            require_memory=prediction_requires_memory(spec),
             repository=first.repository or first.case_id,
             sandbox_identity={
                 key: getattr(tool_sandbox, key)
@@ -239,12 +240,12 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
             spec.inference.configuration, live=False,
         )
         model = str(
-            configuration.get("model") or os.getenv("OPENCLAW_MODEL_REF", "")
+            configuration.get("model") or ""
         ).strip()
         if not model:
             raise ValueError(
-                "OpenClaw requires inference.configuration.model (or "
-                "OPENCLAW_MODEL_REF); configure it before any VMs are started"
+                "OpenClaw requires inference.configuration.model; "
+                "configure it before any VMs are started"
             )
     for case in cases:
         if spec.agent.driver is AgentDriver.OPENCLAW and not case.prompt.strip():
@@ -261,11 +262,12 @@ def validate_inputs(spec: ExperimentSpec) -> dict:
                 traces.append({"case_id": case.case_id, **info})
     files = []
     admissions = {policy.admission for policy in spec.policies}
-    if spec.resources.prediction_artifact and (AdmissionPolicy.PREDICTED in admissions or spec.resources.observe_predictions or spec.resources.prediction_mode == 'host-live'):
+    if spec.resources.prediction_artifact and (AdmissionPolicy.PREDICTED in admissions or spec.execution.tool_call_cpu_policy == 'b' or spec.resources.observe_predictions or spec.resources.prediction_mode == 'host-live'):
         path = Path(spec.resources.prediction_artifact)
         for case in cases:
             tool_sandbox = resolve_case_sandbox(case, spec.sandbox)
             provider = prediction_provider_type(spec.resources.prediction_mode)(path, repository=case.repository or case.case_id,
+                require_memory=prediction_requires_memory(spec),
                 sandbox_identity={k: getattr(tool_sandbox, k) for k in (
                     "template_id", "image_digest", "vcpu", "memory_mib", "architecture",
                 )})

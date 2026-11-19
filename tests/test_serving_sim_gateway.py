@@ -524,10 +524,12 @@ def test_cancel_between_gateway_production_and_client_registration_never_submits
                 state.gateway.close()
 
 
-def worker_prewarm_environment():
+def worker_prewarm_environment(*, reclaim="gpu_aware_pressure", runtime_snapshot=True,
+                               prewarm_events=("think_end", "first_token")):
     """Run the actual nested worker callbacks with a stub native VM boundary."""
     policy = PolicySpec(name="gpu", admission="predicted", reclamation="snapshot_pause",
-                        eviction="gpu_aware_pressure", restore="reactive")
+                        eviction=reclaim, restore="reactive", runtime_snapshot=runtime_snapshot,
+                        gpu_prewarm_events=prewarm_events)
     coordinator = PolicyCoordinator(policy, budget_mib=32, emergency_free_mib=0,
                                     operation_headroom_mib=0)
     runtime, tool = SimpleNamespace(resident=False), SimpleNamespace(resident=False)
@@ -551,7 +553,7 @@ def worker_prewarm_environment():
             resources=SimpleNamespace(lifecycle_reservation_mib=lambda memory_mib: memory_mib),
             sandbox=SimpleNamespace(memory_mib=4),
         ),
-        coordinator=coordinator, session_id="session", runtime_snapshot_enabled=True,
+        coordinator=coordinator, session_id="session", runtime_snapshot_enabled=runtime_snapshot,
         runtime_lifecycle=runtime, lifecycle=tool, session_binding=None,
         runtime_executor=object(), RELAY_CHECKPOINT_URL="http://127.0.0.1:8766/checkpoint",
         _execute_idempotent=lambda *_args: SimpleNamespace(exit_code=0),

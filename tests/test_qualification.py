@@ -1,4 +1,6 @@
 from __future__ import annotations
+from experiment_fixtures import worker_fixture
+from experiment_fixtures import policy as fixture_policy
 
 import json
 from pathlib import Path
@@ -7,7 +9,6 @@ import pytest
 import yaml
 
 import clawbox.experiments.qualification as qualification_module
-from clawbox.experiments.baselines import BASELINES
 from clawbox.experiments.qualification import (
     QUALIFICATION_SCHEMA_VERSION, current_qualification_input_manifest,
     implementation_digest, qualification_contract_digest,
@@ -21,7 +22,7 @@ from clawbox.experiments.spec import (
 )
 
 
-EXAMPLE = Path("examples/experiments/getting-started.yaml")
+EXAMPLE = Path("tests/fixtures/experiments/getting-started.yaml")
 
 
 @pytest.mark.parametrize('assignment,count,tool_mib,tool_cpus', [
@@ -31,7 +32,7 @@ EXAMPLE = Path("examples/experiments/getting-started.yaml")
 ])
 def test_host_capacity_counts_assigned_shapes(assignment, count, tool_mib, tool_cpus):
     from clawbox.experiments.spec_types import SessionAssignment
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     cases = tuple(spec.workload.cases[0].model_copy(update={
         'case_id': f'case-{i}', 'sandbox': spec.sandbox.model_copy(update={
             'memory_mib': memory, 'vcpu': cpus})})
@@ -49,7 +50,7 @@ def test_host_capacity_counts_assigned_shapes(assignment, count, tool_mib, tool_
 
 def test_active_session_bound_preserves_cases_and_budgets_later_large_shapes():
     from clawbox.experiments.spec_types import SessionAssignment
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     cases = tuple(spec.workload.cases[0].model_copy(update={
         'case_id': f'case-{i}', 'sandbox': spec.sandbox.model_copy(update={
             'memory_mib': memory, 'vcpu': cpus})})
@@ -96,7 +97,7 @@ Shared_Dirty:       40 kB
 
 
 def test_worker_gc_changes_run_identity_without_invalidating_vm_capability():
-    deferred = load_experiment(EXAMPLE)
+    deferred = worker_fixture(EXAMPLE)
     assert deferred.execution.worker_cyclic_gc_enabled is False
     automatic = deferred.model_copy(update={
         'execution': deferred.execution.model_copy(update={'worker_cyclic_gc_enabled': True}),
@@ -170,7 +171,7 @@ def test_template_sharing_retries_only_explicit_cube_ttrpc_create_errors():
 
 
 def test_snapshot_probe_uses_one_template_per_vm_shape() -> None:
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     cases = []
     for index, memory_mib in enumerate((3072, 3072, 4096)):
         sandbox = spec.sandbox.model_copy(update={
@@ -212,7 +213,7 @@ def test_qualification_rejects_populated_vm_domain_before_expensive_work(
 def test_template_sharing_probe_releases_each_pair_before_next_template(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     cases = []
     for index in range(3):
         sandbox = spec.sandbox.model_copy(update={
@@ -318,7 +319,7 @@ def test_template_sharing_probe_releases_each_pair_before_next_template(
 def test_template_sharing_artifact_reuses_exact_templates_and_raw_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     spec = spec.model_copy(update={
         "resources": spec.resources.model_copy(update={
             "template_base_sharing": "required",
@@ -375,7 +376,7 @@ def test_template_sharing_artifact_reuses_exact_templates_and_raw_proof(
 
 def test_dense_multi_numa_qualification_does_not_require_shared_memory(tmp_path):
     from clawbox.experiments.topology import ComputeNode
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     nodes = tuple(ComputeNode(node_id=f'n{i}', numa_node=i, cpus=str(i),
         memory_capacity_mib=1024, low_watermark_mib=512, high_watermark_mib=768)
         for i in range(2))
@@ -429,7 +430,7 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
 
 
 def test_qualification_uses_all_policies_at_target_concurrency() -> None:
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     spec = spec.model_copy(update={
         "execution": spec.execution.model_copy(update={"arm_timeout_seconds": 1800}),
     })
@@ -451,7 +452,7 @@ def test_qualification_uses_all_policies_at_target_concurrency() -> None:
 def test_receipt_reuses_capability_across_scheduling_and_same_image_template_change(
     tmp_path: Path,
 ) -> None:
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     path = tmp_path / "qualification.json"
     path.write_text(json.dumps(_receipt(spec)), encoding="utf-8")
 
@@ -509,7 +510,7 @@ def test_receipt_reuses_capability_across_scheduling_and_same_image_template_cha
 def test_receipt_reuse_rehashes_inputs_without_repeating_semantic_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     semantic_manifest = qualification_input_manifest(spec)
     assert current_qualification_input_manifest(spec) == semantic_manifest
     path = tmp_path / "qualification.json"
@@ -524,12 +525,12 @@ def test_receipt_reuse_rehashes_inputs_without_repeating_semantic_validation(
 
 
 def test_receipt_fast_manifest_matches_semantic_manifest_for_design_spec() -> None:
-    spec = load_experiment(Path("examples/experiments/six-dimension.yaml"))
+    spec = worker_fixture(Path("tests/fixtures/experiments/six-dimension.yaml"))
     assert current_qualification_input_manifest(spec) == qualification_input_manifest(spec)
 
 
 def test_receipt_is_bound_to_trace_contents(tmp_path: Path) -> None:
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     source = Path(spec.workload.cases[0].replay_trace_reference)
     trace = tmp_path / "trace.jsonl"
     trace.write_bytes(source.read_bytes())
@@ -553,7 +554,7 @@ def test_receipt_is_bound_to_trace_contents(tmp_path: Path) -> None:
 
 
 def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     case = spec.workload.cases[0]
     cases = tuple(
         case.model_copy(update={"case_id": f"qualification-case-{index}"})
@@ -584,7 +585,7 @@ def test_explicit_bounded_gate_preserves_target_and_case_coverage(tmp_path):
 
 
 def test_default_gate_uses_create_limit_without_repeating_cases():
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     case = spec.workload.cases[0]
     cases = tuple(
         case.model_copy(update={"case_id": f"qualification-case-{index}"})
@@ -608,7 +609,7 @@ def test_default_gate_uses_create_limit_without_repeating_cases():
 
 
 def test_default_gate_samples_large_corpus_deterministically(tmp_path):
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     case = spec.workload.cases[0]
     cases = tuple(
         case.model_copy(update={"case_id": f"qualification-case-{index:02d}"})
@@ -644,10 +645,10 @@ def test_default_gate_samples_large_corpus_deterministically(tmp_path):
 
 def test_single_case_sample_serializes_round_robin_source():
     from clawbox.experiments.spec import ExperimentSpec
-    from clawbox.experiments.configure import dump_experiment
+    from clawbox.experiments.configuration import dump_experiment
     from clawbox.experiments.spec_types import SessionAssignment
 
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     cases = tuple(spec.workload.cases[0].model_copy(update={'case_id': f'case-{i}'})
                   for i in range(2))
     spec = spec.model_copy(update={
@@ -656,7 +657,7 @@ def test_single_case_sample_serializes_round_robin_source():
         'inference': spec.inference.model_copy(update={'configuration': {
             **spec.inference.configuration, 'qualification_case_limit': 1}}),
     })
-    qualified = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(qualification_spec(spec))))
+    qualified = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(qualification_spec(spec)))["specification"])
     assert len(qualified.workload.cases) == 1
     assert qualified.workload.session_assignment is SessionAssignment.SINGLE_CASE
 
@@ -664,7 +665,7 @@ def test_single_case_sample_serializes_round_robin_source():
 def test_serving_sim_qualification_uses_one_cluster_by_default():
     from clawbox.experiments.spec import InferenceBackend
 
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     configuration = {
         **spec.inference.configuration,
         "serving_sim_launch": {
@@ -689,7 +690,7 @@ def test_serving_sim_qualification_uses_one_cluster_by_default():
 def test_qualification_limits_are_configurable():
     from clawbox.experiments.spec import InferenceBackend
 
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     case = spec.workload.cases[0]
     cases = tuple(
         case.model_copy(update={"case_id": f"qualification-case-{index}"})
@@ -720,12 +721,12 @@ def test_qualification_limits_are_configurable():
 
 def test_zero_qualification_concurrency_is_rejected():
     with pytest.raises(ValueError, match="qualification concurrency must be positive"):
-        qualification_spec(load_experiment(EXAMPLE), concurrency=0)
+        qualification_spec(worker_fixture(EXAMPLE), concurrency=0)
 
 
 def test_design_probes_do_not_reuse_off_result_for_native_core(tmp_path):
     from clawbox.experiments.spec import ExperimentSpec
-    raw = yaml.safe_load(Path('examples/experiments/six-dimension.yaml').read_text())
+    raw = yaml.safe_load(Path('tests/fixtures/experiments/six-dimension.yaml').read_text())
     raw['environment']['resources']['local_memory_cgroup'] = '/sys/fs/cgroup/cube_sandbox/sandbox'
     raw['workload']['cases'][0]['qos_class'] = 'be'
     raw['comparison']['arms'] = [
@@ -745,9 +746,9 @@ def test_design_probes_do_not_reuse_off_result_for_native_core(tmp_path):
 
 
 def test_schema4_qualification_clears_frozen_arrivals_but_keeps_qos():
-    from clawbox.experiments.configure import dump_experiment
+    from clawbox.experiments.configuration import dump_experiment
     from clawbox.experiments.spec import ExperimentSpec
-    raw = yaml.safe_load(Path('examples/experiments/six-dimension.yaml').read_text())
+    raw = yaml.safe_load(Path('tests/fixtures/experiments/six-dimension.yaml').read_text())
     raw['environment']['resources']['local_memory_cgroup'] = '/sys/fs/cgroup/cube_sandbox/sandbox'
     raw['workload']['cases'][0]['qos_class'] = 'be'
     raw['mechanisms']['placement']['cpu_qos_policy'] = 'idle_core'
@@ -758,7 +759,7 @@ def test_schema4_qualification_clears_frozen_arrivals_but_keeps_qos():
     assert qualification_contract_digest(spec) == qualification_contract_digest(changed)
     assert spec_digest(spec) != spec_digest(changed)
     qualified = qualification_spec(spec, concurrency=1)
-    restored = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(qualified)))
+    restored = ExperimentSpec.model_validate(yaml.safe_load(dump_experiment(qualified))["specification"])
     assert restored.execution.session_arrival_offsets_seconds is None
     assert restored.execution.arrival_schedule.value == 'burst'
     assert restored.workload.cases[0].qos_class == 'be'
@@ -774,9 +775,9 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
     import clawbox.experiments.qualification as module
     from clawbox.experiments.spec_types import EvictionPolicy
 
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     spec = spec.model_copy(update={
-        "policies": (BASELINES["predicted-wait-snapshot"].as_policy().model_copy(
+        "policies": (fixture_policy("predicted-wait-snapshot").model_copy(
             update={"runtime_snapshot": pair, "eviction": EvictionPolicy(eviction)}),),
         "resources": spec.resources.model_copy(update={
             "prediction_artifact": "/data/p50.json",
@@ -925,7 +926,7 @@ def test_live_borrow_roundtrip_executes_during_and_after_rebind(
 ) -> None:
     import clawbox.experiments.qualification as module
 
-    spec = load_experiment(EXAMPLE)
+    spec = worker_fixture(EXAMPLE)
     spec = spec.model_copy(update={
         "sandbox": spec.sandbox.model_copy(update={"memory_mib": tool_mib}),
         "resources": spec.resources.__class__.model_validate({

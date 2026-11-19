@@ -50,6 +50,8 @@ htmlcov/
 /working_set_plan.json
 /.tmp-*/
 /.codex-tmp-*/
+/_pytemp/
+/_pytest_base*/
 /deploy/rec-a-*.inspect.jsonl
 *.bundle
 *.log
@@ -64,6 +66,10 @@ output/
 /LLC.md
 /docs/experiment-validation.md
 /CURRENT_PLAN.md
+/*_PLAN.md
+/*_PLAN_*.md
+/docs/*_PLAN_*.md
+/docs/*-handoff.md
 /*_HANDOFF_*.md
 /FULL_SERVICE_OVERHEAD_ATTRIBUTION_*.md
 /FULL_SERVICE_OVERHEAD_OPTIMIZATION_*.md
@@ -96,11 +102,17 @@ output/
 # OS/editor metadata
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
 
 # Local database state
 test-clawbox.db
 clawbox.db
 .tmp-migrate*.db
+*.db-wal
+*.db-shm
 
 # Local credentials; sanitized templates remain versioned
 .env
@@ -109,3 +121,12 @@ clawbox.db
 !.env.example
 !.env.*.example
 *.key
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+/machine.env
+/host.yaml
+/host.json
+/credentials.json

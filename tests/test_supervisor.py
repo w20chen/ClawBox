@@ -1,4 +1,5 @@
 from __future__ import annotations
+from experiment_fixtures import worker_fixture
 
 import json
 import sys
@@ -210,7 +211,7 @@ def test_explicit_new_attempt_runs_again_and_preserves_previous_results(tmp_path
 
 
 def _short_spec():
-    spec = load_experiment(Path("examples/experiments/getting-started.yaml"))
+    spec = worker_fixture(Path("tests/fixtures/experiments/getting-started.yaml"))
     return spec.model_copy(update={
         "execution": spec.execution.model_copy(update={
             "arm_timeout_seconds": 1,

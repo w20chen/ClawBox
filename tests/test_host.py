@@ -192,7 +192,7 @@ def test_failed_preflight_cannot_mutate_host(monkeypatch, tmp_path):
     {"local_memory_cgroup": "/sys/fs/cgroup/other"},
 ])
 def test_setup_rejects_invalid_request_before_services(monkeypatch, changes):
-    from clawbox import lab
+    from clawbox.experiments import host_runtime as lab
     values = HostConfig().model_dump()
     values.update(local_memory_cgroup=lab.DEFAULT_LOCAL_CGROUP, profile=Path("absent.json"))
     values.update(changes)
@@ -283,7 +283,7 @@ def test_detect_adapts_to_single_node_and_saved_settings(tmp_path, monkeypatch):
 
 
 def test_doctor_checks_dense_compute_nodes_without_a_shared_node(tmp_path, monkeypatch):
-    from clawbox import lab
+    from clawbox.experiments import host_runtime as lab
     for name, value in {'memory.max': str(16*1024**2), 'memory.swap.max': '0',
                         'cpuset.mems.effective': '0-1', 'cpuset.cpus.effective': '0-7'}.items():
         (tmp_path / name).write_text(value)

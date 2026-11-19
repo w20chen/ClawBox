@@ -1,11 +1,12 @@
 from __future__ import annotations
+from experiment_fixtures import worker_fixture
 
 import json
 from pathlib import Path
 
 import pytest
 
-from clawbox.experiments.configure import dump_experiment
+from clawbox.experiments.configuration import dump_experiment
 from clawbox.experiments.qualification import qualification_spec
 from clawbox.experiments.results import ResultEnvelope, RunStatus, summary_arm_entry, utcnow
 from clawbox.experiments.spec import expand_matrix, load_experiment
@@ -37,7 +38,7 @@ def _write_run(
     root: Path, *, attempts: tuple[str, ...] = ("attempt-1",),
     qualification: bool = False, cleanup_verified: bool = True,
 ) -> tuple[Path, list[ResultEnvelope]]:
-    spec = load_experiment(Path("examples/experiments/getting-started.yaml"))
+    spec = worker_fixture(Path("tests/fixtures/experiments/getting-started.yaml"))
     spec = spec.model_copy(update={
         "workload": spec.workload.model_copy(update={
             "cases": tuple(

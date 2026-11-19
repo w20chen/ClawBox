@@ -1,4 +1,4 @@
-"""Strict schema-v3 experiment specification and deterministic arm planning."""
+"""Internal worker models and deterministic trial planning."""
 from __future__ import annotations
 
 import hashlib
@@ -484,9 +484,7 @@ class ExecutionSpec(StrictFrozenModel):
     # scheduling. C2 is the elapsed-time baseline; B uses pre-call predictions.
     @property
     def llc_poll_interval_seconds(self) -> float:
-        # C2's frozen sampler follows memory cadence; B has its own cadence.
-        return (self.memory_sample_interval_seconds if self.tool_call_cpu_policy == 'c2'
-                else self.tool_call_cpu_poll_interval_seconds)
+        return self.tool_call_cpu_poll_interval_seconds
 
     tool_call_cpu_policy: Literal["c0", "c2", "b"] = "c0"
     cpu_qos_policy: Literal["off", "idle", "idle_core"] = "off"
@@ -846,12 +844,6 @@ class ResourcesSpec(StrictFrozenModel):
             raise ValueError("pool memory budget cannot exceed physical LOCAL capacity")
         if self.memory_action_costs is not None and self.memory_scheduling not in {"joint", "snapshot_only"}:
             raise ValueError("memory_action_costs requires joint or snapshot_only memory scheduling")
-        if (self.memory_action_costs is not None and self.snapshot_storage == "tiered"
-                and (self.memory_action_costs.cold_checkpoint_seconds_per_gib is None
-                     or self.memory_action_costs.cold_restore_seconds_per_gib is None)):
-            raise ValueError(
-                "tiered memory_action_costs requires COLD checkpoint and restore costs"
-            )
         return self
 
 
@@ -872,7 +864,14 @@ class PolicySpec(StrictFrozenModel):
     runtime_snapshot: bool = True
     gpu_reclaim_min_remaining_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     gpu_signal_max_age_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
-    gpu_first_token_prewarm: bool = True
+    gpu_prewarm_events: tuple[Literal['think_end', 'first_token'], ...] = ()
+    gpu_signals: bool = False
+
+    @property
+    def consumes_gpu_signals(self) -> bool:
+        return (self.gpu_signals or bool(self.gpu_prewarm_events)
+                or self.eviction is EvictionPolicy.GPU_AWARE_PRESSURE
+                or self.snapshot_next_use_residency)
     resource_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_overrides: dict[str, Any] = Field(default_factory=dict)
     mechanisms: dict[str, Any] = Field(default_factory=dict)
@@ -897,8 +896,6 @@ class PolicySpec(StrictFrozenModel):
             raise ValueError("os-default deployment requires resident VMs with admission and runtime control off")
         if self.eviction not in {EvictionPolicy.NONE, EvictionPolicy.WAIT_AWARE_PRESSURE, EvictionPolicy.GPU_AWARE_PRESSURE}:
             raise ValueError("supported eviction policies: none, wait_aware_pressure, gpu_aware_pressure")
-        if self.eviction is EvictionPolicy.GPU_AWARE_PRESSURE and not self.runtime_snapshot:
-            raise ValueError("gpu_aware_pressure requires runtime_snapshot (agent_and_tool scope)")
         if self.restore not in {RestorePolicy.NONE, RestorePolicy.REACTIVE}:
             raise ValueError("supported restore policies: none, reactive")
         if self.reclamation is ReclamationPolicy.RESIDENT:
@@ -919,12 +916,12 @@ class PolicySpec(StrictFrozenModel):
             )
         if self.snapshot_next_use_residency and (
             self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
-            or self.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE
-            or not self.runtime_snapshot
         ):
             raise ValueError(
-                "snapshot_next_use_residency requires GPU-aware agent_and_tool snapshot pause"
+                "snapshot_next_use_residency requires snapshot pause"
             )
+        if self.gpu_prewarm_events and self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
+            raise ValueError('GPU prewarm requires snapshot pause')
         return self
 
 
@@ -939,9 +936,6 @@ class OutputSpec(StrictFrozenModel):
 class ExperimentSpec(StrictFrozenModel):
     schema_version: int
     design: dict[str, Any] | None = None
-    suite: Literal["admission", "numa-snapshot"] | None = None
-    suite_ablations: bool = False
-    suite_runtime_control: RuntimeControl = RuntimeControl.OFF
     experiment_id: str = Field(default="experiment", min_length=1)
     workload: WorkloadSpec
     agent: AgentSpec = Field(default_factory=AgentSpec)
@@ -956,26 +950,35 @@ class ExperimentSpec(StrictFrozenModel):
 
     @model_validator(mode="before")
     @classmethod
-    def resolve_suite(cls, raw):
+    def compile_worker_design(cls, raw):
         if isinstance(raw, dict) and raw.get('schema_version') == 4 and 'environment' in raw:
             from .design import compile_design
             return compile_design(raw)
-        from .suites import expand_suite
-        return expand_suite(raw) if isinstance(raw, dict) else raw
+        return raw
 
     @model_validator(mode="after")
     def validate_v2(self) -> "ExperimentSpec":
-        if any(p.eviction is EvictionPolicy.GPU_AWARE_PRESSURE for p in self.policies):
+        if any(p.consumes_gpu_signals for p in self.policies):
             if self.inference.backend is not InferenceBackend.SERVING_SIM:
-                raise ValueError("GPU idle reclaim requires inference.backend=serving_sim")
+                raise ValueError("GPU signal consumers require inference.backend=serving_sim")
         if self.schema_version == 4:
-            if not self.design or self.suite is not None:
+            if not self.design:
                 raise ValueError('schema 4 requires a six-dimension design, not a legacy suite')
             if not self.policies or len({p.name for p in self.policies}) != len(self.policies):
                 raise ValueError('comparison requires nonempty, uniquely named arms')
             for policy in self.policies:
                 effective_spec(self, policy)
             return self
+        if (self.resources.memory_action_costs is not None
+                and self.resources.snapshot_storage == 'tiered'
+                and any(p.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE for p in self.policies)
+                and (self.resources.memory_action_costs.cold_checkpoint_seconds_per_gib is None
+                     or self.resources.memory_action_costs.cold_restore_seconds_per_gib is None)):
+            raise ValueError('tiered reclaim requires measured COLD checkpoint and restore costs')
+        if (self.execution.snapshot_branching is None
+                and self.execution.placement_policy in {'affinity', 'snapshot_aware'}):
+            raise ValueError('affinity/snapshot_aware placement requires execution.snapshot_branching; '
+                             'ordinary sessions use round_robin, explicit, load_aware or os_default')
         branching = self.execution.snapshot_branching
         storage = self.resources.snapshot_scheduling_storage
         if branching is not None and storage is None:
@@ -1107,18 +1110,14 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError("snapshot_page_management requires inference.backend=serving_sim")
             if self.resources.snapshot_mechanism != "incremental-cow":
                 raise ValueError("snapshot_page_management requires incremental-cow snapshots")
-            if self.resources.snapshot_compression != "zstd-page":
-                raise ValueError("snapshot_page_management requires zstd-page compression")
             if self.resources.snapshot_storage != "tiered" or not self.resources.cold_snapshot_root:
                 raise ValueError("snapshot_page_management requires tiered COLD snapshot storage")
             if any(
-                policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE
-                or policy.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
-                or not policy.runtime_snapshot
+                policy.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
                 for policy in self.policies
             ):
                 raise ValueError(
-                    "snapshot_page_management requires GPU-aware agent_and_tool snapshot pause"
+                    "snapshot_page_management requires snapshot pause"
                 )
         if self.workload.session_assignment is SessionAssignment.UNIQUE:
             required = max(self.execution.concurrency_levels)
@@ -1255,7 +1254,7 @@ class ExperimentSpec(StrictFrozenModel):
             raise ValueError("only schema_version: 3 is supported")
         if not self.policies:
             raise ValueError("policies must not be empty")
-        if nodes and self.execution.placement_policy != "os_default" and self.suite != "admission" and any(p.deployment != "os-default" for p in self.policies):
+        if nodes and self.execution.placement_policy != "os_default" and any(p.deployment != "os-default" for p in self.policies):
             tool_shapes = tuple(
                 resolve_case_sandbox(case, self.sandbox) for case in cases
             ) or (self.sandbox,)
@@ -1319,8 +1318,8 @@ class ExperimentSpec(StrictFrozenModel):
             raise ValueError("experiments require resources.local_memory_cgroup for physical accounting")
         if AdmissionPolicy.FIXED in admissions and self.resources.static_tool_memory_mib is None:
             raise ValueError("fixed admission requires resources.static_tool_memory_mib")
-        if AdmissionPolicy.PREDICTED in admissions and not self.resources.prediction_artifact:
-            raise ValueError("predicted admission requires a validated prediction_artifact")
+        if (AdmissionPolicy.PREDICTED in admissions or self.execution.tool_call_cpu_policy == 'b') and not self.resources.prediction_artifact:
+            raise ValueError("predicted admission or B CPU placement requires a validated prediction_artifact")
         if self.resources.prediction_mode == 'host-live':
             if not self.resources.prediction_artifact:
                 raise ValueError('host-live requires an explicit validated seed prediction_artifact')
@@ -1353,7 +1352,7 @@ class ExperimentArm(StrictFrozenModel):
 def effective_spec(spec: ExperimentSpec, policy: PolicySpec) -> ExperimentSpec:
     """Validate one fully resolved arm through the same worker schema."""
     raw = spec.model_dump(mode='json')
-    raw.update(schema_version=3, design=None, suite=None, suite_ablations=False)
+    raw.update(schema_version=3, design=None)
     raw['resources'].update(policy.resource_overrides)
     raw['execution'].update(policy.execution_overrides)
     raw['policies'] = [policy.model_dump(mode='json')]
@@ -1393,26 +1392,6 @@ def expand_matrix(spec: ExperimentSpec) -> tuple[ExperimentArm, ...]:
                     if spec.schema_version == 4:
                         resolved = effective_spec(spec, policy)
                         resources, execution = resolved.resources, resolved.execution
-                    elif policy.deployment == "os-default" or spec.suite == "admission":
-                        # Inherit the same host VM domain and combined live limit.
-                        # WARM capacity is not an additional live-memory allowance.
-                        capacity = (resources.local_memory_capacity_mib or resources.pool_memory_budget_mib) + (resources.shared_memory_borrow_limit_mib or 0)
-                        resources = ResourcesSpec.model_validate({**resources.model_dump(),
-                            "lifecycle_admission": "os-managed", "proactive_cache_reclaim": False,
-                            "compute_nodes": (), "local_numa_node": None,
-                            "local_memory_capacity_mib": capacity, "pool_memory_budget_mib": capacity,
-                            "local_memory_low_watermark_mib": None, "local_memory_high_watermark_mib": None,
-                            "shared_memory_borrow_limit_mib": None, "warm_memory_capacity_mib": 0,
-                            "warm_numa_node": None, "memory_scheduling": "local_only",
-                            "snapshot_storage": "tiered", "memory_action_costs": None,
-                            "snapshot_residency_costs": None, "template_base_sharing": "disabled",
-                            "prediction_artifact": resources.prediction_artifact,
-                            "observe_predictions": resources.observe_predictions})
-                        execution = execution.model_copy(update={"placement_policy": "os_default", "session_compute_nodes": ()})
-                    if spec.schema_version != 4 and resources.snapshot_storage != "warm-only" and resources.shared_memory_borrow_limit_mib is None and resources.memory_scheduling not in {
-                        "snapshot_only", "joint",
-                    }:
-                        resources = resources.model_copy(update={"warm_memory_capacity_mib": 0})
                     identity = {"spec_digest": digest,
                                 "case_ids": [item.case_id for item in session_cases],
                                 "session_assignment": spec.workload.session_assignment,
@@ -1491,12 +1470,11 @@ def load_workload_cases(workload: WorkloadSpec) -> tuple[WorkloadCase, ...]:
 
 
 def load_experiment(path: Path) -> ExperimentSpec:
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise ValueError(f"cannot read experiment {path}: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise ValueError("experiment document must be an object")
-    if raw.get("schema_version") not in {3, 4}:
-        raise ValueError("use schema_version: 4 for six-dimension experiments")
-    return ExperimentSpec.model_validate(raw)
+    from .configuration import load_frozen
+    return load_frozen(path)
+
+
+def ensure_supported_experiment(spec: ExperimentSpec) -> None:
+    # Internal models already enforce all mechanism combinations.
+    for policy in spec.policies:
+        policy.valid_tuple()

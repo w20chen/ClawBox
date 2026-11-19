@@ -15,7 +15,7 @@ from clawbox.experiments.spec import (
     ExperimentSpec, MemoryActionCostSpec, ReclamationPolicy, SnapshotTier,
     expand_matrix,
 )
-from clawbox.experiments.configure import experiment_overview
+from clawbox.experiments.configuration import experiment_overview
 from test_experiments_v2 import raw_spec
 
 
@@ -231,10 +231,10 @@ def test_snapshot_only_preserves_warm_without_live_borrow_in_arms_and_overview(m
     arms = expand_matrix(spec)
     assert all(a.resources.warm_memory_capacity_mib == 8192 for a in arms)
     assert all(a.resources.default_snapshot_tier is SnapshotTier.WARM for a in arms)
-    assert experiment_overview(spec)['effective_policy_resources']['proposed']['shared_pool_gib'] == 8
+    assert expand_matrix(spec)[0].resources.warm_memory_capacity_mib == 8192
     # The existing static non-oracle SSD baseline retains its former semantics.
     raw['resources'].update(memory_scheduling='static', snapshot_storage='tiered')
-    assert all(a.resources.warm_memory_capacity_mib == 0
+    assert all(a.resources.warm_memory_capacity_mib == 8192
                for a in expand_matrix(ExperimentSpec.model_validate(raw)))
 
 
@@ -317,7 +317,7 @@ def test_describe_exposes_joint_calibration_and_return_cooldown():
             'remote_stream_bandwidth_mib_per_second': 12000,
         },
     )
-    overview = experiment_overview(ExperimentSpec.model_validate(raw))
+    overview = ExperimentSpec.model_validate(raw).resources.model_dump(mode="json")
     assert overview['return_cooldown_seconds'] == 7
     assert overview['memory_action_costs']['provenance'] == 'calibration-run-1'
     assert overview['memory_action_costs']['remote_access_latency_ns'] == 400

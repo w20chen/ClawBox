@@ -327,7 +327,7 @@ class PolicyCoordinator:
         These estimates are heuristic scheduling inputs, not completion deadlines.
         """
         result = {"accepted": False, "should_prewarm": False}
-        if self.policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE:
+        if not self.policy.consumes_gpu_signals:
             return {**result, "reason": "gpu_policy_disabled"}
         with self.demand.progress_lock:
             state = self._sessions.get(session_id)
@@ -381,10 +381,7 @@ class PolicyCoordinator:
             elif phase in {"first_token", "think_start", "think_end", "finish"}:
                 state.gpu_prefill_estimate_s = None
                 state.gpu_prefill_observed_monotonic_s = None
-            prewarm_boundary = (
-                phase == "think_end"
-                or (phase == "first_token" and self.policy.gpu_first_token_prewarm)
-            )
+            prewarm_boundary = phase in self.policy.gpu_prewarm_events
             if prewarm_boundary and role in {"A", "D"}:
                 result["should_prewarm"] = not state.gpu_prewarm_requested
                 result["prewarm_trigger"] = phase

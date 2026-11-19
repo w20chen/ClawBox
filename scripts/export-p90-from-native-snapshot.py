@@ -9,7 +9,7 @@ import math
 import time
 from pathlib import Path
 
-from clawbox.cell.p90 import AdmissionPrediction
+from clawbox.tuning.p90_export import AdmissionPrediction
 from clawbox.tuning.native import _clawtune_api
 
 

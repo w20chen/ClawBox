@@ -21,7 +21,7 @@ from typing import Any
 from clawbox.cube import (
     CubeSandboxClient, CubeSandboxLifecycle, OwnedSandboxJournal, Ownership,
 )
-from clawbox.lab import apply_environment, doctor
+from clawbox.experiments.host_runtime import apply_environment, doctor
 from .results import RunStatus
 from .inputs import _saved_trace_info, validate_inputs, validate_launch_inputs
 from .serving_sim_inputs import serving_sim_input_identity
@@ -194,6 +194,7 @@ def current_qualification_input_manifest(spec: ExperimentSpec) -> dict[str, Any]
             spec.resources.prediction_artifact
             and (
                 AdmissionPolicy.PREDICTED in admissions
+                or spec.execution.tool_call_cpu_policy == 'b'
                 or spec.resources.observe_predictions
                 or spec.resources.prediction_mode == 'host-live'
             )

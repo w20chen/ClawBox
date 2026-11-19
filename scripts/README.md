@@ -26,7 +26,6 @@ point in new terminals to avoid repeating environment and privilege setup.
 | Cache recorded Conda environment packages for offline replay | [cache-recorded-conda-environments.py](cache-recorded-conda-environments.py) |
 | Run persistent host-local APT and pip caches | [clawbox-package-cache](clawbox-package-cache), [clawbox-pypi-cache](clawbox-pypi-cache) |
 | Inspect cold-start prediction coverage without VMs | [evaluate-cold-start-coverage.py](evaluate-cold-start-coverage.py) |
-| Reproduce the frozen full-pool versus one-cache-cluster CPU-placement experiment | [run-llc-shared-reproduction.sh](run-llc-shared-reproduction.sh) |
 
 Installation and image-build helpers expose their options through `--help`.
 Cache helpers use `start`, `status`, and `stop` as shown in the workload guide.
@@ -40,7 +39,5 @@ measurements needed to audit a result, and do not use `git clean -fdx`. For host
 crash dumps, use the documented `experiment host clean` preview/apply commands.
 
 The other scripts support installation, image preparation, integration checks,
-or analysis; they are not
-alternate experiment launch interfaces. The old `scripts/lab` and
-`snapshot-host.sh` flows are older single-node helpers; configure new hosts with
+or analysis. Configure new hosts with
 `clawbox experiment host inspect/init/check/apply`.

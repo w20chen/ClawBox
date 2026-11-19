@@ -19,6 +19,7 @@ import time
 class AdmissionMetadata:
     seed_path: str
     identities: dict
+    require_memory: bool = True
     providers: dict = field(default_factory=dict)
 
     def __call__(self, repository, models, command, digest):
@@ -26,6 +27,7 @@ class AdmissionMetadata:
         if repository not in self.providers:
             self.providers[repository] = HostLivePredictionProvider(
                 Path(self.seed_path), repository=repository,
+                require_memory=self.require_memory,
                 sandbox_identity=self.identities.get(repository))
         return self.providers[repository]._metadata({'models': models}, command, digest)
 

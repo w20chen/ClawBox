@@ -2,20 +2,29 @@
 
 Use the [experiment walkthrough](guide.md) for command order and the
 [installation guide](installation.md) for host setup and update requirements.
-This page describes the supported schema-4 interface. The complete machine-readable
+This page describes the baseline/workload interface. The complete machine-readable
 field catalog and command flags are available from the installed code:
 
 ```bash
-bash scripts/clawbox experiment schema > /tmp/clawbox-schema.json
+bash scripts/clawbox experiment schema baseline > /tmp/clawbox-baseline-schema.json
+bash scripts/clawbox experiment schema workload > /tmp/clawbox-workload-schema.json
 bash scripts/clawbox experiment --help
-bash scripts/clawbox experiment configure --help
+bash scripts/clawbox experiment resolve --help
 ```
 
-Defaults below are model defaults; recipes, the base YAML, and host profiles can
-set explicit values. `experiment describe SPEC` shows the effective comparison.
-Unknown YAML fields and invalid combinations fail validation.
+Defaults below are model defaults. Only explicit values in the two files replace
+them; host profiles do not override them. Unknown fields and invalid
+combinations fail validation. `SPEC` below means `--baseline baseline.yaml
+--workload workload.yaml`, or a positional internal snapshot produced by `resolve`.
+Explicit recorded-trace and snapshot-branching case `source_reference` paths
+are relative to workload.yaml, including synthetic branching cases. They are
+frozen as absolute paths; changing the shell directory does not change the input.
 
 ## Commands
+
+`clawbox experiment` is the public experiment interface. Prefer `launch` with a
+baseline/workload pair; `qualify`, `run` and `resume` belong to the same workflow.
+The worker module is internal to the supervisor.
 
 All commands in this table follow `bash scripts/clawbox experiment`.
 Use wrapper option `--sudo` before `experiment` for privileged VM/host operations.
@@ -25,8 +34,7 @@ they rewrite result artifacts.
 
 | Command | Purpose and main options |
 | --- | --- |
-| `recipes [--json]` | List schema-4 comparison families. |
-| `schema` | Print the full editable JSON Schema, including defaults and constraints. |
+| `schema baseline\|workload` | Print the full editable JSON Schema, including defaults and constraints. |
 | `host inspect` | Read NUMA topology, CPUs, and memory. |
 | `host init FILE [--detect] [--from-profile PROFILE]` | Write a new editable host YAML; existing files are preserved. |
 | `host check FILE` | Check the plan and prerequisites without applying it. |
@@ -44,7 +52,8 @@ they rewrite result artifacts.
 | `snapshot-storage reset-cache FILE [--apply]` | Preview SSD file residency by default. On an idle Linux host with applied owned mounts, sync unique regular inodes inside the two local SSD roots, then their exact owned backing images, and request `POSIX_FADV_DONTNEED`; preserve WARM and all other external files. Inner files and backing images have separate requested-byte and actual before/after `mincore` page counts. Advice is not guaranteed, including with direct-I/O loops. Use after qualification/replica cleanup and before each matched formal arm; no host apply or image rebuild required. |
 | `setup` | Direct single-compute-node setup using template/node and LOCAL/WARM options; the editable `host` workflow is preferred. |
 | `images [--role runtime\|sandbox]` | Build/register integration images using an existing profile. Repeat `--role` or omit it for both. |
-| `configure BASE OUTPUT` | Generate an editable specification; `--profile`, `--recipe`, `--set`, `--force`, and the options below. |
+| `resolve SPEC --output FILE` | Freeze effective settings without starting VMs; refuses existing outputs. |
+| `base-cache init FILE --baseline B --workload W --template ID --capacity-mib N` | Resolve cache inputs using the same configuration pair; prepare/status/cleanup manage the prepared host cache. |
 | `import-trace SOURCE --output FILE` | Convert a recording to replay schema 6; workspace mapping and `--python` are optional. |
 | `import-corpus SOURCE --output DIRECTORY` | Import unique tasks; optional `--count`, repeated `--prefer`, workspace mapping, and `--python`. |
 | `prepare-serving-sim SPEC --output DIRECTORY` | Prepare a new GPU catalog and CPU binding manifest from selected replay cases. Optional `--source-map FILE` maps case IDs to original format-5 paths; relative paths use that JSON file's directory. Existing output directories are rejected. |
@@ -63,49 +72,25 @@ they rewrite result artifacts.
 | `abort ID`, `destroy ID` | Stop/clean owned VMs while preserving results; `--cleanup-workers` (8), `--cleanup-timeout-seconds` (180). |
 | `train RUN_DIRECTORY... --trace FILE --repository NAME --output FILE` | Fit frozen KBs and measured host-memory calibration from completed training runs. |
 
-`baselines` and the old suite/baseline configure selectors belong to the
-[deprecated schema-3 interface](deprecated.md). New designs use recipes and
-explicit mechanism overrides.
+### Configuration ownership
 
-### Configure options
+Edit the baseline and workload YAML directly. Each baseline selects one policy.
+Each baseline defines one policy. Repetitions, cases and offered concurrency
+levels can still produce multiple trials using that same policy.
 
-`configure` reads `BASE`, applies the host profile and explicit options, and writes
-`OUTPUT`. A file already present requires `--force`. Use YAML for fields without a
-dedicated CLI flag.
-
-The default `~/.config/clawbox/host.json` fills missing VM template IDs; it does
-not replace explicit IDs and their image/shape fields already in `BASE`.
-Passing `--profile PATH` explicitly selects that profile's templates, unless
-overridden by template flags. Changing only inference or workload settings
-therefore preserves the experiment's verified templates.
-
-| Group | Options |
+| Input | Sections |
 | --- | --- |
-| Design | `--experiment-id`, `--recipe`, `--fixed-methods`, `--checkpoint-axis encoding\|storage\|residency`, repeated `--set GROUP.FIELD=YAML_VALUE` |
-| Workload | `--trace`, `--workload-manifest`, `--case-id`, `--prompt`, `--repository`, `--base-commit`, `--validation-command`, `--repetitions`, `--session-assignment single_case\|round_robin\|unique\|grouped`, `--rollouts-per-case` |
-| VM identity | `--runtime-template-id`, `--tool-template-id`, `--runtime-image-reference`, `--tool-image-reference`, `--runtime-image-digest`, `--tool-image-digest`, `--target-node` |
-| VM shape | `--runtime-vcpu`, `--tool-vcpu`, `--runtime-memory-gib`, `--tool-memory-gib`, `--tool-workspace` |
-| Prediction | `--prediction-mode runtime\|frozen\|cold-start\|host-live`, `--prediction-artifact`, `--prediction-reservation-scale`, `--static-tool-memory-mib INTEGER\|auto`, `--admission-margin-mib` |
-| Resources | `--pool-memory-gib`, `--emergency-free-memory-gib`, `--checkpoint-headroom-gib`, `--warm-root`, `--warm-memory-gib`, `--cold-root` |
-| Placement/control | `--placement-policy`, `--session-compute-nodes` (comma-separated IDs), `--runtime-poll-interval-seconds`, `--memory-scheduling` |
-| Snapshots/evidence | `--snapshot-mechanism full-copy\|incremental-cow`, `--snapshot-storage tiered\|warm-only`, `--template-base-sharing-artifact` |
-| Scheduling | `--concurrency` (comma-separated levels), `--arrival-schedule burst\|fixed_stagger\|poisson`, `--stagger-seconds`, `--poisson-arrival-window-fraction`, `--poisson-arrival-window-seconds`, `--random-seed`, `--dependency-install-concurrency` (positive integer) |
-| Deadlines | `--arm-timeout-seconds`, `--command-timeout-seconds` |
-| Inference | `--inference-backend replay\|api\|serving_sim`, `--model`, `--base-url`, `--api-key-env`, `--time-scale`, `--serving-sim-catalog-manifest` |
-| Launch immediately | `--launch`, with `--run-id`, `--qualification-concurrency`, `--force-qualify`, `--detach` |
+| baseline.yaml | `kind: clawbox-baseline`, `name`, `environment`, `agent`, `inference`, `conditions`, `mechanisms`, `evidence`, `execution`, `measurement` |
+| workload.yaml | `kind: clawbox-workload`, `name`, `tasks`, `submission`, `validation` |
 
-Schema-4 `--set` accepts mechanism groups and `conditions.FIELD`. Other fields
-are edited in YAML. Arm overrides take precedence and are reported by
-`configure` when they replace an explicit common setting.
-
-Newly configured experiments always write
-`execution.dependency_install_concurrency: null`, including when `BASE` saved a
-historical positive gate. This leaves apt/pip commands unlimited. Pass
-`--dependency-install-concurrency N` only when an outbound package path needs a
-measured positive limit. Either choice requires a new run ID; it does not
-require host apply, image rebuild, or retraining. Human-readable `configure` and
-`describe` output always identifies the effective dependency-install setting as
-`unlimited` or as an explicit active-install limit.
+`execution.dependency_install_concurrency` defaults to `null` and preserves any
+explicit positive limit. `describe` reports it. Relative input/evidence paths
+resolve against the owning YAML, manifest trace paths against the manifest.
+Linux host storage paths must be absolute. Model and endpoint selection must
+come from the baseline or its explicit ClawTune configuration reference;
+OPENCLAW_MODEL_REF/OPENCLAW_BASE_URL no longer supply hidden defaults.
+API credentials still use the named environment variable. YAML does not expand shell variables.
+See [option relationships](option-relations.md) for dependencies and exclusions.
 
 `sudo bash scripts/clawbox-pypi-cache {start|status|stop}` manages the host PyPI
 cache. Docker and curl are required. `start` waits for its HTTP status endpoint;
@@ -130,7 +115,7 @@ Use a new experiment run ID; no host apply, guest image rebuild, or retraining.
 | `machine.env` | Shell settings for API addresses, source paths, image/template IDs, and default output root |
 | `host.yaml` | Editable host topology, budgets, mounts, and service settings |
 | `host.json` | Applied host profile and reusable image-build settings |
-| Experiment YAML | Editable input before a run |
+| baseline.yaml + workload.yaml | The two editable experiment inputs |
 | `RUN/experiment.yaml` | Frozen input for one run ID |
 
 Host-plan capacities and CLI options ending in `-gib` use GiB. VM YAML and
@@ -138,18 +123,18 @@ admission fields ending in `_mib` use MiB. One GiB is 1024 MiB; one MiB is
 1,048,576 bytes. Durations are seconds unless named `_ms` or `_ns`. CPU lists use
 Linux logical CPU IDs; vCPU counts do not reserve physical cores.
 
-| Schema-4 section | Contents |
+| Baseline section (unless marked workload) | Contents |
 | --- | --- |
 | `environment.runtime`, `environment.sandbox` | Shared Runtime/Tool VM identities and shapes |
 | `environment.resources` | Physical scope, compute nodes, LOCAL/shared capacities, snapshot paths |
-| `workload` | Input/manifest, cases, assignment, repetitions |
+| Workload `tasks` | Input/manifest, cases, assignment, repetitions |
 | `agent`, `inference` | OpenClaw driver and replay/API model configuration |
 | `conditions` | Prediction source common to the comparison |
-| `mechanisms` | Six policy dimensions plus deployment and coordination |
-| `comparison` | Recipe label and explicit arm overrides |
+| `mechanisms` | Admission, runtime, placement, reclaim, shared memory, checkpoint, restore, deployment and coordination |
+| Workload `submission` | Offered sessions, arrivals, repetition ordering, active-session bound and measurement window |
 | `evidence` | Prediction artifacts, measured cost models, sharing proof |
-| `execution` | Offered concurrency, arrivals, timeouts, concurrency bounds, diagnostics |
-| `measurement` | Sampling, stabilization, final validation, worker output fallback |
+| `execution` | Timeouts, creation/installation limits and diagnostics |
+| `measurement` | Sampling, stabilization and worker output fallback; final validation is workload `validation` |
 
 ### Peer-local-SSD restore
 
@@ -182,7 +167,7 @@ base cache, admission, CPU policies and memory borrowing retain their own contro
 Tiered peer qualification requires both WARM-to-COLD relocation and a direct
 native COLD checkpoint. Requalify after changing the installed native build.
 
-`execution.measurement_window_seconds` defaults to unset. Set positive seconds
+`submission.measurement_window_seconds` defaults to unset. Set positive seconds
 for a fixed window starting at the first planned arrival; completion throughput
 uses this full denominator and retains unfinished sessions. Early completion
 does not shorten it. `arm_timeout_seconds` remains the overall execution bound;
@@ -342,7 +327,7 @@ threshold. The default includes headroom over the latest Full-1280 observation;
 it is a physical-space allowance, not the VM's logical writable-layer size.
 Changing either field needs a new run ID, but no host apply or template rebuild.
 
-`workload.repetitions` defaults to 1 and `session_assignment` to `unique`.
+`tasks.repetitions` defaults to 1 and `session_assignment` to `unique`.
 `single_case` repeats one case; `round_robin` cycles at least two cases; `unique`
 requires enough distinct cases for the offered concurrency. Each case records
 its `case_id`, source, prompt, repository/revision, replay reference, optional
@@ -350,8 +335,8 @@ validation command, and metadata. A case-level `sandbox` is a complete Tool VM
 description, not a partial override. Optional `snapshot_reuse_probability` is a
 value in `[0,1]` used by value-based snapshot residency.
 
-`grouped` assigns each case a contiguous group of `workload.rollouts_per_case`
-independent sessions (default 1, positive integer; CLI `--rollouts-per-case`).
+`grouped` assigns each case a contiguous group of `tasks.rollouts_per_case`
+independent sessions (default 1, positive integer).
 The only concurrency level must equal case count times rollouts per case.
 Each group shares its original replay trace and offered arrival instant; every
 session creates separate Runtime and Tool VMs with independent mutable state.
@@ -370,9 +355,10 @@ validation checks their dependencies.
 | `admission` | `tool: off` (`off`, `fixed`, `predicted`); `startup_headroom_mib: 256`; `admission_margin_mib: 256`; fixed/non-command budgets unset; `prediction_reservation_scale: 1.0`; `small_tool_admission_bypass_mib: 4` |
 | `runtime` | `memory_protection: false`; `cpu_release_boost: false`; `proactive_memory_reclaim: false`; `runtime_poll_interval_seconds: 0.5`; nested `pressure_control` below |
 | `placement` | `policy: round_robin` (`os_default`, `round_robin`, `explicit`, `load_aware`); `template_affinity: false`; `placement_cpu_overcommit: 1024.0`; `template_balance_slack: 0.10`; `session_compute_nodes: []`; Tool-call CPU fields below |
-| `idle_reclaim` | `policy: off` (`off`, `wait`, `gpu`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024`; `gpu_reclaim_min_remaining_seconds: 1.0`; `gpu_signal_max_age_seconds: 5.0`; `gpu_first_token_prewarm: true`. GPU policy requires `serving_sim` and `agent_and_tool`; see the inference options below. |
+| `idle_reclaim` | `policy: off` (`off`, `wait`, `gpu`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024`; `gpu_reclaim_min_remaining_seconds: 1.0`; `gpu_signal_max_age_seconds: 5.0`. GPU policy requires `serving_sim`; scope is independent; see the inference options below. |
 | `shared_memory` | `borrow: off` (`off`, `hard`, `pressure`); `borrow_cooldown_seconds: 5`; `return_cooldown_seconds: 5`; `shared_memory_resident_headroom_mib: null` |
 | `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`, `next-use`); transfer limits below |
+| `restore` | `prewarm_events: []`; explicitly select `think_end`, `first_token`, or both. Requires snapshot reclaim and serving_sim; independent of victim selection and scope. |
 | `deployment` | `mode: managed` (`managed`, `os-default`); `resident_capacity_accounting: false`; `lifecycle_reservation_scale: 1.0` |
 | `coordination` | `action_selection: reclaim_first` (`reclaim_first`, `measured_cost`) |
 
@@ -400,7 +386,7 @@ reserve. Changing it requires a new run ID, but no host apply, image rebuild,
 retraining, or repeated capability qualification.
 
 `checkpoint.residency: next-use` is active only with tiered storage,
-`idle_reclaim.policy: gpu`, `idle_reclaim.scope: agent_and_tool`, and
+idle reclaim (`wait` or `gpu`, either scope), and
 `inference.backend: serving_sim`. Each accepted `queued.est_wait_s` observation
 is reduced by transport/queue-event age and converted to an absolute monotonic
 deadline for both Runtime and Tool. This signal estimates queue plus prefill;
@@ -423,7 +409,7 @@ needed only when storage paths/capacity or installed native components change.
 
 Resident-capacity accounting requires managed deployment, Tool admission off,
 and no shared-memory borrowing or proactive reclaim. Its scale must be greater
-than zero and at most one. The resident-capacity recipe holds fixed VM charges
+than zero and at most one. Resident-capacity accounting holds fixed VM charges
 until cleanup; ordinary managed admission tracks measured consumption and
 outstanding growth claims.
 
@@ -447,21 +433,17 @@ These fields are under `mechanisms.runtime.pressure_control`:
 
 ### Tool-call CPU placement
 
-Fields are under `mechanisms.placement`. `configure --recipe full` selects B
-on an existing verified Full reference; `--recipe llc` generates C0, C2 and B
-arms while retaining all other reference mechanisms. Both recipes reset this
-axis to the defaults below, with explicit `--set` values taking precedence.
-They do not modify frozen YAMLs and do not support `--fixed-methods`, which would
-neutralize the Full context.
+Fields are under `mechanisms.placement` in the baseline. Select C0, C2 or B
+explicitly; comparing methods uses separate baseline files and the same workload.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `tool_call_cpu_policy` | `b` for Full; `c0` for generic neutral designs | `c0`: full selected-NUMA mask; `c2`: original elapsed-time baseline; `b`: prediction-triggered placement. Arm names do not select behavior. |
 | `session_cpu_slots` | `[]` | List of `{node_id, cpus}` slots; `cpus` is a Linux logical CPU list. Each slot serves one complete Runtime/Tool pair at a time. Both VMs' vCPU threads stay in that mask; reuse occurs after session cleanup. Requires managed resident C0 `round_robin` placement, compute nodes and a managed cgroup. Masks must be within their node and must not share physical cores, including SMT siblings. Effective concurrency is also capped by slot count. CPU-cluster masks may still share outer L3 cache. Requires a new run ID and qualification; host apply only if the allowed node/CPU pools change, no image rebuild or retraining. |
 | `tool_call_cpu_min_duration_seconds` | 1 | Seconds; for B, a valid pre-call ClawTune Tool duration p50 must be strictly greater than this value to request binding. B has no elapsed-time delay or duration-based retry. C2 instead waits at least this elapsed time before binding. |
-| `tool_call_cpu_duration_source` | `tool` | B only. `tool`: use ToolKB only. `lattice`: prefer LatticeKB, falling back to ToolKB only if its duration target is missing/unavailable. Missing predictions skip binding. No units. Change via `--set placement.tool_call_cpu_duration_source=lattice` or YAML; requires a new run ID and qualification, no host apply, image rebuild or retraining. Inactive for C0/C2. |
+| `tool_call_cpu_duration_source` | `tool` | B only. `tool`: use ToolKB only. `lattice`: prefer LatticeKB, falling back to ToolKB only if its duration target is missing/unavailable. Missing predictions skip binding. No units. Change `mechanisms.placement.tool_call_cpu_duration_source` in YAML; requires a new run ID and qualification, no host apply, image rebuild or retraining. Inactive for C0/C2. |
 | `tool_call_cpu_max_utilization` | null | B only. Optional fraction in `(0,1]`; when set, a cluster must have measured busy CPU utilization strictly below this limit. YAML `null` disables this utilization veto; fresh load measurements, binding-slot limits and PSI expansion still apply. Includes all tasks running on the cluster. Existing explicit limits remain in effect. |
-| `tool_call_cpu_poll_interval_seconds` | 0.25 | B only. Seconds between shared CPU-load and bound-VM PSI samples, independent of memory sampling. Admission uses the latest sample only when at most twice this interval old. |
+| `tool_call_cpu_poll_interval_seconds` | 0.25 | C2/B. Seconds between shared CPU-load and bound-VM PSI samples, independent of memory sampling. Admission uses the latest sample only when at most twice this interval old. |
 | `tool_call_cpu_group_max_active` | 2 | Maximum slots per group: B counts currently narrowed VMs; C2 retains the slot after expansion until the last active call completes. No exclusive core ownership or execution-concurrency limit |
 | `tool_call_cpu_pressure_ratio` | 0.10 | CPU PSI threshold for expansion |
 | `tool_call_cpu_pressure_samples` | 2 | Minimum consecutive high-pressure samples; B also requires the duration condition, C2 does not. |
@@ -479,9 +461,20 @@ does not reserve cores.
 C2 is the fixed historical algorithm: elapsed-time binding, selection by slot
 count then previous cluster then CPU utilization, historical `/proc/stat`
 accounting including guest ticks, and PSI confirmation by sample count only.
-Its sampler follows `measurement.memory_sample_interval_seconds`, which is
-1 second in the Full reference. The B-only fields above are inactive for C2.
+Its sampler uses `mechanisms.placement.tool_call_cpu_poll_interval_seconds`
+(default 0.25 seconds), independently of memory measurement. Set 1 second
+explicitly to retain the historical Full C2 cadence. The B-only fields above are inactive for C2.
 Slots are held through expansion until the last active call completes.
+
+B with admission `off` or `fixed` reads native duration targets without requiring
+a memory estimate or host-memory calibration. The projected memory estimate is
+`null`; native model targets remain in the prediction record. Fixed admission
+uses `static_tool_memory_mib`. With `predicted` admission, memory selection and
+calibration remain mandatory. Artifact, repository, environment and command
+identity checks still apply. This holds for command-table, runtime, cold-start
+and host-live sources. Use a new run ID and qualification, and prepare a new
+serving_sim bundle for its prediction-validation receipt; no host apply, image
+rebuild or retraining is required.
 
 B binds before execution, after resource admission and VM restore, using the
 verified pre-call ClawTune prediction without a second query. By default it selects
@@ -519,9 +512,9 @@ no host apply, image rebuild or retraining.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `mechanisms.placement.cpu_qos_policy` | `"off"` | `off` keeps ordinary scheduling; `idle` applies `SCHED_IDLE` to BE host vCPU threads; `idle_core` also applies distinct Linux core-scheduling cookies to LS and BE. Arm override: `placement.cpu_qos_policy`. Quote `"off"` in YAML. |
-| `mechanisms.placement.cpu_qos_group_idle` | `false` | With `idle` or `idle_core`, also set each BE VM's cgroup `cpu.idle=1` and verify LS groups use `cpu.idle=0`. This lowers the whole VM group, including its helper threads, relative to sibling LS groups. Policy readback uses `cpu.idle`; `cpu.weight` is recorded as a kernel-dependent diagnostic. Requires explicit LS/BE labels, writable cgroup v2 `cpu.idle`, and host privileges. Arm override: `placement.cpu_qos_group_idle`. Use a new run ID and qualification; no image rebuild or retraining. Original group settings are restored during cleanup. Runtime memory protection remains enabled; CPU release boosts do not override idle BE groups. |
-| `workload.cases[].qos_class` | `neutral` | `ls`, `be`, or `neutral`; also accepted on each manifest task/case. `idle_core` requires every offered session to be explicitly `ls` or `be`. |
+| `mechanisms.placement.cpu_qos_policy` | `"off"` | `off` keeps ordinary scheduling; `idle` applies `SCHED_IDLE` to BE host vCPU threads; `idle_core` also applies distinct Linux core-scheduling cookies to LS and BE. Quote `"off"` in YAML. |
+| `mechanisms.placement.cpu_qos_group_idle` | `false` | With `idle` or `idle_core`, also set each BE VM's cgroup `cpu.idle=1` and verify LS groups use `cpu.idle=0`. This lowers the whole VM group, including its helper threads, relative to sibling LS groups. Policy readback uses `cpu.idle`; `cpu.weight` is recorded as a kernel-dependent diagnostic. Requires explicit LS/BE labels, writable cgroup v2 `cpu.idle`, and host privileges. Use a new run ID and qualification; no image rebuild or retraining. Original group settings are restored during cleanup. Runtime memory protection remains enabled; CPU release boosts do not override idle BE groups. |
+| `tasks.cases[].qos_class` | `neutral` | `ls`, `be`, or `neutral`; also accepted on each manifest task/case. `idle_core` requires every offered session to be explicitly `ls` or `be`. |
 
 Policies cover host vCPU threads of both Runtime and Tool VMs; auxiliary VMM
 threads retain their normal policy. LS/neutral vCPUs use `SCHED_OTHER`.
@@ -607,7 +600,7 @@ requires an active, validated cache and incremental-CoW lazy restore. A host/spe
 mismatch fails before VM arrivals. The worker records the prepared cache receipt
 in `shared_memory_pool_initialized`; it does not copy or hash bases per VM.
 
-`experiment base-cache init PLAN.yaml --spec EXPERIMENT.yaml --capacity-mib N
+`experiment base-cache init PLAN.yaml --baseline BASELINE.yaml --workload WORKLOAD.yaml --capacity-mib N
 --template ID [--template ID ...]` resolves RAM paths from native XFS catalogs.
 It refuses to overwrite a plan. The Shim is resolved from each template's
 recorded component version; `--vmm-binary` is for nonstandard component roots.
@@ -790,7 +783,8 @@ at the conservative native allocation because restore temporarily recreates it.
 `conditions.prediction_source` maps `kb` to CLI mode `runtime`, `cold-start-kb`
 to `cold-start`, `host-live` to `host-live`, and `command-table` to `frozen`. Its schema default is `kb`.
 `evidence.prediction_artifact` points to the selected immutable seed or artifact.
-See the [training walkthrough](guide.md#train-a-workload-specific-kb).
+Use `clawbox experiment train --help` for training inputs and options. Keep
+training evidence separate from evaluation runs.
 
 Measured-cost policies require evidence with a nonempty `provenance` string:
 
@@ -823,7 +817,7 @@ creation; this limits preparation, while ready tool groups can run concurrently.
 | `isolation_domain` | `llc` | Reserve disjoint outer LLC domains across groups, or use `cluster` to reserve disjoint four-core hardware clusters while permitting shared upper-level LLC |
 | `strata` | `[long, short]` | Inventory strata selected for measurement |
 | `repetitions` | `1` | Paired repetitions per target, at least 1; every layout runs once per repetition. A single pair has no repeat uncertainty estimate |
-| `random_seed` | `0` | Reproducible randomized layout order within each repetition |
+| `submission.random_seed` | `0` | Reproducible randomized layout order within each repetition |
 | `control_timeout_seconds` | `86400` | Seconds allowed for a measurement callback; original Tool execution deadlines remain separate |
 | `max_targets_per_case` | `null` | Optional target limit for a small real-VM gate; omit for full selected coverage |
 
@@ -850,7 +844,8 @@ cross-NUMA layouts also change memory locality/bandwidth and are not an LLC-only
 causal comparison. All parameters require a new run ID and qualification; none
 requires rebuilding task images or retraining.
 
-Fields are under `execution`:
+Fields below are under baseline `execution` except the rows explicitly prefixed
+`submission.`, which belong to the workload file:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -860,8 +855,8 @@ Fields are under `execution`:
 | `kb_http_timeout_seconds` | 30 | Positive finite seconds for prediction and the total observation delivery deadline. |
 | `kb_observation_retries` | 2 | 0–5 additional observation delivery attempts within that deadline. Commands are never retried. |
 | `retain_clause_telemetry_artifacts` | `false` | Write full Tool clause-telemetry files for diagnostics. Compact learning and integrity records are always retained. |
-| `concurrency_levels` | `[1]` | Positive offered session counts |
-| `max_active_sessions` | `null` | Optional positive limit on simultaneously live sessions (Runtime/Tool VM pairs). All offered sessions still run; freed slots admit the next session. Host quota and storage preflight use the largest possible active set. A new run ID is required; no host apply, image rebuild, or retraining. |
+| `submission.concurrency_levels` | `[1]` | Positive offered session counts |
+| `submission.max_active_sessions` | `null` | Optional positive limit on simultaneously live sessions (Runtime/Tool VM pairs). All offered sessions still run; freed slots admit the next session. Host quota and storage preflight use the largest possible active set. A new run ID is required; no host apply, image rebuild, or retraining. |
 | `sandbox_create_concurrency` | 8 | Independent preparation and actual-create limits, each in VM pairs; a pair can issue two concurrent creates, subject to lifecycle limits |
 | `dependency_install_concurrency` | `null` | Optional arm-wide bound on active apt/apt-get/pip installs |
 | `apt_cache_proxy_url` | `null` | Explicit Tool-only `http://host:port` APT proxy, with either internet policy. Requires a reachable proxy; change requires a new run ID, no image rebuild. |
@@ -876,17 +871,17 @@ Fields are under `execution`:
 | `arm_finalization_timeout_seconds` | 300 | Additional supervisor allowance for cleanup/results, seconds. Failed-session cleanup cancels pending model responses/replay waits and preserves their error records. |
 | `command_timeout_seconds` | 300 | Tool command deadline, seconds. Each admitted invocation uses a fresh SSH connection so earlier calls cannot consume its connection lifetime. Changing the deadline requires a new run ID, not an image rebuild. |
 | `replay_tool_timeout_multiplier` | 1.0 | Unitless multiplier, 1.0–100.0, applied only to recorded replay Tool deadlines after admission. Fast commands do not wait longer; only expiry is extended. Use a new run ID after changing it. |
-| `arrival_schedule` | `poisson` | `burst`, `fixed_stagger`, `poisson`, or `normal`; grouped assignment generates one arrival per case and repeats it for all rollouts |
-| `normal_arrival_std_seconds` | 60 | Positive standard deviation in seconds. Normal scheduling draws one seeded N(0, sigma) value per group/session, sorts the draws and subtracts the minimum so the first arrival is zero. No clipping or rescaling; the resulting last arrival is not a fixed window. Seed also includes repetition and ordered case IDs; policies share arrivals. New run ID required; no host apply, rebuild or retraining. |
-| `stagger_interval_seconds` | 0 | Positive for fixed staggering; zero for burst/Poisson/normal |
-| `poisson_arrival_window_fraction` | 2.0 | Expected window divided by median scaled trace duration |
-| `poisson_arrival_window_seconds` | `null` | Positive explicit expected window; overrides the fraction |
-| `session_arrival_offsets_seconds` | `null` | Explicit nondecreasing finite offsets, in seconds from arm start; one per offered session, with exactly one concurrency level. Overrides generated arrival times. Grouped rollouts of the same case must have identical offsets. Preserve each LS case's offset when removing BE for a no-BE reference. Changing offsets requires a new run ID; no host apply, image rebuild, or retraining. |
+| `submission.arrival_schedule` | `poisson` | `burst`, `fixed_stagger`, `poisson`, or `normal`; grouped assignment generates one arrival per case and repeats it for all rollouts |
+| `submission.normal_arrival_std_seconds` | 60 | Positive standard deviation in seconds. Normal scheduling draws one seeded N(0, sigma) value per group/session, sorts the draws and subtracts the minimum so the first arrival is zero. No clipping or rescaling; the resulting last arrival is not a fixed window. Seed also includes repetition and ordered case IDs; policies share arrivals. New run ID required; no host apply, rebuild or retraining. |
+| `submission.stagger_interval_seconds` | 0 | Positive for fixed staggering; zero for burst/Poisson/normal |
+| `submission.poisson_arrival_window_fraction` | 2.0 | Expected window divided by median scaled trace duration |
+| `submission.poisson_arrival_window_seconds` | `null` | Positive explicit expected window; overrides the fraction |
+| `submission.session_arrival_offsets_seconds` | `null` | Explicit nondecreasing finite offsets, in seconds from arm start; one per offered session, with exactly one concurrency level. Overrides generated arrival times. Grouped rollouts of the same case must have identical offsets. Preserve each LS case's offset when removing BE for a no-BE reference. Changing offsets requires a new run ID; no host apply, image rebuild, or retraining. |
 | `control_timing_details` | `false` | Enable nested control spans, GC tracing, raw lifecycle dumps, duplicate payloads, and Runtime working-KB exports |
 | `model_request_content_retention` | `failures` | `failures` keeps compact successful Model Gateway records and exact request/response content only for incomplete, errored, non-200, or undelivered requests. `all` retains exact content for every request for a full-audit run. The setting changes result retention only; use a new run ID. It requires no host apply, image rebuild, or retraining. |
 | `snapshot_page_profile` | `null` | Linux-only, root-only page-idle profiling for explicitly listed `case_ids`; keep disabled in throughput runs. `roles` selects Runtime and/or Tool, `interval_seconds` is the sampling-window width, and `max_windows_per_generation` is at most 65535. The metric is windows in which a present 4 KiB GPA page was referenced, not memory-instruction count. Exact per-page counts are compressed under `page-access/`; aggregate window records remain small. Requires `CONFIG_IDLE_PAGE_TRACKING=y`, readable `/proc/<pid>/pagemap`, incremental-COW lazy restore, and a new run ID; no image rebuild or retraining. |
 | `snapshot_page_profile.force_model_wait_checkpoints` | `false` | Profiling-only control that checkpoints the selected single-session case at real simulator-backed model waits through the ordinary pair lifecycle. `checkpoint_tiers` supplies the finite per-generation `warm`/`cold` sequence; after it is exhausted, only normal policy checkpoints remain. This changes snapshot timing and is not throughput evidence. |
-| `snapshot_page_management` | `null` | Optional task-independent mechanism for bounded COLD snapshot preparation triggered by an accepted GPU event. `mode` supports `gpu_event`; `candidate_source` supports `shared_lineage`; `trigger_event` is `queued` or `prefill_start`. Candidate selection uses only authoritative incremental lineage and concurrent physical-range sharing, never case identities or a trained hotset. Requires serving-sim, GPU-aware agent-and-tool snapshot pause, tiered incremental-COW storage, and zstd-page compression. A new run ID is required; no image rebuild or host apply. |
+| `snapshot_page_management` | `null` | Optional task-independent mechanism for bounded COLD snapshot preparation triggered by an accepted GPU event. `mode` supports `gpu_event`; `candidate_source` supports `shared_lineage`; `trigger_event` is `queued` or `prefill_start`. Candidate selection uses only authoritative incremental lineage and concurrent physical-range sharing, never case identities or a trained hotset. Requires serving_sim, snapshot pause and tiered/COLD incremental-COW storage. Wait/GPU reclaim, either scope, and compressed/uncompressed storage are supported. A new run ID is required; no image rebuild or host apply. |
 | `snapshot_page_management.prefetch_budget_mib` | required | Arm-wide concurrent preparation budget and upper bound for `max_inflight_mib`. `per_vm_prefetch_mib` defaults to 32 MiB; `max_inflight_mib` to 128 MiB; `io_workers` to 2; `candidate_chunk_kib` to 128 KiB; `batch_window_milliseconds` to 25 ms; `prefetch_bandwidth_mib_s` to 256 MiB/s; `max_ranges_per_vm` to 512; and `signal_max_age_seconds` to 5 seconds. The worker emits one aggregate record per VM/request with batch waiters, authoritative/stale-version bytes, selected/covered bytes, leader-only physical read bytes, expansion time, cancellation, and errors. |
 
 Creation retry uses backoff and releases lifecycle slots while waiting. Ambiguous
@@ -931,7 +926,7 @@ Live API inference still has no complete supported qualification path. Fields be
 | `time_scale` | 1.0 | Nonnegative multiplier on replayed model delays |
 | `qualification_case_limit` | 16 cases | Positive integer; maximum distinct real-VM smoke cases, evenly sampled in workload order including the endpoints. All source inputs are still validated and receipt-bound. Increase to the corpus size for full execution coverage. Does not change formal workload size. |
 | `qualification_simulator_cluster_count` | 1 cluster | Positive integer; managed simulator clusters used by qualification, capped by formal `serving_sim_launch.cluster_count`. A single-cluster smoke does not prove cross-cluster routing or capacity. Formal startup checks every configured cluster before VM admission. |
-| `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; configure its `workload.json` with `--workload-manifest`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
+| `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; set workload `tasks.input` to its `workload.json` and clear `tasks.cases`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
 | `serving_sim_topology_digest` | Unset | Expected `topology_digest` returned by the ClawBox adapter's `/v1/clawbox/simulator/info`. Set this to reject a changed topology during matched comparisons; when unset, the actual digest is recorded without an equality requirement. |
 | `serving_sim_diagnostic_interval_seconds` | 1.0 seconds | Positive finite interval for client process/FD/event-loop samples, and managed server samples. Request diagnostics retain stages and exception chains without extra prompt/response copies. |
 | `serving_sim_diagnostic_detail` | `full` | `compact` omits verbose native signal payloads and repeated full pool snapshots/cost provenance. With GPU-aware reclaim, it retains phase changes, reclaim-threshold crossings, actions and at most one repeated queued summary per second across the coordinator; suppressed counts are retained in aggregate result metrics. Every signal still updates the live estimate and policy state. Request stages, errors and lifecycle events remain recorded. Diagnostics are buffered, flushed at process samples/errors and closed normally. Use a new run ID when changing this field. |
@@ -1083,13 +1078,16 @@ native source code, tokenizer files or cost-model assets. Freeze those inputs
 separately and retain the simulator's native configuration and validity outputs.
 
 `mechanisms.idle_reclaim.policy: gpu` requires `inference.backend: serving_sim`
-and `scope: agent_and_tool`. Its editable options are:
+with either `scope: tool` or `agent_and_tool`. Its editable options are:
 
 | Field under `mechanisms.idle_reclaim` | Default | Meaning |
 | --- | --- | --- |
 | `gpu_reclaim_min_remaining_seconds` | 1.0 seconds | Minimum remaining queue/prefill estimate for pressure-driven checkpoint selection; nonnegative. This is not a decode-completion prediction. |
 | `gpu_signal_max_age_seconds` | 5.0 seconds | Maximum age of a usable GPU estimate; strictly positive. Missing, expired or unmodelled estimates cannot authorize GPU-aware reclaim. |
-| `gpu_first_token_prewarm` | `true` | Every answer-worker `first_token` requests the same one-shot Runtime/Tool prewarm as `think_end`. This is an observed decode-start event, not a completion prediction. Because `first_token` precedes reasoning events, set `false` to wait for `think_end` and retain reactive restore on calls without it. |
+
+`mechanisms.restore.prewarm_events` is a separate list, default `[]`. Select
+`think_end`, `first_token`, or both. It requires snapshot reclaim and serving_sim,
+but not GPU reclaim or pair scope. Disabled events never initiate prewarm.
 
 The policy uses observed `queued.est_wait_s` for A/P workers, excluding remote KV
 transfer waits, and discounts elapsed time. `think_end` from the answer worker

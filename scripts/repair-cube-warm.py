@@ -98,7 +98,7 @@ def main():
             subprocess.run(["sudo", "-n", "install", "-m", "755", str(binary), str(installed)], check=True)
         finally:
             subprocess.run(["sudo", "-n", "systemctl", "start", "cube-sandbox-cubelet"], check=True)
-    print("Cubelet EINTR repair installed. Run scripts/lab setup --warm to wait for node readiness.")
+    print("Cubelet EINTR repair installed. Run clawbox experiment host apply --warm to wait for node readiness.")
 
 
 if __name__ == "__main__":

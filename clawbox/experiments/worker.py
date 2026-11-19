@@ -74,7 +74,7 @@ from .numa_placement import CpuMonitor, SessionPlacement
 from .session_binding import SessionBinding, PeerCpuAccounting, choose_resume
 from .spec_types import ArrivalSchedule, InferenceBackend, SessionAssignment, SnapshotTier
 from .policy_control import PolicyControlServer
-from .prediction import P50PredictionProvider, PredictionUnavailable, prediction_provider_type
+from .prediction import P50PredictionProvider, PredictionUnavailable, prediction_provider_type, prediction_requires_memory
 from .admission import DemandLedger
 from .runtime_model_relay import RELAY_CHECKPOINT_URL
 from .ssh_credentials import generate_ssh_credentials
@@ -2342,6 +2342,7 @@ class ExperimentWorker:
                 arm.policy.admission is AdmissionPolicy.PREDICTED
                 or arm.resources.observe_predictions
                 or arm.resources.prediction_mode == 'host-live'
+                or arm.execution.tool_call_cpu_policy == 'b'
             ):
                 for case in session_cases:
                     tool_sandbox = resolve_case_sandbox(case, arm.sandbox)
@@ -2349,6 +2350,7 @@ class ExperimentWorker:
                         arm.resources.prediction_mode
                     )(
                         Path(arm.resources.prediction_artifact),
+                        require_memory=prediction_requires_memory(arm),
                         repository=case.repository or case.case_id,
                         sandbox_identity={
                             key: getattr(tool_sandbox, key)
@@ -2393,7 +2395,8 @@ class ExperimentWorker:
                 cyclic_gc_enabled=arm.execution.worker_cyclic_gc_enabled,
                 thread_switch_interval_seconds=arm.execution.worker_thread_switch_interval_seconds,
                 metadata=AdmissionMetadata(str(arm.resources.prediction_artifact),
-                    {repo: provider.evaluation_sandbox_identity for repo, provider in by_repo.items()}))
+                    {repo: provider.evaluation_sandbox_identity for repo, provider in by_repo.items()},
+                    require_memory=prediction_requires_memory(arm)))
             if self.policy_control is None:
                 raise RuntimeError('host-live requires the experiment policy listener')
             self.policy_control.knowledge_manager = self.host_knowledge
@@ -4367,7 +4370,7 @@ class ExperimentWorker:
             def on_model_signal(event: dict[str, Any]) -> None:
                 if arm_cancel is not None and arm_cancel.is_set():
                     return
-                if arm.policy.eviction is not EvictionPolicy.GPU_AWARE_PRESSURE:
+                if not arm.policy.consumes_gpu_signals:
                     return
                 decision = coordinator.observe_gpu_signal(session_id, str(event["request_id"]), event)
                 # The client owns the buffered transport timestamp log. Keep
@@ -4401,7 +4404,7 @@ class ExperimentWorker:
                                 request_id=request_id,
                                 signal=event,
                             )
-                if decision.get("should_prewarm") and runtime_snapshot_enabled:
+                if decision.get("should_prewarm"):
                     policy_events.submit_coalesced((session_id, "gpu_prewarm"), prewarm_pair_from_gpu, event)
                 elif decision.get("should_recheck_pressure"):
                     policy_events.submit_coalesced((session_id, "gpu_pressure"), pause_for_model_wait, event)
@@ -4917,25 +4920,8 @@ class ExperimentWorker:
                                        and request.get("operation") != "filesystem")
                     prediction = None
                     if managed_command:
-                        if arm.policy.admission is AdmissionPolicy.PREDICTED:
-                            if prediction_provider is None:
-                                raise PredictionUnavailable(
-                                    "predicted command admission requires a prediction provider"
-                                )
-                            if arm.resources.prediction_mode == 'host-live':
-                                prediction = request['prediction']
-                                if prediction.get('prediction_source') != 'host_live_clawtune':
-                                    raise PredictionUnavailable('host-live admission requires canonical receipt prediction')
-                            elif arm.resources.prediction_mode in {"runtime", "cold-start"}:
-                                from .prediction import command_sha256
-                                if not isinstance(command, str) or command_sha256(command) != request['command_sha256']:
-                                    raise PredictionUnavailable("runtime prediction command text/digest mismatch; update the SSH shim")
-                                prediction = prediction_provider.resolve(command, request.get('prediction'))
-                            else:
-                                prediction = prediction_provider.resolve_digest(
-                                    str(request['command_sha256']), request.get('prediction'))
-                        # Fixed admission needs no prediction object. The
-                        # reservation helper reads static_tool_memory_mib.
+                        from .prediction import resolve_command_prediction
+                        prediction = resolve_command_prediction(arm, request, prediction_provider)
                     elif arm.policy.admission in {AdmissionPolicy.PREDICTED, AdmissionPolicy.FIXED}:
                         fixed_budget = (arm.resources.non_command_tool_memory_mib
                                         or arm.resources.static_tool_memory_mib)

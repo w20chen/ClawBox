@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.environ['PYTHONPATH'] = os.pathsep.join(filter(None, [str(ROOT), os.environ.get('PYTHONPATH')]))
-from clawbox.lab import apply_environment, template_record
+from clawbox.experiments.host_runtime import apply_environment, template_record
 
 
 def main():

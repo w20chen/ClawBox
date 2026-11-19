@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from clawbox.cell.p90 import AdmissionPrediction
+from clawbox.tuning.p90_export import AdmissionPrediction
 from clawbox.replay.trace import load_trace
 from clawbox.tuning.__main__ import find_run_datasets
 from clawbox.tuning.dataset import build_joined_dataset, read_cgroup_artifacts

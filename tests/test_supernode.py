@@ -56,51 +56,8 @@ def test_dense_multinode_deployment_does_not_require_a_shared_tier():
     assert h.compute_nodes[0].numa_node == h.warm_node
 
 
-def test_selecting_dense_host_clears_shared_topology_from_supernode_base(tmp_path):
-    import yaml
-    from clawbox.experiments.configure import configure_experiment, experiment_overview
-    base = configure_experiment(Path('examples/experiments/getting-started.yaml'),
-        compute_nodes=[n.model_dump() for n in nodes()], pool_memory_gib=64,
-        warm_numa_node=2, warm_memory_capacity_mib=131072,
-        shared_memory_borrow_limit_mib=65536)
-    path = tmp_path / 'base.yaml'
-    path.write_text(yaml.safe_dump(base.model_dump(mode='json')))
-    dense = configure_experiment(path, baseline_names=['uncontrolled-resident'], host_profile={
-        'local_memory_capacity_mib': 16384, 'local_numa_node': 0,
-        'local_memory_cgroup': '/sys/fs/cgroup/cube_sandbox/sandbox',
-        'warm_capacity_mib': 0})
-    assert not dense.resources.compute_nodes
-    assert dense.resources.shared_memory_borrow_limit_mib is None
-    assert dense.resources.warm_numa_node is None
-    assert dense.resources.pool_memory_budget_mib == 16384
-    assert experiment_overview(dense)['admission']['combined_live_cgroup_limit_gib'] == 16
 
 
-def test_configure_and_validate_explicit_mapping(tmp_path):
-    from clawbox.experiments.configure import configure_experiment, experiment_overview
-    from clawbox.experiments.spec import ExperimentSpec
-    spec = configure_experiment(
-        Path("examples/experiments/getting-started.yaml"),
-        compute_nodes=[n.model_dump() for n in nodes()],
-        placement_policy="explicit", session_compute_nodes=["node1", "node0"],
-        concurrency="1,2", pool_memory_gib=64, warm_numa_node=2,
-        session_assignment="single_case",
-        warm_memory_capacity_mib=131072, shared_memory_borrow_limit_mib=65536,
-        local_memory_cgroup="/vm",
-    )
-    assert experiment_overview(spec)["session_compute_nodes"] == ["node1", "node0"]
-    import yaml
-    path = tmp_path / "explicit.yaml"
-    path.write_text(yaml.safe_dump(spec.model_dump(mode="json")))
-    round_robin = configure_experiment(path, placement_policy="round_robin")
-    assert round_robin.execution.session_compute_nodes == ()
-    raw = spec.model_dump(mode="json")
-    raw["execution"]["session_compute_nodes"] = ["node0"]
-    with pytest.raises(ValueError, match="one node ID"):
-        ExperimentSpec.model_validate(raw)
-    raw["execution"]["session_compute_nodes"] = ["node0", "missing"]
-    with pytest.raises(ValueError, match="unknown"):
-        ExperimentSpec.model_validate(raw)
 
 
 def test_node_pressure_is_independent_and_aggregate_does_not_double_count(tmp_path):

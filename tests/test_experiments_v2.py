@@ -1,4 +1,6 @@
 from __future__ import annotations
+from experiment_fixtures import worker_fixture
+from experiment_fixtures import policy as fixture_policy
 
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -11,8 +13,6 @@ import yaml
 from pydantic import ValidationError
 
 from clawbox.experiments import ExperimentSpec, expand_matrix, load_experiment, spec_digest
-from clawbox.experiments.audit import audit_experiments
-from clawbox.experiments.baselines import BASELINES, resolve_baseline
 from clawbox.replay.trace import load_trace
 from clawbox.experiments.worker import (
     ArmActivityTracker, DependencyInstallGate, EventWriter, ExperimentWorker,
@@ -401,15 +401,6 @@ def test_checkpoint_headroom_is_only_charged_to_snapshot_policy() -> None:
     assert effective == {"resident": 0, "proposed": 1024}
 
 
-def test_warm_capacity_is_disabled_for_non_tiered_arms() -> None:
-    raw = raw_spec()
-    raw["resources"].update(warm_memory_capacity_mib=65536,
-                            local_memory_capacity_mib=65536,
-                            pool_memory_budget_mib=65536,
-                            warm_snapshot_root="/warm", cold_snapshot_root="/cold",
-                            local_numa_node=0, warm_numa_node=1)
-    arms = expand_matrix(ExperimentSpec.model_validate(raw))
-    assert all(arm.resources.warm_memory_capacity_mib == 0 for arm in arms)
 
 
 def test_shared_pool_capacity_remains_for_live_borrow_in_resident_arms() -> None:
@@ -949,7 +940,7 @@ def test_idempotent_cube_command_retries_transport_failure(monkeypatch) -> None:
 
 
 def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
-    spec = load_experiment(Path("examples/experiments/openclaw-cube-replay-c40.yaml"))
+    spec = worker_fixture(Path("tests/fixtures/experiments/openclaw-cube-replay-c40.yaml"))
     actions = load_trace(Path("examples/traces/openclaw-cube-replay.jsonl"))
     assert spec.agent.driver.value == "openclaw"
     assert spec.execution.concurrency_levels == (40,)
@@ -960,81 +951,10 @@ def test_formal_openclaw_replay_c40_artifact_is_loadable() -> None:
     ].startswith("printf openclaw-cube-replay-ok")
 
 
-def test_checked_in_baseline_matrices_are_schema_v2_and_plan_c40() -> None:
-    paths = list(Path("examples/experiments").glob("openclaw*.yaml"))
-    audits = audit_experiments(paths)
-    assert len(audits) == len(paths)
-    by_id = {str(item["experiment_id"]): item for item in audits}
-    assert by_id["openclaw-cube-replay-c40"]["concurrency_levels"] == [40]
-    assert by_id["openclaw-cube-replay-c60-overcommit"]["concurrency_levels"] == [60]
-    assert all(item["tool_template"] != "sandbox-code" for item in audits)
-    openclaw = by_id["openclaw-cube-replay-c40"]["artifact_provenance"]
-    assert openclaw["runtime"]["template_id"] == "tpl-ec97143fa76e409981055c2f"
-    assert openclaw["tool"]["template_id"] == "tpl-72f8a42d8fe746279d0bb80a"
-    assert openclaw["runtime"]["image_digest"].startswith("sha256:")
-    assert openclaw["tool"]["image_digest"].startswith("sha256:")
 
 
-def test_openclaw_matrix_requires_immutable_runtime_and_tool_provenance(
-    tmp_path: Path,
-) -> None:
-    raw = raw_spec()
-    raw["agent"] = {"driver": "openclaw"}
-    raw["inference"] = {
-        "backend": "replay", "configuration": {
-            "model": "recorded-model",
-        },
-    }
-    path = tmp_path / "openclaw.yaml"
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    with pytest.raises(ValueError, match="immutable template_id"):
-        audit_experiments([path])
-
-    raw["runtime"] = {
-        "template_id": "runtime-id", "source_image_reference": "registry/runtime",
-        "image_digest": "sha256:" + "a" * 64,
-    }
-    raw["sandbox"] = {
-        "template_id": "tool-id", "source_image_reference": "registry/tool",
-    }
-    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    with pytest.raises(ValueError, match="missing image_digest"):
-        audit_experiments([path])
 
 
-def test_baseline_catalog_and_independent_policy_names():
-    from clawbox.experiments.baselines import ACTIVE_BASELINES, ensure_supported_experiment
-    assert len(ACTIVE_BASELINES) == 7
-    assert 'no_control' not in ACTIVE_BASELINES
-    assert all(BASELINES[n].implementation_status == 'implemented' for n in ACTIVE_BASELINES)
-    normalized = [
-        BASELINES[name].as_policy(name='normalized').model_dump(mode='json')
-        for name in ACTIVE_BASELINES
-    ]
-    assert len({json.dumps(policy, sort_keys=True) for policy in normalized}) == len(normalized)
-    wait_snapshot = BASELINES['predicted-wait-snapshot'].as_policy()
-    assert not wait_snapshot.coordinates_release
-    assert wait_snapshot.runtime_snapshot
-    groups = {
-        group: {name for name, baseline in BASELINES.items()
-                if group in baseline.comparison_groups}
-        for group in {group for baseline in BASELINES.values()
-                      for group in baseline.comparison_groups}
-    }
-    assert all(len(names) >= 2 for names in groups.values())
-    assert groups['integrated'] == {
-        'predicted-resident', 'predicted-wait-snapshot',
-    }
-    raw = raw_spec()
-    raw['policies'] = [resolve_baseline('uncontrolled-resident').as_policy(name='custom-label').model_dump(mode='json')]
-    spec = ExperimentSpec.model_validate(raw)
-    ensure_supported_experiment(spec)
-    arm = expand_matrix(spec)[0]
-    assert ExperimentWorker._tool_reservation_mib(None, arm, prediction=None) == 0
-    assert ExperimentWorker._startup_headroom_mib(arm, None) == 256
-    raw['policies'][0]['admission'] = 'tool_congestion'
-    with pytest.raises(ValidationError):
-        ExperimentSpec.model_validate(raw)
 
 
 def test_paused_tool_is_restored_before_growth_admission_and_routing():
@@ -1205,7 +1125,7 @@ def test_unsupported_oracle_is_rejected_at_schema_boundary() -> None:
 
 
 def test_openclaw_cube_example_uses_native_tool_names() -> None:
-    spec = load_experiment(Path("examples/experiments/openclaw-cube.yaml"))
+    spec = worker_fixture(Path("tests/fixtures/experiments/openclaw-cube.yaml"))
     assert "cube_shell" not in spec.workload.cases[0].prompt
     assert "sandboxed exec" in spec.workload.cases[0].prompt
 
@@ -1406,9 +1326,9 @@ def test_yaml_loader_and_v1_error(tmp_path: Path) -> None:
     path = tmp_path / "experiment.yaml"
     import yaml
     path.write_text(yaml.safe_dump(raw_spec()), encoding="utf-8")
-    assert load_experiment(path).schema_version == 3
+    assert worker_fixture(path).schema_version == 3
     path.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match="schema_version: 4"):
+    with pytest.raises(ValueError, match="--baseline"):
         load_experiment(path)
 
 
