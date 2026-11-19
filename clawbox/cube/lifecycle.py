@@ -1022,6 +1022,30 @@ class CubeSandboxLifecycle:
             "expanded": False,
         }
 
+    @staticmethod
+    def _promotion_reservation_bytes(manifest: Mapping[str, Any]) -> int:
+        """Return the physical WARM allocation after COLD decompression."""
+        reservation = int(
+            manifest.get("raw_allocated_bytes") or manifest["allocated_bytes"]
+        )
+        compression = manifest.get("compression")
+        if not isinstance(compression, Mapping):
+            return reservation
+        decompressed = int(
+            compression.get("decompression_allocated_bytes") or 0
+        )
+        compressed = int(compression.get("compressed_allocated_bytes") or 0)
+        if decompressed > 0 and compressed > 0:
+            # raw_allocated_bytes describes the allocation which existed when
+            # this generation was compressed. Reused parent containers can
+            # decode to a larger retained allocation, so derive the post-
+            # decompression representation from the current COLD accounting.
+            reservation = max(
+                reservation,
+                int(manifest["allocated_bytes"]) - compressed + decompressed,
+            )
+        return reservation
+
     def _spill_to_cold(self, manifest: SnapshotManifest) -> None:
         with self._lock:
             if (self._state is not SandboxState.SWAPPED or self.sandbox is None or
@@ -1332,13 +1356,11 @@ class CubeSandboxLifecycle:
                     require_lineage=self.snapshot_mechanism == "incremental-cow",
                 )
             # COLD generations may contain a complete multi-generation lineage.
-            # Its raw physical allocation can exceed the per-checkpoint upper
-            # bound used for one new WARM delta.  Promotion moves the complete
-            # lineage, so reserve its immutable raw allocation before any
-            # decompression or relocation changes the authoritative path.
-            promotion_reservation_bytes = int(
-                source_metrics.get("raw_allocated_bytes")
-                or source_metrics["allocated_bytes"]
+            # Promotion moves its post-decompression representation, which can
+            # exceed both one new delta and the allocation recorded before a
+            # reused compressed parent was decoded.
+            promotion_reservation_bytes = self._promotion_reservation_bytes(
+                source_metrics
             )
             try:
                 with self._measure_stage(stage_seconds, "snapshot_promotion_reserve_s"):

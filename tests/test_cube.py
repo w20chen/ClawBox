@@ -3078,3 +3078,54 @@ def test_next_use_compressed_cold_snapshot_expands_before_promotion(tmp_path, mo
     assert pool.manifest(key).expanded
     promotion = next(t for t in lifecycle.timings if t["operation"] == "promote")
     assert promotion["snapshot_metrics"]["reservation_bytes"] == 120
+
+
+def test_next_use_compressed_promotion_reserves_reused_parent_expansion(
+    tmp_path, monkeypatch,
+):
+    import clawbox.cube.snapshot_compression as compression_module
+    import clawbox.cube.snapshot as snapshot_module
+
+    lifecycle, client, pool, key = _cold_next_use_lifecycle(
+        tmp_path, monkeypatch, capacity=230, compressed=True,
+    )
+    calls = []
+    monkeypatch.setattr(
+        snapshot_module, "read_snapshot_metadata",
+        lambda *_a, **_k: ({
+            "logical_bytes": 220,
+            "allocated_bytes": 40,
+            "raw_allocated_bytes": 120,
+            "transferred_bytes": 120,
+            "compression": {
+                "baseline_allocated_bytes": 120,
+                "compressed_allocated_bytes": 40,
+                "decompression_allocated_bytes": 220,
+            },
+        } if "decompress" not in calls else {
+            "logical_bytes": 220,
+            "allocated_bytes": 220,
+            "transferred_bytes": 120,
+        }),
+    )
+    monkeypatch.setattr(
+        compression_module, "decompress_snapshot",
+        lambda *_a, **_k: calls.append("decompress") or {"wall_seconds": .1},
+    )
+    client.relocate_snapshot = lambda _sandbox, **kwargs: (
+        calls.append("relocate") or {
+            "tier": kwargs["tier"],
+            "generation": kwargs["generation"],
+            "memory_snapshot_path": kwargs["memory_snapshot_path"],
+        }
+    )
+    client.connect_sandbox = lambda *_a, **_k: (
+        calls.append("connect") or SimpleNamespace(state="running")
+    )
+
+    lifecycle.restore()
+
+    assert calls == ["decompress", "relocate", "connect"]
+    assert pool.manifest(key).allocated_bytes == 220
+    promotion = next(t for t in lifecycle.timings if t["operation"] == "promote")
+    assert promotion["snapshot_metrics"]["reservation_bytes"] == 220
