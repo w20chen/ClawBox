@@ -514,7 +514,7 @@ diff --git a/CubeMaster/pkg/crashrollback/store.go b/CubeMaster/pkg/crashrollbac
 new file mode 100644
 --- /dev/null
 +++ b/CubeMaster/pkg/crashrollback/store.go
-@@ -0,0 +1,487 @@
+@@ -0,0 +1,485 @@
 +// Copyright (c) 2026 Tencent Inc.
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -612,8 +612,9 @@ new file mode 100644
 +}
 +
 +// Begin records a new pause transaction while preserving the previous
-+// committed snapshot. A failed crash record must be explicitly rolled back or
-+// destroyed before another pause can begin.
++// committed snapshot. Failed crash transactions still require rollback. A
++// pending retirement remains recorded, but is retried only after this pause
++// seals a replacement generation that no longer depends on the live base.
 +func Begin(ctx context.Context, sandboxID, txnID, snapshotID, nodeID, nodeIP,
 +	instanceType, backend string) (*Record, error) {
 +	client := getDB()
@@ -649,9 +650,6 @@ new file mode 100644
 +		}
 +		if strings.TrimSpace(previous.InflightTxnID) != "" {
 +			return fmt.Errorf("%w: inflight transaction already exists", ErrNotAllowed)
-+		}
-+		if strings.TrimSpace(previous.RetireSnapshotID) != "" {
-+			return fmt.Errorf("%w: previous snapshot retirement is still pending", ErrNotAllowed)
 +		}
 +		updates := map[string]any{
 +			"state":                StatePreparing,
@@ -1006,7 +1004,7 @@ diff --git a/CubeMaster/pkg/crashrollback/store_test.go b/CubeMaster/pkg/crashro
 new file mode 100644
 --- /dev/null
 +++ b/CubeMaster/pkg/crashrollback/store_test.go
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,284 @@
 +// Copyright (c) 2026 Tencent Inc.
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -1241,7 +1239,7 @@ new file mode 100644
 +	))
 +}
 +
-+func TestRetirePendingBlocksNextTransactionUntilCleared(t *testing.T) {
++func TestRetirePendingDoesNotDeleteLiveBaseBeforeNextCommit(t *testing.T) {
 +	setupTest(t)
 +	ctx := context.Background()
 +	first, err := Begin(ctx, "sb-1", "txn-g1", "snap-g1",
@@ -1250,13 +1248,12 @@ new file mode 100644
 +	require.NoError(t, Commit(ctx, "sb-1", "txn-g1", "snap-g1", first.Epoch,
 +		"node-1", "10.0.0.1", "cubebox", "xfs", `{}`, "snap-old", "xfs"))
 +
-+	_, err = Begin(ctx, "sb-1", "txn-g2", "snap-g2",
-+		"node-1", "10.0.0.1", "cubebox", "xfs")
-+	require.ErrorIs(t, err, ErrNotAllowed)
-+	require.NoError(t, ClearRetire(ctx, "sb-1", "snap-old"))
-+	_, err = Begin(ctx, "sb-1", "txn-g2", "snap-g2",
++	second, err := Begin(ctx, "sb-1", "txn-g2", "snap-g2",
 +		"node-1", "10.0.0.1", "cubebox", "xfs")
 +	require.NoError(t, err)
++	require.Equal(t, "snap-old", second.RetireSnapshotID)
++	require.Equal(t, "snap-g1", second.LastSnapshotID)
++	require.Equal(t, "snap-g2", second.InflightSnapshotID)
 +}
 +
 +func TestRetireAndRollbackAcknowledgementsAreIdempotent(t *testing.T) {
@@ -1427,53 +1424,12 @@ diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubeproxy"
  	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
-@@ -69,11 +72,70 @@
+@@ -69,11 +72,29 @@
  	if spec, specErr := sandboxspec.Get(ctx, req.SandboxID); specErr == nil && spec != nil {
  		req.Backend = spec.Backend
  	}
 +	crashEnabled := crashrollback.Enabled() &&
 +		strings.EqualFold(strings.TrimSpace(req.SnapshotMechanism), "incremental-cow")
-+	if crashEnabled {
-+		if existing, getErr := crashrollback.Get(ctx, req.SandboxID); getErr == nil &&
-+			existing != nil && strings.TrimSpace(existing.RetireSnapshotID) != "" {
-+			retireIP := strings.TrimSpace(existing.LastNodeIP)
-+			if retireIP == "" {
-+				retireIP = hostIP
-+			}
-+			retireRsp, retireErr := cubelet.CleanupTemplate(
-+				ctx, cubelet.GetCubeletAddr(retireIP),
-+				&cubebox.CleanupTemplateRequest{
-+					RequestID:  req.RequestID,
-+					TemplateID: existing.RetireSnapshotID,
-+					Backend:    existing.RetireBackend,
-+				},
-+			)
-+			retireCode := cubeleterrorcode.ErrorCode_Unknown
-+			if retireRsp != nil && retireRsp.GetRet() != nil {
-+				retireCode = retireRsp.GetRet().GetRetCode()
-+			}
-+			if retireErr != nil || retireRsp == nil ||
-+				retireRsp.GetRet() == nil ||
-+				(retireCode != cubeleterrorcode.ErrorCode_Success &&
-+					retireCode != cubeleterrorcode.ErrorCode_OK) {
-+				reason := fmt.Sprintf(
-+					"retry retire %s: rsp=%v err=%v",
-+					existing.RetireSnapshotID, retireRsp, retireErr,
-+				)
-+				_ = crashrollback.MarkRetireError(
-+					ctx, req.SandboxID, existing.RetireSnapshotID, reason)
-+				rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
-+				rsp.Ret.RetMsg = reason
-+				return rsp
-+			}
-+			_ = crashrollback.ClearRetire(
-+				ctx, req.SandboxID, existing.RetireSnapshotID)
-+		} else if getErr != nil && !errors.Is(getErr, crashrollback.ErrNotFound) {
-+			rsp.Ret.RetCode = int(errorcode.ErrorCode_DBError)
-+			rsp.Ret.RetMsg = fmt.Sprintf("load pending retire state: %v", getErr)
-+			return rsp
-+		}
-+	}
  	snapID, err := pausesnap.Begin(ctx, req.SandboxID, nodeID, hostIP, req.InstanceType, req.Backend)
  	if err != nil {
  		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
@@ -1498,7 +1454,7 @@ diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster
  	}
  
  	calleeEndpoint := cubelet.GetCubeletAddr(hostIP)
-@@ -117,6 +179,10 @@
+@@ -117,6 +138,10 @@
  			log.G(ctx).Warnf("pause rpc timed out sandbox=%s snap=%s: %v", req.SandboxID, snapID, err)
  		}
  		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, msg)
@@ -1509,7 +1465,7 @@ diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster
  		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
  		rsp.Ret.RetMsg = msg
  		return rsp
-@@ -130,7 +196,27 @@
+@@ -130,7 +155,27 @@
  	if rsp.Ret.RetCode != int(errorcode.ErrorCode_Success) {
  		// Definitive Cubelet failure: cannot Resume (delete only).
  		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, rsp.Ret.RetMsg)
@@ -1538,7 +1494,7 @@ diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster
  	}
  
  	released := volrefcount.ReleasedVolumeIDs(cubeRsp.GetExtInfo())
-@@ -146,11 +232,442 @@
+@@ -146,11 +191,442 @@
  	}
  	if err := pausesnap.Complete(ctx, req.SandboxID, snapID, nodeID, hostIP, req.InstanceType, released, exportUUIDs); err != nil {
  		pausesnap.MarkFailed(ctx, req.SandboxID, snapID, err.Error())
@@ -1981,7 +1937,7 @@ diff --git a/CubeMaster/pkg/service/sandbox/sandbox_resume_pause.go b/CubeMaster
  	return rsp
  }
  
-@@ -226,6 +743,121 @@
+@@ -226,6 +702,121 @@
  		}
  	}
  	return false
