@@ -8,6 +8,7 @@ from clawtune_sidecar.config import SidecarConfig
 
 @dataclass(frozen=True)
 class HostSidecarConfig(SidecarConfig):
+    admission_eta: bool = True
     host_kb_endpoint: str | None = None
     host_kb_token: str | None = None
     host_kb_session_id: str | None = None
@@ -23,6 +24,7 @@ class HostSidecarConfig(SidecarConfig):
     @classmethod
     def from_env(cls):
         return replace(super().from_env(),
+            admission_eta=os.getenv('CLAWBOX_ADMISSION_ETA', 'true').lower() == 'true',
             host_kb_endpoint=os.getenv('CLAWTUNE_HOST_KB_ENDPOINT') or None,
             host_kb_token=os.getenv('CLAWTUNE_HOST_KB_TOKEN') or None,
             host_kb_session_id=os.getenv('CLAWTUNE_HOST_KB_SESSION_ID') or None,

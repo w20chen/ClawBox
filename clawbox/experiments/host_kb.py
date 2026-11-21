@@ -204,10 +204,37 @@ class HostKnowledgeManager:
         return scope
 
     @_measured
+    def preview(self, session_id, payload):
+        """Session forecast without receipts, admission or retained call bindings."""
+        validate_message(payload, 'predict')
+        scope = self._scope(session_id, payload)
+        with scope.lock:
+            context = dict(payload['command_context'])
+            if context.get('repo') not in (None, payload['repository']):
+                raise ValueError('parser repository does not match binding')
+            context.update(repo=payload['repository'], container_id='host-kb-guest-context',
+                           host_workspace=None)
+            query = ToolCallQuery(payload['repository'], payload['tool_name'], payload['command'],
+                                  scope.view.last_time + 1.,
+                                  scope.observed_memory_measurement or self.measurement)
+            from clawtune_sidecar.predictors.call_load import prepare_call, predict_clause_load, predict_runtime_load
+            from clawtune_sidecar.prediction_config import load_bucket_edges
+            from tool_time.query import LatticeQueryCache
+            edges = load_bucket_edges((100., 500., 2000., 10000.))
+            prepared = prepare_call(query, feature_service=CommandFeatureService(self.registry),
+                                    command_context=ParseContext(**context))
+            load = predict_clause_load('lattice', scope.view.lattice, query, edges, prepared,
+                                       query_cache=LatticeQueryCache())
+            duration = load.targets.get('duration_ms')
+            if duration is None or duration.status != 'available' or duration.p50 is None:
+                load = predict_runtime_load(scope.view.tool, query, edges)
+            return load.model_copy(update={'memory_measurement': query.memory_measurement}).model_dump(mode='json')
+
+    @_measured
     def predict(self, session_id, payload):
         validate_message(payload, 'predict')
         scope = self._scope(session_id, payload)
-        key = payload['tool_call_id'] or payload['event_id']
+        key = digest([payload['logical_owner'], payload['tool_call_id'] or payload['event_id']])
         request_digest = digest(payload)
         with scope.lock:
             if key in scope.predictions:
@@ -227,26 +254,21 @@ class HostKnowledgeManager:
             query = ToolCallQuery(payload['repository'], payload['tool_name'], payload['command'],
                                   scope.view.last_time + 1.,
                                   scope.observed_memory_measurement or self.measurement)
-            tool, diagnostics = scope.view.predict(query, command_context=ParseContext(**context),
+            loads = scope.view.predict(query, command_context=ParseContext(**context),
                                                    features=scope.features, feature_call_id=key)
-            models = {'tool': tool.model_dump(mode='json'),
-                      **{name: diagnostics.backends[name].model_dump(mode='json') for name in ('trie', 'lattice')}}
+            models = {name: loads[backend].model_dump(mode='json')
+                      for name, backend in (('tool', 'runtime'), ('trie', 'trie'), ('lattice', 'lattice'))}
             from dataclasses import replace
             fallback = scope.view.predict_tool_class(replace(query, command=None))
             models['tool_class'] = fallback.model_dump(mode='json')
             from clawtune_sidecar.contracts.load_prediction import summarize_pmu_evidence
-            from clawtune_sidecar.predictors.tool_resource import _resource_class_for_duration_ms
             pmu = summarize_pmu_evidence(scope.view.tool.predict_pmu_samples(query))
             selected = self.metadata(payload['repository'], models, payload['command'], payload['command_sha256'])
             receipt = secrets.token_urlsafe(32)
             revision = digest({'seed': self.seed.digest, 'mapping': self.policy_digest,
                                'read_set': [(digest(scope.identity), scope.view.generation)]})
-            prediction = dict(tool=models['tool'], trie=models['trie'], lattice=models['lattice'],
-                call_prediction=models['tool'], diagnostics=diagnostics.model_dump(mode='json'),
-                duration_p50_ms=None if tool.targets['duration_ms'].p50 is None else round(tool.targets['duration_ms'].p50),
-                duration_p90_ms=None if tool.targets['duration_ms'].p90 is None else round(tool.targets['duration_ms'].p90),
-                resource_class=_resource_class_for_duration_ms(tool.targets['duration_ms'].p90),
-                confidence=None, pmu_prediction=pmu.model_dump(mode='json'), tool_resource=None)
+            prediction = dict(tool={'load': models['tool'], 'pmu': pmu.model_dump(mode='json')},
+                              trie={'load': models['trie']}, lattice={'load': models['lattice']})
             response = dict(schema_version=PROTOCOL, seed_sha256=self.seed.digest,
                 mapping_policy_sha256=self.policy_digest, scope_generation=scope.view.generation,
                 view_revision=revision, prediction_receipt=receipt, prediction=prediction,

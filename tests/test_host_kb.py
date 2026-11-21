@@ -25,6 +25,7 @@ def setup_manager(tmp_path):
 
 def prediction_payload(session='a'):
     return dict(schema_version=PROTOCOL, session_id=session, event_id='event', tool_call_id='call',
+        logical_owner=dict(gateway_id='gateway', runtime_id='runtime', session_id=session, run_id='run'),
         command='sleep 1', command_sha256=command_digest('sleep 1'), repository='repo', tool_name='exec',
         memory_measurement='cgroup_v2_environment_union_v1', command_context={}, raw_params={'command': 'sleep 1'})
 
@@ -62,7 +63,7 @@ def test_durable_learning_lost_ack_and_isolation(tmp_path):
     with pytest.raises(ValueError):
         manager.claim('a', {**claim, 'execution_id': 'other'})
     call = CompletedCall('repo', 'exec', 'sleep 1', 1., 4.)
-    observation = {key: value for key, value in request.items() if key not in ('event_id', 'tool_call_id', 'command_context', 'raw_params')}
+    observation = {key: value for key, value in request.items() if key not in ('event_id', 'tool_call_id', 'logical_owner', 'command_context', 'raw_params')}
     observation.update(execution_id='exec', prediction_receipt=receipt, call=asdict(call), clauses=[],
         call_provenance=training_target_provenance(call),
         quality=dict(collection_validity='valid', cleanup='ok', loss_total=0, reason=None))
@@ -124,19 +125,19 @@ def test_real_guest_memory_domain_is_used_after_learning_and_recovery(tmp_path):
         memory_baseline_bytes=64 * 1024**2, memory_total_peak_bytes=192 * 1024**2,
         memory_extra_peak_bytes=128 * 1024**2, memory_environment_id='guest-a')
     observation = {key: value for key, value in request.items()
-        if key not in ('event_id', 'tool_call_id', 'command_context', 'raw_params')}
+        if key not in ('event_id', 'tool_call_id', 'logical_owner', 'command_context', 'raw_params')}
     observation.update(execution_id='memory-exec', prediction_receipt=receipt,
         call=asdict(call), clauses=[], call_provenance=training_target_provenance(call),
         quality=dict(collection_validity='valid', cleanup='ok', loss_total=0, reason=None))
     manager.observe('a', observation)
-    after = manager.predict('a', {**request, 'tool_call_id': 'after'})['prediction']['tool']
+    after = manager.predict('a', {**request, 'tool_call_id': 'after'})['prediction']['tool']['load']
     assert after['memory_measurement'] == 'guest_memtotal_minus_memavailable'
     assert after['targets']['memory_extra_peak_bytes']['p50'] == 128 * 1024**2
     after_b = manager.predict('b', {**prediction_payload('b'), 'tool_call_id': 'after'})
     assert after_b['prediction']['tool'] == before_b['prediction']['tool']
     recovered = make()
     recovered.reserve('a', 'repo')
-    assert recovered.predict('a', {**request, 'tool_call_id': 'recovered'})['prediction']['tool'] == after
+    assert recovered.predict('a', {**request, 'tool_call_id': 'recovered'})['prediction']['tool']['load'] == after
 
 
 def test_validation_failure_cannot_publish_or_learn(tmp_path, monkeypatch):
@@ -159,7 +160,7 @@ def test_failed_journal_does_not_publish_prepared_generation(tmp_path, monkeypat
                            command=request['command'], command_sha256=request['command_sha256']))
     call = CompletedCall('repo', 'exec', 'sleep 1', 1., 4.)
     observation = {k:v for k,v in request.items()
-                   if k not in ('event_id', 'tool_call_id', 'command_context', 'raw_params')}
+                   if k not in ('event_id', 'tool_call_id', 'logical_owner', 'command_context', 'raw_params')}
     observation.update(execution_id='exec', prediction_receipt=receipt, call=asdict(call), clauses=[],
         call_provenance=training_target_provenance(call),
         quality=dict(collection_validity='valid', cleanup='ok', loss_total=0, reason=None))
@@ -206,14 +207,16 @@ def test_runtime_client_uses_authenticated_host_prediction_and_rejects_missing_r
                                   complete=lambda request: {'status': 'COMPLETED'})
         client = RemoteKnowledgeClient(SimpleNamespace(host_kb_endpoint=session.url,
             host_kb_token=session.token, host_kb_session_id='a', host_kb_timeout_seconds=3., tool_resource_repo='repo'))
-        request = SimpleNamespace(tool_name='exec', event_id='event', tool_call_id='call',
+        request = SimpleNamespace(tool_name='exec', event_id='event', tool_call_id='call', gateway_id='g', runtime_id='r',
+            session_id='logical-a', run_id='run',
             raw_params={'command': (
                 'CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS=1200\n'
                 'sleep 1'
             )}, command_context={})
         try:
             prediction = client.predict(request)
-            receipt = prediction.tool_resource['host_kb']['prediction_receipt']
+            receipt = client.receipts[client._key(request)]['prediction_receipt']
+            assert set(prediction.model_dump()) == {'tool', 'trie', 'lattice'}
             body = dict(session_id='a', execution_id='exec', command='sleep 1', command_sha256=command_digest('sleep 1'))
             assert client.client.post('/v1/tool/admit', json=body).status_code == 400
             body['prediction_receipt'] = receipt

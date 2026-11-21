@@ -276,8 +276,106 @@ do not overwrite that reference or regenerate its templates merely for this chan
 
 ## 4. Set arrival and execution limits
 
+To publish ClawTune prediction and Session signals to an existing receiver,
+first [refresh the pinned Runtime predictor](installation.md#refresh-the-runtime-predictor-and-kb).
+Then add this group to baseline `execution`, replacing the example address with
+an HTTP(S) receiver reachable from the Runtime VMs:
+
+```yaml
+execution:
+  clawtune_signals:
+    admission_eta: true
+    endpoint: http://192.0.2.10:9000/v1/signals
+    token_env: CLAWBOX_SIGNAL_RECEIVER_TOKEN
+    tool_events: true
+    queue_size: 1024
+    timeout_seconds: 1.0
+```
+
+Set the named token environment variable in the shell running the experiment;
+omit `token_env` if the receiver requires no credential. The secret is passed
+to Runtime VMs and is not written into the frozen experiment configuration.
+ClawBox permits the configured receiver destination in Runtime network rules.
+Run the normal `experiment validate --baseline baseline.yaml --workload workload.yaml --inputs`,
+qualification and launch sequence with a new run ID. Changing only signal
+settings needs no host apply, image rebuild or retraining after the updated
+Runtime is installed. An unset endpoint disables external publication.
+
+`admission_eta` (default `true`) includes host admission waiting in Session ETA
+for host-live shell tools. Install the updated Runtime adapter and a Tool image
+whose bridge supports execution progress events; qualification checks this and
+reports when an image rebuild is needed. It records policy HTTP arrival through
+the Tool bridge's execution-start notification, including worker queueing,
+memory/CPU admission, dependency-install limits, VM restoration and SSH startup.
+Only after that boundary does it subtract elapsed execution time from the KB
+duration. The start notification follows guest payload release, so its delivery
+latency remains a timing error; it is not a synchronized guest timestamp.
+
+Waiting estimates learn online within the current host policy domain, comparing
+queue depth/age, active workload, measured memory pressure, requested memory,
+restoration and dependency limits. Ongoing waits count as censored observations;
+they are not zero-duration successes. At least three comparable completed waits
+are required. Cold starts, unseen requests, changed conditions and expired
+evidence produce `remaining_ms: null`, not a zero wait. The adapter refreshes
+once per second and expires host evidence after two seconds. It does not assume
+that finishing a command frees the VM's memory. Tools allowed to return a
+background handle also have unknown Session ETA: process duration is not their
+logical return time. No KB retraining or host apply
+is required; use a new run ID. Setting `admission_eta: false` disables this host
+correction and uses upstream ClawTune's execution-only estimate.
+
+The receiver must accept `clawtune.signal.v1`; see
+[ClawTune's signal contract and receiver rules](https://github.com/w20chen/ClawTune/blob/ba4eb595a67fcfb4f3e4da54102afbc220565905/docs/signals.md).
+Session previews query LatticeKB then ToolKB without reserving an execution
+or learning a sample. Formal tool decisions retain all three independent model
+branches. Cube's SSH execution path supplies logical tool/model lifecycle and
+Session observations; it does not supply ClawTune managed-launcher process
+progress or fabricate `execution.finishing_soon`. Host-live non-shell calls
+have explicit unavailable predictions. Signals are best effort, and Session
+forecasts may be null; they do not automatically enable a GPU or KV scheduling
+policy. Existing serving_sim lifecycle signals keep their separate meaning.
+
+For native OpenClaw subagents, merge the following into the baseline, retaining
+your reviewed host/template configuration, API endpoint/model and validated KB seed:
+
+```yaml
+agent:
+  driver: openclaw
+  subagents: true
+  subagent_max_concurrent: 8
+  subagent_max_spawn_depth: 1
+inference:
+  backend: api
+  configuration:
+    qualification_case_limit: 1
+conditions:
+  prediction_source: host-live
+mechanisms:
+  idle_reclaim:
+    scope: tool
+```
+
+Use the existing `experiment qualify` and `experiment run` commands below with
+a new run ID. API qualification executes the selected complete live tasks and
+uses provider credentials; choose a small representative case that actually
+spawns children. Replay and serving_sim inputs describe one recorded trajectory
+and cannot enable this option. Refresh the Runtime predictor/plugin and host
+ClawBox together before qualification; no KB retraining or host apply is needed.
+
+This starts OpenClaw's native Gateway inside the same Runtime VM; the ordinary
+default remains embedded `--local`. Parent and child Sessions share the VM pair
+and Tool workspace, but retain independent call identities and forecasts. The
+Runtime stays resident; Tool admission and idle reclamation still apply. A child
+Session's next-LLM ETA is not its completion time or the parent's resume time.
+The driver waits for child cleanup and all observed Sessions to finish before
+destroying the pair. `final-answer.json` contains `initial_root_response` and
+`shared_sessions`; later parent replies remain in the collected Runtime traces.
+Completion timing includes a five-second stable-idle check and polling/transport.
+The result does not by itself prove that the model chose to spawn children.
+
 `submission.concurrency_levels` specifies the number of **offered sessions**, not guaranteed
-simultaneous residency. Each session needs two VMs. Memory budgets, placement,
+simultaneous residency. Each offered root session needs two VMs; its subagents
+share that pair and do not add offered sessions. Memory budgets, placement,
 and creation limits determine how many can run at once.
 
 Poisson arrivals are the default. The expected arrival window is twice the

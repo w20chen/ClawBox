@@ -1,7 +1,7 @@
 # ClawTune integration source
 
 Upstream: https://github.com/w20chen/ClawTune
-Revision: `4a6d0af66e76b377bfc957baf84a5f414c6d8bf5`
+Revision: `ba4eb595a67fcfb4f3e4da54102afbc220565905`
 License: MIT; see LICENSE.
 
 ClawTune is an unmodified dependency. ClawBox owns the host protocol and all
@@ -14,6 +14,13 @@ deployment adaptations in this directory.
   writes it. Collection and measurement remain upstream.
 - `runtime_state.py` derives from `clawtune_sidecar/api/dependencies.py`: selects
   the remote adapter before constructing any local KB.
+- `session_forecast.py` subclasses the pinned Session state manager. Host-live
+  forecasts use ClawBox admission evidence and Tool bridge start notifications;
+  recovered snapshots without original completion times do not train handoff
+  latency. The upstream JSON signal schema remains unchanged.
+  Its authenticated Session-registration route protects shared Runtime residency.
+- `remote.py` and the host prediction contract carry logical gateway/runtime/
+  Session/run identity, separating invocation receipts inside the shared pair KB.
 - `scripts/clawbox-guest-collector.py` derives from upstream
   `tools/guest_collector_server.py` and uses the ClawBox finalization adapter.
 

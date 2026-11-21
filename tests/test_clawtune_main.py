@@ -137,8 +137,7 @@ def test_native_predictions_expose_only_current_backends(clawtune_shell_parser):
         clause=ClauseResourceKB.from_json_obj(read("clause-resource-kb.json")),
         lattice=LatticeTimeKB.from_json_obj(read("clause-lattice-time-kb.json")),
     )
-    assert set(models) == {"tool", "trie", "lattice", "diagnostics"}
-    assert set(models["diagnostics"].backends) == {"runtime", "trie", "lattice"}
+    assert set(models) == {"tool", "trie", "lattice"}
     for model, backend in (("tool", "runtime"), ("trie", "trie"), ("lattice", "lattice")):
         assert models[model].targets
         assert {target.backend for target in models[model].targets.values()} == {backend}

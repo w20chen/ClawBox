@@ -163,17 +163,39 @@ def predict_native_call_load_models(runtime, query, *, clause=None, lattice=None
     from clawtune_sidecar.prediction_config import load_bucket_edges
     from tool_resource.runtime_kb import ClauseResourceKB
     from tool_time.lattice_kb import LatticeTimeKB
-    tool, diagnostics = predict_call_load(
+    models = predict_call_load(
         runtime=runtime, trie=clause if clause is not None else ClauseResourceKB(),
         lattice=lattice if lattice is not None else LatticeTimeKB(), query=query,
         edges=load_bucket_edges((100.0, 500.0, 2000.0, 10000.0)),
     )
     return {
-        "tool": tool,
-        "trie": diagnostics.backends["trie"],
-        "lattice": diagnostics.backends["lattice"],
-        "diagnostics": diagnostics,
+        "tool": models["runtime"],
+        "trie": models["trie"],
+        "lattice": models["lattice"],
     }
+
+
+def trace_tool_prediction(metadata):
+    """Retain available model outputs and explicitly mark unrecorded branches."""
+    from clawtune_sidecar.contracts.models import ToolPrediction
+    from clawtune_sidecar.contracts.load_prediction import summarize_pmu_evidence
+    from clawtune_sidecar.predictors.call_load import compose
+    from clawtune_sidecar.prediction_config import load_bucket_edges
+    if set(metadata) == {'tool', 'trie', 'lattice'}:
+        return ToolPrediction.model_validate(metadata)
+    models = dict(metadata.get('models') or {})
+    selected = metadata.get('call_prediction')
+    if selected:
+        backends = {target['backend'] for target in selected['targets'].values()}
+        if len(backends) != 1:
+            raise ValueError('trace prediction must contain one independent backend')
+        name = {'runtime': 'tool', 'trie': 'trie', 'lattice': 'lattice'}[backends.pop()]
+        models.setdefault(name, selected)
+    edges = load_bucket_edges((100., 500., 2000., 10000.))
+    result = {name: {'load': models.get(name) or compose(backend, (), edges, reason='not_recorded')}
+              for name, backend in (('tool', 'runtime'), ('trie', 'trie'), ('lattice', 'lattice'))}
+    result['tool']['pmu'] = summarize_pmu_evidence({})
+    return ToolPrediction.model_validate(result)
 
 
 def predict_native_call_load(runtime, query, *, clause=None, lattice=None):

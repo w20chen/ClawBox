@@ -302,7 +302,11 @@ class ModelGateway:
             ]
             # An undelivered response may be retried after a broken connection.
             # Once delivered, an identical payload is a new logical model step.
-            request = matching[-1] if matching and not matching[-1].delivered else None
+            # Separate live Sessions can issue identical prompts concurrently.
+            # Payload equality only identifies retries in a single replay
+            # trajectory. Live retries require the relay's explicit request ID.
+            request = (matching[-1] if self.mode == "replay" and matching
+                       and not matching[-1].delivered else None)
             if logical_request_id:
                 request = next((item for item in self._requests.values()
                                 if item.logical_request_id == logical_request_id), None)

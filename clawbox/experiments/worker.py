@@ -2477,7 +2477,8 @@ class ExperimentWorker:
                     "role": role,
                     "service_seconds": elapsed,
                     "reason": reason,
-                    "request_id": state.wait_id,
+                    "request_id": next(iter(state.model_waits)) if len(state.model_waits) == 1 else None,
+                    "request_ids": list(state.model_waits),
                     "snapshot_tier": lifecycle.tier.value,
                     "lifecycle_timing": timings[-1] if timings else None,
                 })
@@ -3769,10 +3770,13 @@ class ExperimentWorker:
         inference_configuration, credential = resolve_llm_configuration(
             arm.inference.configuration, live=arm.inference.backend.value == "api",
         )
-        runtime_env: dict[str, str] = {}
+        runtime_env: dict[str, str] = arm.execution.clawtune_signals.environment()
         runtime_allow_out: list[str] = []
         tool_allow_out: list[str] = []
         route_epoch = 0
+        if arm.execution.clawtune_signals.endpoint:
+            runtime_allow_out.append(_network_target(
+                arm.execution.clawtune_signals.endpoint, label='ClawTune signal endpoint'))
         ssh_config: NativeSSHConfig | None = None
         if arm.agent.driver is AgentDriver.OPENCLAW:
             runtime_env.update({
@@ -3925,7 +3929,8 @@ class ExperimentWorker:
         policy_drained = True
         lifetime_acquired = False
         wait_lock = Lock()
-        wait_state: dict[str, Any] = {}
+        wait_states: dict[str, dict[str, Any]] = {}
+        pair_wait_state: dict[str, Any] = {}
         completed_model_requests: set[str] = set()
         generated_model_requests: set[str] = set()
         generated_model_requests_lock = Lock()
@@ -4204,7 +4209,7 @@ class ExperimentWorker:
 
             def before_pair_idle_pause() -> None:
                 try:
-                    wait_state["runtime_agent_pid_before_pause"] = observe_openclaw_agent_pid(
+                    pair_wait_state["runtime_agent_pid_before_pause"] = observe_openclaw_agent_pid(
                         "before_runtime_pause")
                 except OpenClawAgentUnavailable as exc:
                     raise PressureReclaimRejected(
@@ -4224,7 +4229,7 @@ class ExperimentWorker:
                     return
                 started = time.time()
                 resume_started_monotonic = time.monotonic()
-                agent_pid_before = wait_state.get(
+                agent_pid_before = pair_wait_state.get(
                     "runtime_agent_pid_before_pause"
                 )
                 self._restore_with_one_victim(
@@ -4269,11 +4274,12 @@ class ExperimentWorker:
                         role='runtime', request_id=event.get('request_id'),
                         service_seconds=time.monotonic()-resume_started_monotonic,
                         agent_pid=agent_pid_after))
-                wait_state.update({
+                wait_states.setdefault(str(event["request_id"]), {}).update({
                     "runtime_restore_started_at": started,
                     "runtime_restore_completed_at": finished,
                     "runtime_restore_request_id": event.get("request_id"),
                     "runtime_agent_pid_after_restore": agent_pid_after,
+                    "runtime_agent_pid_before_pause": agent_pid_before,
                 })
 
             def on_model_request_started(event: dict[str, Any]) -> None:
@@ -4284,8 +4290,7 @@ class ExperimentWorker:
                     if (request_id in generated_model_requests
                             or request_id in completed_model_requests):
                         return
-                    wait_state.clear()
-                    wait_state.update(request_id=request_id,
+                    wait_states.setdefault(request_id, {}).update(request_id=request_id,
                                       request_started_at=event.get("request_started_at"))
                     if arm.policy.eviction in {EvictionPolicy.WAIT_AWARE_PRESSURE, EvictionPolicy.GPU_AWARE_PRESSURE}:
                         coordinator.begin_model_wait(session_id, request_id)
@@ -4322,7 +4327,7 @@ class ExperimentWorker:
                     return
                 with wait_lock:
                     with generated_model_requests_lock:
-                        if (wait_state.get("request_id") != request_id
+                        if (request_id not in wait_states
                                 or request_id in generated_model_requests
                                 or request_id in completed_model_requests):
                             return
@@ -4358,7 +4363,7 @@ class ExperimentWorker:
                         )
                         prepare_restored_tool(request_id=request_id)
                         finished = time.time()
-                        wait_state.update(restore_request_id=request_id,
+                        wait_states.setdefault(request_id, {}).update(restore_request_id=request_id,
                                           restore_started_at=started, restore_completed_at=finished)
                         _record_time_span(timeline, "model.tool_prewarm", started, finished,
                                           role="tool", operation=operation,
@@ -4405,7 +4410,7 @@ class ExperimentWorker:
                                 signal=event,
                             )
                 if decision.get("should_prewarm"):
-                    policy_events.submit_coalesced((session_id, "gpu_prewarm"), prewarm_pair_from_gpu, event)
+                    policy_events.submit_coalesced((session_id, "gpu_prewarm", str(event["request_id"])), prewarm_pair_from_gpu, event)
                 elif decision.get("should_recheck_pressure"):
                     policy_events.submit_coalesced((session_id, "gpu_pressure"), pause_for_model_wait, event)
 
@@ -4443,7 +4448,7 @@ class ExperimentWorker:
                                        and t.get("status", "ok") != "error"
                                        and t.get("started_unix_s", 0) >= float(event["request_started_at"])), None)
                         if timing is not None:
-                            wait_state.update({
+                            wait_states.setdefault(str(event["request_id"]), {}).update({
                                 prefix + "pause_request_id": request_id,
                                 prefix + "pause_started_at": timing["started_unix_s"],
                                 prefix + "pause_completed_at": timing["completed_unix_s"],
@@ -4455,12 +4460,10 @@ class ExperimentWorker:
                     generated = float(event["model_generated_at"])
                     actual_wait = max(0.0, generated - started)
                     request_state = (
-                        dict(wait_state)
-                        if str(wait_state.get("request_id")) == request_id
-                        else {}
+                        dict(wait_states.get(request_id, {}))
                     )
                     if request_state:
-                        wait_state["model_generated_at"] = generated
+                        wait_states[request_id]["model_generated_at"] = generated
                     admission = {
                         "request_id": event.get("request_id"),
                         "model_step": step,
@@ -4781,7 +4784,7 @@ class ExperimentWorker:
                         candidate = executor.execute(
                             native_tool_bridge_setup_command(
                                 knowledge_environment=kb_env,
-                                require_progress_events=arm.policy.runtime_control.adaptive,
+                                require_progress_events=(arm.policy.runtime_control.adaptive or (arm.resources.prediction_mode == 'host-live' and arm.execution.clawtune_signals.admission_eta)),
                                 restart=bridge_attempt in (2, 10, 20),
                                 command_timeout_seconds=arm.execution.command_timeout_seconds,
                                 apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
@@ -4946,6 +4949,14 @@ class ExperimentWorker:
                         and dependency_install_gate is not None
                         and dependency_install_command(command)
                     )
+                    if arm.resources.prediction_mode == 'host-live' and arm.execution.clawtune_signals.admission_eta:
+                        from .priority import tool_duration_prediction
+                        try:
+                            duration = tool_duration_prediction(prediction, source='lattice')['predicted_duration_seconds']
+                        except ValueError:
+                            duration = None
+                        self.policy_control.forecaster.predicted(session_id, execution_id,
+                            duration=duration, memory=amount, dependency_limited=dependency_limited)
                     with reservation_lock:
                         pending_admissions.add(execution_id)
                     events.write({'event': 'tool_admission_queued',
@@ -5196,7 +5207,8 @@ class ExperimentWorker:
                     })
                     return {
                         "decision": "ADMIT", "admitted_memory_mib": accounted_amount,
-                        "notify_execution_start": bool(progress_control and arm.policy.runtime_control.adaptive),
+                        "notify_execution_start": bool((managed_command and arm.resources.prediction_mode == 'host-live' and arm.execution.clawtune_signals.admission_eta)
+                                                       or (progress_control and arm.policy.runtime_control.adaptive)),
                         "progress_timeout_seconds": arm.execution.policy_progress_timeout_seconds,
                         "local_admitted_memory_mib": local_amount,
                         "admission_memory_tier": admission_memory_tier,
@@ -5376,6 +5388,29 @@ class ExperimentWorker:
 
                 if self.policy_control is None:
                     raise RuntimeError("PolicyControlServer is not active")
+                if arm.resources.prediction_mode == 'host-live' and arm.execution.clawtune_signals.admission_eta:
+                    def forecast_load():
+                        queue = coordinator.queue_snapshot(blocking=False)
+                        if queue is None:
+                            return None
+                        used, free = coordinator.physical_sample()
+                        budget = max(1, coordinator.budget_bytes)
+                        return {**queue, 'used_budget_ratio': used / budget,
+                            'pending_budget_ratio': coordinator.demand.pending_upper_bound(coordinator.demand_scope) / budget,
+                            'free_floor_ratio': free / max(1, coordinator.emergency_free_bytes)}
+
+                    def forecast_conditions():
+                        if not lifecycle.resident:
+                            return None
+                        vm = progress_control.vms.get((session_id, 'tool')) if progress_control else None
+                        return (coordinator.demand_scope, lifecycle._generation,
+                            vm.control_revision if vm else 0,
+                            priority_domain._fine_masks.get((index, 'tool')) if priority_domain else None,
+                            (index, 'tool') in priority_domain._expanded if priority_domain else False)
+
+                    self.policy_control.forecaster.bind(session_id,
+                        domain=lambda: id(coordinator), load=forecast_load,
+                        resident=lambda: lifecycle.resident, stable=forecast_conditions)
                 @trace_callback(
                     'tool_progress_timing', events.write, session_id,
                     request_fields=('phase',),
@@ -5384,11 +5419,21 @@ class ExperimentWorker:
                     phase = request.get('phase')
                     progress_event('complete' if phase == 'end' else 'start',
                                    str(request['execution_id']))
+                def protect_shared_runtime():
+                    changed = coordinator.protect_shared_runtime(session_id)
+                    with wait_lock:
+                        restore_runtime_for_model_wait_locked(
+                            {'request_id': 'shared-runtime'}, phase='shared_session')
+                    if changed:
+                        events.write({'event': 'shared_runtime_protected', 'session_id': session_id,
+                            'runtime_reclaim_eligible': False,
+                            'reason': 'multiple_logical_sessions_require_whole_runtime_quiescence'})
+
                 policy_session = (self.policy_control.attach if policy_session is not None else self.policy_control.register)(
                     policy_session if policy_session is not None else session_id, admit=admit_openclaw_tool,
                     complete=complete_openclaw_tool,
                     abandon=abandon_openclaw_tool,
-                    start=record_tool_progress,
+                    start=record_tool_progress, shared_runtime=protect_shared_runtime,
                 )
                 # The Tool VM is authoritative for mutable state. Mark the
                 # installed shared SSH runtime as initialized so OpenClaw does
@@ -5403,7 +5448,7 @@ class ExperimentWorker:
                     )
                 tool_bridge_result = executor.execute(native_tool_bridge_setup_command(
                                                 knowledge_environment=kb_env,
-                    require_progress_events=arm.policy.runtime_control.adaptive,
+                    require_progress_events=(arm.policy.runtime_control.adaptive or (arm.resources.prediction_mode == 'host-live' and arm.execution.clawtune_signals.admission_eta)),
                     command_timeout_seconds=arm.execution.command_timeout_seconds,
                     apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
                     pypi_cache_index_url=arm.execution.pypi_cache_index_url,
@@ -5530,6 +5575,9 @@ class ExperimentWorker:
                                     arm.execution.tool_placement.control_timeout_seconds
                                     if arm.execution.tool_placement else None),
                                 "host_live": arm.resources.prediction_mode == 'host-live',
+                                "subagents": arm.agent.subagents,
+                                "subagent_max_concurrent": arm.agent.subagent_max_concurrent,
+                                "subagent_max_spawn_depth": arm.agent.subagent_max_spawn_depth,
                                 "kb_http_timeout_seconds": arm.execution.kb_http_timeout_seconds,
                                 "repository": arm.case.repository or arm.case.case_id,
                             },
@@ -5639,7 +5687,7 @@ class ExperimentWorker:
                 # correctness remains enforced by the Tool-VM validation.
                 from .native_artifacts import runtime_request_failures
                 request_failures = runtime_request_failures(
-                    outcome["runtime_traces"], session_id=session_id,
+                    outcome["runtime_traces"], runtime_id=session_id,
                 )
                 if request_failures:
                     events.write({"event": "runtime_tool_request_failed",
@@ -5690,10 +5738,10 @@ class ExperimentWorker:
                     )
                 if arm.inference.backend.value == "api":
                     recordings = find_recordings(outcome["runtime_traces"], session_id)
-                    if len(recordings) != 1:
-                        raise RuntimeError("live agent must produce one complete native model recording")
-                    if len(load_trace(recordings[0])) != len(gateway_session.records()):
-                        raise RuntimeError("native recording does not cover every model call")
+                    if not recordings:
+                        raise RuntimeError("live agent must produce complete native model recordings")
+                    if sum(len(load_trace(path)) for path in recordings) != len(gateway_session.records()):
+                        raise RuntimeError("native recordings do not cover every model call across shared Sessions")
                     events.write({
                         "event": "model_trace_recorded",
                         "session_id": session_id,

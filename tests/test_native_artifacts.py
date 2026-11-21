@@ -35,26 +35,26 @@ from clawbox.experiments.native_artifacts import (
 ])
 def test_request_failure_evidence_survives_missing_native_id_and_ok_status(tmp_path, name, details, content, reason):
     record = {"record_type": "span_end", "kind": "tool", "name": name,
-              "session_id": "s", "span_id": "call-1", "status": {"code": "ok"},
+              "session_id": "s", "runtime_id": "r", "span_id": "call-1", "status": {"code": "ok"},
               "execution": {"execution_id": None},
               "output": {"exit_code": 0, "result": {"details": details,
                          "content": [{"type": "text", "text": content}]}}}
     path = tmp_path / "runtime.jsonl"
     path.write_text((json.dumps(record) + "\n") * 2, encoding="utf-8")
     assert _runtime_spans([str(path)]) == []
-    failures = runtime_request_failures([str(path)], session_id="s")
+    failures = runtime_request_failures([str(path)], runtime_id="r")
     assert len(failures) == 1
-    assert failures[0] == {"call_id": "call-1", "tool": name, "execution_id": None,
+    assert failures[0] == {"session_id": "s", "run_id": None, "call_id": "call-1", "tool": name, "execution_id": None,
                            "reason": reason, "message": details.get("error") or content}
-    assert runtime_request_failures([str(path)], session_id="another-session") == []
+    assert runtime_request_failures([str(path)], runtime_id="another-runtime") == []
 
 
 def test_expected_file_diagnostics_are_not_transport_rejections(tmp_path):
-    record = {"record_type": "span_end", "kind": "tool", "name": "edit", "session_id": "s",
+    record = {"record_type": "span_end", "kind": "tool", "name": "edit", "session_id": "s", "runtime_id": "r",
               "output": {"result": {"details": {"status": "error", "error": "old text was not found"}}}}
     path = tmp_path / "runtime.jsonl"
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
-    assert runtime_request_failures([str(path)], session_id="s") == []
+    assert runtime_request_failures([str(path)], runtime_id="r") == []
 
 
 def test_native_join_preserves_admission_failure_cause():
@@ -565,9 +565,9 @@ def test_native_tool_join_rejects_non_ebpf_and_impossible_cpu_counters():
 def test_native_tool_join_reports_preflight_rejections_without_inventing_telemetry():
     execution_id = "exec-1"
     bridge, cgroup, clause = _artifacts(execution_id, "digest")
-    executed = {"session_id": "session-a", "execution": {"execution_id": execution_id}}
+    executed = {"session_id": "child", "runtime_id": "session-a", "execution": {"execution_id": execution_id}}
     rejected = {
-        "name": "exec", "session_id": "session-a",
+        "name": "exec", "session_id": "child", "runtime_id": "session-a",
         "execution": {"execution_id": "exec-rejected"},
         "output": {"result": {"details": {
             "status": "error", "error": "exec preflight: complex interpreter invocation",
@@ -614,7 +614,7 @@ def test_native_tool_join_accepts_session_without_managed_execution():
         validate_native_tool_join(
             bridge_records=[], cgroup_artifacts={}, clause_artifacts={},
             policy_records=[], runtime_span_records=[{
-                "session_id": "session-a",
+                "session_id": "session-a", "runtime_id": "session-a",
                 "execution": {"execution_id": "exec-unexpected"},
             }], expected_session_id="session-a",
         )
@@ -680,7 +680,7 @@ def test_native_tool_artifact_collection_copies_raw_files_and_validates(tmp_path
     executor = _RuntimeExecutor(stdout)
     runtime_trace = tmp_path / "runtime.jsonl"
     runtime_trace.write_text(json.dumps({
-        "record_type": "span_end", "kind": "tool", "session_id": "session-a",
+        "record_type": "span_end", "kind": "tool", "session_id": "child", "runtime_id": "session-a",
         "execution": {"execution_id": execution_id, "command_digest": digest},
     }) + "\n", encoding="utf-8")
     collection = collect_and_validate_native_tool_artifacts(

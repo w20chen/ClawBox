@@ -28,6 +28,7 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # as Tool-sandbox operations.
 TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
 RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
+SUBAGENT_TOOLS = ("sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "subagents")
 
 
 def replay_uses_background_execution(model_gateway: Any | None) -> bool:
@@ -472,6 +473,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     agent_exit_file = f"{home}/completion/agent.exit"
     policy_audit_file = f"{home}/logs/policy-ssh.jsonl"
     replay_mode = getattr(getattr(model_gateway, "gateway", None), "mode", None) in {"replay", "serving_sim"}
+    subagents = bool(configuration.get('subagents', False))
+    if subagents and (replay_mode or not configuration.get('host_live')):
+        raise ValueError('subagents require live API execution and host-live prediction')
+    if subagents and timeout_seconds is None:
+        raise ValueError('subagents require the experiment arm timeout')
+    gateway_pid_file = f"{home}/gateway.pid"
     tool_home = str(configuration.get("openclaw_tool_home", "/root"))
     if not tool_home.startswith("/") or "\x00" in tool_home:
         raise ValueError("openclaw_tool_home must be an absolute Tool VM path")
@@ -789,12 +796,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         }}},
         "tools": {
             "profile": "coding",
-            "allow": [*tool_vm_tools, *RUNTIME_LOCAL_TOOLS],
+            "allow": [*tool_vm_tools, *RUNTIME_LOCAL_TOOLS, *(SUBAGENT_TOOLS if subagents else ())],
             "deny": denied_tools,
             "exec": exec_tool_config,
             "elevated": {"enabled": False},
             "sandbox": {"tools": {
-                "allow": tool_vm_tools,
+                "allow": [*tool_vm_tools, *(SUBAGENT_TOOLS if subagents else ())],
                 "deny": denied_tools,
             }},
         },
@@ -825,6 +832,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                       "trace_dir": trace_dir},
         }}}},
     }
+    if subagents:
+        native_config['agents']['defaults']['subagents'] = {
+            'maxConcurrent': configuration.get('subagent_max_concurrent', 8),
+            'maxSpawnDepth': configuration.get('subagent_max_spawn_depth', 1),
+            'runTimeoutSeconds': timeout_seconds,
+        }
     config_b64 = base64.b64encode(json.dumps(native_config).encode()).decode()
     auth_preload_b64 = base64.b64encode(OPENCLAW_AUTH_PRELOAD.encode()).decode()
     config_started = time.monotonic()
@@ -846,6 +859,24 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         emit_startup_stage("openclaw_config", config_started, status="error")
         raise
     emit_startup_stage("openclaw_config", config_started)
+    if subagents:
+        # Embedded --local explicitly omits sessions_spawn in OpenClaw. Start
+        # its native gateway inside this same Runtime, under the same config,
+        # SSH routing, sidecar and experiment lifecycle.
+        gateway_command = ' '.join(shlex.quote(x) for x in [executable, 'gateway', 'run', '--bind', 'loopback', '--port', '18789'])
+        launch = runtime_executor.execute(agent_prefix +
+            f"nohup {gateway_command} </dev/null >{shlex.quote(home + '/logs/gateway.log')} 2>&1 & "
+            f"printf '%s\\n' $! > {shlex.quote(gateway_pid_file)}", 30)
+        if launch.exit_code:
+            raise RuntimeError('OpenClaw subagent gateway could not start: ' + launch.stderr[-1000:])
+        ready_until = time.monotonic() + startup_timeout_seconds
+        while True:
+            health = invoke(['gateway', 'health', '--json'])
+            if health.exit_code == 0:
+                break
+            if time.monotonic() >= ready_until:
+                raise RuntimeError('OpenClaw subagent gateway health failed; inspect gateway.log: ' + health.stderr[-1000:])
+            time.sleep(.5)
     if startup_wait is not None:
         startup_wait()
     if startup_event is not None:
@@ -857,10 +888,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         })
     instruction = prompt
     agent_args = [
-        "agent", "--local", "--agent", "main", "--session-id", session_id,
+        "agent", *([] if subagents else ["--local"]), "--agent", "main", "--session-id", session_id,
         "--model", f"vllm/{openclaw_model}", "--message", instruction,
         "--timeout", str(timeout_seconds if timeout_seconds is not None else 0), "--json",
     ]
+    root_started = time.monotonic()
     if resident_poll is None:
         if timeout_seconds is None:
             raise ValueError("unbounded agent execution requires detached Runtime polling")
@@ -985,12 +1017,72 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 f"(exit {result.exit_code}; full log {failure_home / 'agent.stderr.log'}): "
                 + excerpt
             )
+    if subagents:
+        initial_response = json.loads(result.stdout)
+        if ('EMBEDDED FALLBACK:' in result.stderr
+                or initial_response.get('meta', {}).get('fallbackFrom') == 'gateway'):
+            raise RuntimeError('OpenClaw fell back to embedded execution; native subagents require a healthy gateway')
+        if initial_response.get('status') in {'error', 'timeout'}:
+            raise RuntimeError('OpenClaw gateway agent failed: ' + str(initial_response.get('summary', initial_response['status'])))
+        remaining = max(.001, float(timeout_seconds) - (time.monotonic() - root_started))
+        drain_command = 'python3 -m clawbox.experiments.subagent_drain ' \
+            + f'--state-dir {shlex.quote(openclaw_state_dir)} --root-session-id {shlex.quote(session_id)} '
+        drain_command += f'--timeout {remaining}'
+        if resident_wait is None and resident_poll is None:
+            drain = runtime_executor.execute(prefix + drain_command, remaining + 10)
+        else:
+            # Reuse the worker's cancellable completion watcher. A blocked
+            # synchronous SSH command must not hide a sibling-arm failure.
+            drain_exit = home + '/completion/subagents.exit'
+            drain_out, drain_err = home + '/logs/subagents.stdout', home + '/logs/subagents.stderr'
+            body = drain_command + f'; status=$?; printf "%s\\n" "$status" > {shlex.quote(drain_exit)}'
+            launched = runtime_executor.execute(prefix
+                + f'nohup sh -c {shlex.quote(body)} </dev/null >{shlex.quote(drain_out)} 2>{shlex.quote(drain_err)} &', 30)
+            if launched.exit_code:
+                raise RuntimeError('OpenClaw shared-session watcher could not start: ' + launched.stderr[-2000:])
+            if resident_wait is not None:
+                status = resident_wait(drain_exit, remaining + 10)
+                if status is None or status.exit_code:
+                    raise RuntimeError('OpenClaw shared-session completion wait failed')
+            else:
+                drain_deadline = time.monotonic() + remaining + 10
+                while True:
+                    if cancelled is not None and cancelled():
+                        raise InterruptedError('OpenClaw shared sessions cancelled after arm failure')
+                    if time.monotonic() >= drain_deadline:
+                        raise TimeoutError('OpenClaw shared-session completion wait timed out')
+                    if resident_file_nonempty is not None:
+                        ready = resident_file_nonempty(drain_exit, min(float(completion_watch_seconds),
+                                                                     drain_deadline - time.monotonic()))
+                    else:
+                        status = resident_poll('test -s ' + shlex.quote(drain_exit), 10)
+                        if status is None:
+                            raise RuntimeError('Runtime became non-resident while waiting for shared sessions')
+                        ready = status.exit_code == 0
+                    if ready:
+                        break
+                    time.sleep(.1)
+            drain = CommandResult(
+                int(runtime_executor.execute('cat ' + shlex.quote(drain_exit), 10).stdout.strip()),
+                runtime_executor.execute('cat ' + shlex.quote(drain_out), 10).stdout,
+                runtime_executor.execute('cat ' + shlex.quote(drain_err), 10).stdout,
+                time.monotonic() - root_started)
+        if drain.exit_code:
+            raise RuntimeError('OpenClaw shared sessions did not drain: ' + drain.stderr[-2000:])
+        shared_result = json.loads(drain.stdout)
+        # Keep the first CLI result identifiable; completion latency below now
+        # covers children and parent continuations, not just that first reply.
+        result = CommandResult(result.exit_code, json.dumps({
+            'initial_root_response': initial_response, 'shared_sessions': shared_result}),
+            result.stderr, time.monotonic()-root_started)
+        final_response_observed_unix_s = time.time()
+        final_response_observed_monotonic_s = time.monotonic()
     if startup_event is not None:
         startup_event({
             "event": "final_response_observed", "session_id": session_id,
             "observed_unix_s": final_response_observed_unix_s,
             "observed_monotonic_s": final_response_observed_monotonic_s,
-            "endpoint": "completed_agent_stdout_received_by_host",
+            "endpoint": ("shared_session_drain_received_by_host" if subagents else "completed_agent_stdout_received_by_host"),
             "includes_completion_polling_and_transport": True,
         })
     finalization_stages = {}
@@ -1019,9 +1111,14 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "sidecar.log": home + "/logs/sidecar.log",
         "policy-ssh.jsonl": policy_audit_file,
     }
+    if subagents:
+        runtime_logs['gateway.log'] = home + '/logs/gateway.log'
     if checkpoint_relay:
         runtime_logs["model-relay.log"] = home + "/logs/model-relay.log"
     stop_helpers = (
+        (f"if [ -s {shlex.quote(gateway_pid_file)} ]; then "
+         f"kill -TERM $(cat {shlex.quote(gateway_pid_file)}) 2>/dev/null || true; fi; " if subagents else '')
+        +
         f"if [ -s {shlex.quote(home + '/sidecar.pid')} ]; then "
         + f"kill -TERM $(cat {shlex.quote(home + '/sidecar.pid')}) 2>/dev/null || true; fi; "
         + (f"if [ -s {shlex.quote(relay_pid_file)} ]; then "
@@ -1114,6 +1211,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         for item in agent_tool_completed
     ]
     return {"stdout": result.stdout, "stderr": result.stderr,
+            "subagents_enabled": subagents,
             "final_response_observed_unix_s": final_response_observed_unix_s,
             "final_response_observed_monotonic_s": final_response_observed_monotonic_s,
             "tool_calls": len(agent_tool_completed),

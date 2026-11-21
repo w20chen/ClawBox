@@ -3,6 +3,17 @@
   "$id": "https://openclaw.ai/schemas/clawtune/host-kb-predict.schema.json",
   "type": "object",
   "properties": {
+    "logical_owner": {
+      "type": "object",
+      "properties": {
+        "gateway_id": {"type": ["string", "null"], "maxLength": 128},
+        "runtime_id": {"type": ["string", "null"], "maxLength": 128},
+        "session_id": {"type": ["string", "null"], "maxLength": 128},
+        "run_id": {"type": ["string", "null"], "maxLength": 128}
+      },
+      "required": ["gateway_id", "runtime_id", "session_id", "run_id"],
+      "additionalProperties": false
+    },
     "schema_version": {
       "const": "clawtune.host-kb.v1"
     },
@@ -55,6 +66,7 @@
     }
   },
   "required": [
+    "logical_owner",
     "schema_version",
     "session_id",
     "command",

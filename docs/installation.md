@@ -360,7 +360,7 @@ new run ID; `launch` reuses qualification when its capability inputs still match
 ### Refresh the Runtime predictor and KB
 
 The Python dependency is pinned to unchanged ClawTune
-`4a6d0af66e76b377bfc957baf84a5f414c6d8bf5`. ClawBox owns its host KB adapters,
+`ba4eb595a67fcfb4f3e4da54102afbc220565905`. ClawBox owns its host KB adapters,
 Runtime plugin adaptation, and compact Tool collector. Keep the ClawTune source
 unchanged. The canonical seed contains ToolKB, TrieKB, and LatticeKB; the removed
 execution-context KB is not restored.
@@ -378,6 +378,14 @@ path as `CLAWTUNE_ROOT` in `machine.env` and set `CLAWTUNE_SIDECAR_SRC` to
 `$CLAWTUNE_ROOT/services/sidecar/src`. The explicit sidecar path takes precedence
 over the root and must not still point to an older checkout. Select its `seeds/bootstrap-v2` in the
 experiment configuration. Reusing the same seed bytes needs no retraining.
+
+This revision uses nested `tool.load`, `trie.load`, and `lattice.load` prediction
+branches and `tool.pmu`. Refresh the Runtime image even if an older sidecar
+still passes its health check: the older plugin uses incompatible completion
+endpoints. The updated host adapter also supplies read-only Session previews.
+ClawBox keeps host execution receipts in the control response, outside public
+prediction signals. Optional publication is configured under baseline
+`execution.clawtune_signals`; see the [walkthrough](guide.md#4-set-arrival-and-execution-limits).
 
 For the first host-live deployment, refresh one Runtime and one Tool template,
 then validate a small experiment before refreshing the task corpus:

@@ -62,7 +62,7 @@ def test_process_ownership_commit_retry_recovery_and_equivalence(tmp_path):
         assert all(value == claims[0] for value in claims)
         call = CompletedCall('repo', 'exec', 'sleep 1', 1., 4.)
         observation = {k:v for k,v in request.items()
-                       if k not in ('event_id', 'tool_call_id', 'command_context', 'raw_params')}
+                       if k not in ('event_id', 'tool_call_id', 'logical_owner', 'command_context', 'raw_params')}
         observation.update(execution_id='exec', prediction_receipt=receipt, call=asdict(call), clauses=[],
             call_provenance=training_target_provenance(call),
             quality=dict(collection_validity='valid', cleanup='ok', loss_total=0, reason=None))

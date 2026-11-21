@@ -91,7 +91,7 @@ class ClawTuneTraceWriter:
         from clawbox.clawtune_integration import use_clawtune
         use_clawtune()
         from clawtune_sidecar.trace import AgentTestBenchTraceWriter
-        from clawtune_sidecar.contracts.models import ToolBeforeRequest, ToolCompletedEvent, ToolPrediction, ResourceScope
+        from clawtune_sidecar.contracts.models import ToolBeforeRequest, ToolCompletedEvent, ResourceScope
         from clawtune_sidecar.monitoring.tool_runtime import ToolRuntimeSample
 
         if self._native is None:
@@ -157,21 +157,16 @@ class ClawTuneTraceWriter:
             ctx_switches_delta=None, disk_read_bytes_per_s=None, disk_write_bytes_per_s=None,
             net_rx_bytes_per_s=None, net_tx_bytes_per_s=None, sampling_interval_ms=0, sampling_point_count=0,
             sampling_quality=c.get("sampling_quality", "unknown"), resource_timeline=[],
-            resource_timeline_truncated=False, resource_class="unknown", target_pid=None,
+            resource_timeline_truncated=False, target_pid=None,
             process_count_before=None, process_count_after=None,
             attribution_status="cgroup-v2" if cgroup else "unattributed",
             monitor_source="cgroup-v2" if cgroup else "cube_rpc", pmu_profile=pmu,
             environment_memory=environment_memory,
         )
         self._native.record_tool_started(before)
-        tool_prediction = prediction
-        if isinstance(prediction, dict) and isinstance(prediction.get("call_prediction"), dict):
-            tool_prediction = {"call_prediction": prediction["call_prediction"]}
-        if (isinstance(tool_prediction, dict)
-                and set(tool_prediction).issubset(ToolPrediction.model_fields)):
-            self._native.record_tool_prediction(
-                before, ToolPrediction.model_validate(tool_prediction)
-            )
+        if prediction is not None:
+            from clawbox.tuning.clawtune import trace_tool_prediction
+            self._native.record_tool_prediction(before, trace_tool_prediction(prediction))
         self._native.record_tool(after, sample)
         if not self._native.flush():
             raise RuntimeError("ClawTune trace recorder did not flush")

@@ -59,6 +59,22 @@ class _Session:
     lifecycle: SessionLifecycle = SessionLifecycle.ACTIVE
     executions: dict[str, _Execution] = field(default_factory=dict)
     condition: threading.Condition = field(default_factory=threading.Condition)
+    forecaster: Any = None
+    logical_sessions: set[str] = field(default_factory=set)
+    shared_runtime: Callable[[], None] | None = None
+
+    def register_logical_session(self, key: str) -> dict:
+        with self.condition:
+            if self.lifecycle is not SessionLifecycle.ACTIVE:
+                raise RuntimeError('pair is no longer active')
+            self.logical_sessions.add(key)
+            shared = len(self.logical_sessions) > 1
+            callback = self.shared_runtime if shared else None
+        # A claimed checkpoint may need to finish and Runtime may need restore.
+        # Never wait on the worker's lifecycle lock under the control ledger lock.
+        if callback is not None:
+            callback()
+        return {'registered': True, 'shared_runtime': shared}
 
     def admission(self, request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """Return an idempotent admission; the callback runs exactly once."""
@@ -92,6 +108,8 @@ class _Session:
                 if response["decision"] != "ADMIT":
                     raise RuntimeError("admission callback must block or return ADMIT")
             except Exception as exc:
+                if self.forecaster is not None:
+                    self.forecaster.finish(self.session_id, execution_id)
                 with self.condition:
                     execution.admission_error = {"type": type(exc).__name__, "message": str(exc)}
                     execution.admitting = False
@@ -126,6 +144,11 @@ class _Session:
                     self.start(dict(request))
                 execution.started = True
                 execution.guest_finished = phase == 'end'
+                if self.forecaster is not None:
+                    if phase == 'start':
+                        self.forecaster.start(self.session_id, request['execution_id'])
+                    else:
+                        self.forecaster.finish(self.session_id, request['execution_id'])
             return {'status': 'STARTED'}, duplicate
 
     def completion(self, request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -159,6 +182,8 @@ class _Session:
             # endpoint fields prove that completion followed process reap and
             # used the route admitted for this execution.
             execution.completion = {**request, **response}
+            if self.forecaster is not None:
+                self.forecaster.finish(self.session_id, execution_id)
             execution.completing = False
             execution.completion_completed_monotonic_s = time.monotonic()
             self.condition.notify_all()
@@ -193,6 +218,8 @@ class _Session:
         with self.condition:
             if self.executions.get(execution_id) is execution:
                 self.executions.pop(execution_id)
+                if self.forecaster is not None:
+                    self.forecaster.finish(self.session_id, execution_id)
             execution.admitting = False
             self.condition.notify_all()
 
@@ -281,6 +308,8 @@ class PolicyControlServer:
         self._started = False
         self.requests: list[dict[str, Any]] = []
         self.knowledge_manager = None
+        from .admission_forecast import AdmissionForecaster
+        self.forecaster = AdmissionForecaster()
         from .policy_http import PolicyHTTPServer
         self.server = PolicyHTTPServer((bind_host, bind_port), self,
                                        admission_workers=admission_workers)
@@ -314,11 +343,14 @@ class PolicyControlServer:
                  complete: Callable[[dict[str, Any]], dict[str, Any]],
                  abandon: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
                  start: Callable[[dict[str, Any]], None] | None = None,
+                 shared_runtime: Callable[[], None] | None = None,
                  ) -> PolicyControlSession:
         if not _IDENTITY.fullmatch(session_id):
             raise ValueError("invalid session_id")
         token = secrets.token_urlsafe(32)
         state = _Session(session_id, token, admit, complete, abandon, start)
+        state.forecaster = self.forecaster
+        state.shared_runtime = shared_runtime
         with self._lock:
             if not self._started:
                 raise RuntimeError("PolicyControlServer is not started")
@@ -330,12 +362,15 @@ class PolicyControlServer:
             raise RuntimeError('pair policy callbacks are not attached yet')
         return self.register(session_id, admit=pending, complete=pending)
 
-    def attach(self, session: PolicyControlSession, *, admit, complete, abandon=None, start=None):
+    def attach(self, session: PolicyControlSession, *, admit, complete, abandon=None, start=None, shared_runtime=None):
         state = self._lookup(session.token)
         if state is None:
             raise RuntimeError('reserved pair binding is no longer active')
         with state.condition:
             state.admit, state.complete, state.abandon, state.start = admit, complete, abandon, start
+            state.shared_runtime = shared_runtime
+        if len(state.logical_sessions) > 1 and shared_runtime is not None:
+            shared_runtime()
         return session
 
     def unregister(self, token: str, *, timeout: float | None = None) -> bool:
@@ -346,6 +381,7 @@ class PolicyControlServer:
         if drained:
             with self._lock:
                 self._sessions.pop(token, None)
+            self.forecaster.discard(state.session_id)
         return drained
 
     def discard(self, token: str) -> None:
@@ -358,6 +394,7 @@ class PolicyControlServer:
         with self._lock:
             state = self._sessions.pop(token, None)
         if state is not None:
+            self.forecaster.discard(state.session_id)
             with state.condition:
                 state.lifecycle = SessionLifecycle.CLOSED
                 state.condition.notify_all()

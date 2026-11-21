@@ -2,12 +2,13 @@ import {definePluginEntry, type HookApi} from "openclaw/plugin-sdk/plugin-entry"
 import {randomUUID} from "node:crypto";
 import {readFileSync} from "node:fs";
 import {SidecarClient} from "./client.js";
+import {SessionObservations} from "./session-observations.js";
 import {registerBenchmarkTools} from "./benchmark-tools.js";
 import {formatCallLoadPrediction, formatTimeBuckets} from "./prediction-format.js";
 import {loadConfig, isRecord} from "./config.js";
 import {configSchema} from "./config-schema.js";
 import {CorrelationMap} from "./correlation.js";
-import type {CommonEvent, ModelEvent, PluginConfig, SidecarHealth, ToolBeforeRequest, ToolCompletedEvent, ToolDecision} from "./contracts.js";
+import type {CallLoadPrediction, CommonEvent, ModelEvent, PluginConfig, SidecarHealth, ToolBeforeRequest, ToolCompletedEvent, ToolDecision} from "./contracts.js";
 import {MIN_COMPATIBLE_SIDECAR_VERSION, REQUIRED_PROTOCOL_VERSIONS} from "./contracts.js";
 import type {ResourceScope} from "./contracts.js";
 import {
@@ -48,6 +49,21 @@ import type {
 import { TRACE_SCHEMA_VERSION } from "./trace/schema.js";
 
 const pluginVersion = "0.1.0";
+
+type SessionDurationPrediction = {durationMs: number; source: "lattice" | "tool"};
+
+function durationP50(load: CallLoadPrediction): SessionDurationPrediction | null {
+  const estimate = load.targets.duration_ms;
+  const source = estimate?.backend === "lattice" ? "lattice"
+    : estimate?.backend === "runtime" ? "tool" : null;
+  return estimate?.status === "available" && source !== null &&
+    estimate.unit === "ms" && estimate.p50 !== null && Number.isFinite(estimate.p50) &&
+    estimate.p50 >= 0 ? {durationMs: estimate.p50, source} : null;
+}
+
+function sessionDuration(prediction: ToolDecision["prediction"]): SessionDurationPrediction | null {
+  return durationP50(prediction.lattice.load) ?? durationP50(prediction.tool.load);
+}
 
 // ── Plugin-wide state ──────────────────────────────────────────────────
 
@@ -190,11 +206,31 @@ export default definePluginEntry({
   // Use the awaited lifecycle gate instead of the observation-only
   // model_call_started hook. OpenClaw awaits it before the
   // first provider request, eliminating the startup race with the local proxy.
-  api.on("before_agent_start", async () => {
+  const client = new SidecarClient(config);
+  api.on("before_agent_start", async (event, context) => {
     await waitForAutoStartedSidecar();
+    const identity = hookIdentity(event, context, runtimeId, gatewayId);
+    await client.registerLogicalSession(identity.sessionKey ?? identity.sessionId);
   }, {priority: 1000, timeoutMs: config.sidecarStartupTimeoutMs + 5_000});
 
-  const client = new SidecarClient(config);
+  const sessionObservations = new SessionObservations(
+    (event, context) => hookIdentity(event, context, runtimeId, gatewayId),
+    message => client.reportSession(message), api.runtime?.events,
+    api.config?.tools?.deny?.includes("process") === true,
+    async (toolCall, owner) => {
+      const context = {runId: owner.runId, sessionId: owner.sessionId,
+        sessionKey: owner.sessionKey, agentId: owner.agentId};
+      const prediction = await client.predict(
+        buildToolBefore(toolCall, context, config, runtimeId, gatewayId, runtimeRepo)
+      );
+      return durationP50(prediction);
+    },
+  );
+  api.on("subagent_spawned", async (event, context) => {
+    await client.registerLogicalSession(extractString(event, ["childSessionKey"])
+      ?? extractString(context, ["childSessionKey"]));
+    sessionObservations.spawned(event, context);
+  });
   const correlation = new CorrelationMap(300_000, 10_000);
 
   // Initialize trace v6 if trace_dir is configured
@@ -300,142 +336,7 @@ export default definePluginEntry({
   }
 
   function summarizePrediction(decision: ToolDecision): string {
-    const prediction = decision.prediction;
-    const lines: string[] = [
-      "prediction",
-      `  duration: typical ${formatMs(prediction.duration_p50_ms)}; p90 ${formatMs(prediction.duration_p90_ms)}`,
-      `  resources: class=${prediction.resource_class}`,
-    ];
-    if (prediction.confidence !== null && prediction.confidence !== undefined) {
-      lines[2] += `; confidence=${formatNumber(prediction.confidence * 100, 0)}%`;
-    }
-    const toolResource = prediction.tool_resource;
-    const callLoad = prediction.tool ?? prediction.call_prediction;
-    if (callLoad) {
-      lines.push(...formatCallLoadPrediction(prediction));
-      if (toolResource) lines.push("", "  CLAUSE / LEGACY DIAGNOSTICS");
-    }
-    if (!toolResource) return lines.join("\n");
-
-    if (toolResource.prediction) {
-      let bucketTag: string;
-      let probsSuffix = "";
-      if (toolResource.composed === true) {
-        const total = typeof toolResource.composed_total_ms === "number" ? toolResource.composed_total_ms : 0;
-        const count = toolResource.prediction.evidence_count;
-        bucketTag = `composed; total ~${formatMs(total)}; ${count} clause${count === 1 ? "" : "s"}`;
-      } else {
-        const probs = formatProbabilityList(toolResource.prediction.probability_by_bucket);
-        bucketTag = `${formatBucketRange(toolResource.prediction.bucket_id)}; ${formatEvidence(toolResource.prediction)}`;
-        probsSuffix = probs ? `\n    probabilities: ${probs}` : "";
-      }
-      lines.push(
-        `  latency bucket: #${toolResource.prediction.bucket_id} (${bucketTag})` + probsSuffix,
-      );
-    } else {
-      lines.push(`  latency bucket: unavailable (${toolResource.unavailable_reason ?? "unknown reason"})`);
-    }
-
-    const clausePreds = toolResource.clause_predictions;
-    if (Array.isArray(clausePreds) && clausePreds.length > 0) {
-      lines.push("  clauses:");
-      for (const cp of clausePreds) {
-        if (!isRecord(cp)) {
-          lines.push("    unknown clause");
-          continue;
-        }
-        const bin = typeof cp.bin === "string" ? oneLine(cp.bin) : "?";
-        if (Array.isArray(cp.argv)) lines.push(`    clause #${cp.clause_index}: ${oneLine(JSON.stringify(cp.argv))}`);
-        if (isRecord(cp.prediction)) {
-          const p = cp.prediction;
-          const probs = formatProbabilityList(p.probability_by_bucket);
-          lines.push(
-            `    ${bin} → #${p.bucket_id} (${formatBucketRange(p.bucket_id)}; ${formatEvidence(p)})` +
-            (probs ? ` [${probs}]` : ""),
-          );
-        } else {
-          lines.push(`    ${bin} → unavailable (${cp.unavailable_reason ?? "unknown reason"})`);
-        }
-      }
-    }
-
-    const composition = toolResource.composition;
-    if (Array.isArray(composition) && composition.length > 0) {
-      lines.push("  composition:");
-      for (const unit of composition) {
-        if (!isRecord(unit)) continue;
-        const kind = unit.kind === "pipeline" ? "|" : "serial";
-        const bins = Array.isArray(unit.bins) ? unit.bins.join(" ") : "?";
-        const dropped =
-          Array.isArray(unit.dropped_viewer_bins) && unit.dropped_viewer_bins.length > 0
-            ? ` (dropped viewer: ${unit.dropped_viewer_bins.join(", ")})`
-            : "";
-        const timeMs = typeof unit.time_ms === "number" ? unit.time_ms : 0;
-        lines.push(`    ${kind} ${bins} ~${formatMs(timeMs)}${dropped}`);
-      }
-    }
-
-    const continuous = toolResource.continuous_predictions ?? {};
-    lines.push("  runtime p90:");
-    lines.push(`    ${continuousPredictionSummary(continuous.latency_ms, "latency", "ms")}`);
-    lines.push(`    ${continuousPredictionSummary(continuous.peak_cpu_cores, "cpu", "cores")}`);
-    lines.push(`    ${continuousPredictionSummary(continuous.peak_memory_mb, "memory", "MB")}`);
-
-    const resourcePreds = toolResource.lattice_resource_predictions;
-    if (Array.isArray(resourcePreds) && resourcePreds.length > 0) {
-      lines.push("  lattice resources (clause RSS; CPU peak window 500 ms):");
-      for (const clause of resourcePreds) {
-        if (!isRecord(clause) || !Array.isArray(clause.predictions)) continue;
-        const bin = typeof clause.bin === "string" ? oneLine(clause.bin) : "?";
-        if (Array.isArray(clause.argv)) lines.push(`    clause #${clause.clause_index}: ${oneLine(JSON.stringify(clause.argv))}`);
-        for (const item of clause.predictions) {
-          if (!isRecord(item)) continue;
-          const label = `${bin} ${item.algorithm} ${item.target}`;
-          if (typeof item.p50 !== "number" || typeof item.p90 !== "number" || !Number.isFinite(item.p50) || !Number.isFinite(item.p90)) {
-            lines.push(`    ${label}: unavailable (${item.unavailable_reason ?? "unknown"})`);
-          } else {
-            const scale = item.unit === "bytes" ? 1024 * 1024 : 1;
-            const unit = item.unit === "bytes" ? "MiB" : item.unit;
-            lines.push(`    ${label}: p50=${(item.p50 / scale).toFixed(3)} p90=${(item.p90 / scale).toFixed(3)} ${unit} (${item.evidence_count} samples)`);
-          }
-          if (Array.isArray(item.selected_features)) lines.push(`      context: ${item.selected_features.map(String).map(oneLine).join(" / ") || "none"}; risk=${item.selected_risk ?? "n/a"}; exact=${item.exact_match ?? "unknown"}`);
-        }
-      }
-    }
-
-    const latticePreds = toolResource.lattice_time_predictions;
-    if (Array.isArray(latticePreds) && latticePreds.length > 0) {
-      lines.push("  lattice estimates:");
-      for (const lp of latticePreds) {
-        if (!isRecord(lp)) {
-          lines.push("    unknown clause");
-          continue;
-        }
-        const bin = typeof lp.bin === "string" ? oneLine(lp.bin) : "?";
-        if (Array.isArray(lp.argv)) lines.push(`    clause #${lp.clause_index}: ${oneLine(JSON.stringify(lp.argv))}`);
-        const predictions = Array.isArray(lp.predictions) ? lp.predictions : [];
-        const estimates = predictions.map((item) => {
-          if (!isRecord(item)) return "unknown";
-          const algorithm = typeof item.algorithm === "string" ? item.algorithm : "unknown";
-          if (typeof item.prediction_ms === "number" && Number.isFinite(item.prediction_ms)) {
-            const evidence = typeof item.evidence_count === "number" ? item.evidence_count : 0;
-            const match = item.exact_match === true ? "exact" : item.exact_match === false ? "generalized" : "unknown match";
-            const features = Array.isArray(item.selected_features) ? item.selected_features.map(String).map(oneLine).join(" / ") : "none";
-            return `${algorithm}=${formatMs(item.prediction_ms)} (${match}, ${evidence} sample${evidence === 1 ? "" : "s"}); context=${features}; risk=${item.selected_risk ?? "n/a"}; fallback=${item.fallback ?? "none"}`;
-          }
-          return `${algorithm}=unavailable (${item.unavailable_reason ?? "unknown reason"})`;
-        });
-        lines.push(`    ${bin}:\n      ${estimates.join("\n      ")}`);
-      }
-    }
-
-    const enabled = toolResource.prediction_algorithms?.enabled
-      ?.map((item) => item.name)
-      .filter((name): name is string => typeof name === "string" && name.length > 0);
-    if (enabled && enabled.length > 0) {
-      lines.push(`  algorithms: ${enabled.join(", ")}`);
-    }
-    return lines.join("\n");
+    return ["prediction", ...formatCallLoadPrediction(decision.prediction)].join("\n");
   }
 
   function extractTextContent(output: unknown): string | null {
@@ -600,10 +501,12 @@ export default definePluginEntry({
   // ── before_tool_call ──────────────────────────────────────────────
 
   api.on("before_tool_call", async (event: unknown, context: unknown) => {
+    sessionObservations.beforeTool(event, context);
     dumpHookShape(event, context, "before_tool_call");
     const toolName = extractString(event, ["tool_name", "toolName", "name"]) ?? "unknown";
     const toolCallId = extractString(event, ["tool_call_id", "toolCallId", "id"]);
     const identity = hookIdentity(event, context, runtimeId, gatewayId);
+    await client.registerLogicalSession(identity.sessionKey ?? identity.sessionId);
     const correlationId = correlationKey(identity, toolCallId);
 
     // ── verbose console: tool call ──
@@ -702,6 +605,7 @@ export default definePluginEntry({
       const tDecide = monotonicNowNs();
       const decision = await client.decide(payload);
       decisionOverheadNs += monotonicNowNs() - tDecide;
+      sessionObservations.prediction(event, context, sessionDuration(decision.prediction));
       consoleVerbose(summarizePrediction(decision));
       for (const line of formatTimeBuckets(decision.prediction, toolCallId ?? toolName)) {
         consoleVerbose(`[clawtune-time-buckets] ${line}`);
@@ -819,6 +723,7 @@ export default definePluginEntry({
   // ── after_tool_call ───────────────────────────────────────────────
 
   api.on("after_tool_call", async (event: unknown, context: unknown) => {
+    sessionObservations.afterTool(event, context);
     dumpHookShape(event, context, "after_tool_call");
     const toolName = extractString(event, ["tool_name", "toolName", "name"]) ?? "unknown";
     const toolCallId = extractString(event, ["tool_call_id", "toolCallId", "id"]);
@@ -1058,9 +963,11 @@ export default definePluginEntry({
   let llmSeqCounter = 0;
 
   api.on("model_call_started", async (event: unknown, context: unknown) => {
+    sessionObservations.model(event, context, true);
     dumpHookShape(event, context, "model_call_started");
     const callId = extractString(event, ["call_id", "callId", "id"]);
     const identity = hookIdentity(event, context, runtimeId, gatewayId);
+    await client.registerLogicalSession(identity.sessionKey ?? identity.sessionId);
     const callCorrelationId = correlationKey(
       identity,
       callId === null ? null : `__llm_call__${callId}`,
@@ -1148,6 +1055,7 @@ export default definePluginEntry({
   // ── model_call_ended ──────────────────────────────────────────────
 
   api.on("model_call_ended", async (event: unknown, context: unknown) => {
+    sessionObservations.model(event, context, false);
     dumpHookShape(event, context, "model_call_ended");
     const callId = extractString(event, ["call_id", "callId", "id"]);
     const identity = hookIdentity(event, context, runtimeId, gatewayId);
@@ -1362,6 +1270,7 @@ export default definePluginEntry({
   // Older/partial hook payloads may not expose runId. Session end is the safe
   // fallback for writer and registry state, and is idempotent after agent_end.
   api.on("session_end", async (event: unknown, context: unknown) => {
+    sessionObservations.endSession(event, context);
     await finalizeSessionTrace(hookIdentity(event, context, runtimeId, gatewayId));
   });
 
@@ -1375,6 +1284,7 @@ export default definePluginEntry({
   }
 
   async function shutdown(): Promise<void> {
+    await sessionObservations.close();
     // Wait for the sidecar launch to complete (or fail) so the
     // launcher reference is populated before we try to clean it up.
     if (sidecarLaunchPromise) {

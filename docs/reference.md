@@ -854,6 +854,12 @@ Fields below are under baseline `execution` except the rows explicitly prefixed
 | `kb_queue_capacity` | 1024 | Maximum outstanding requests per KB process, positive integer. Includes queued and executing requests; exhaustion fails explicitly. Increase for a new run if the recorded owner queue fills. |
 | `kb_http_timeout_seconds` | 30 | Positive finite seconds for prediction and the total observation delivery deadline. |
 | `kb_observation_retries` | 2 | 0–5 additional observation delivery attempts within that deadline. Commands are never retried. |
+| `clawtune_signals.endpoint` | `null` | HTTP(S) receiver URL reachable from Runtime VMs; unset disables external publication. URLs cannot contain credentials or fragments. The destination is added to Runtime outbound rules. Requires the updated Runtime plugin/sidecar. |
+| `clawtune_signals.admission_eta` | `true` | Correct host-live shell Session ETA with observed admission waiting and guest execution boundaries. Requires the updated Runtime adapter and a Tool bridge supporting progress events (qualification checks support; rebuild older Tool images). Online conditional median from up to 512 recent executions, at least 3 comparable completed waits; ongoing waits are censored. Polls every 1 s; evidence expires after 2 s. Cold/unsupported/stale cases return null. New run ID; no host apply or KB retraining. `false` restores upstream execution-only ETA. |
+| `clawtune_signals.token_env` | `null` | Name of the worker environment variable containing the receiver bearer token. Missing configured tokens fail the run with a remedy. The frozen spec stores only the variable name. |
+| `clawtune_signals.tool_events` | `true` | Publish tool/model signals as well as Session snapshots. `false` publishes Session snapshots only; internal measurement and learning remain active. |
+| `clawtune_signals.queue_size` | 1024 | Positive maximum pending tool/model messages per sidecar. Session delivery separately retains the latest snapshot per session. |
+| `clawtune_signals.timeout_seconds` | 1.0 | Positive finite timeout per delivery attempt, seconds. Session attempts use the smaller of this value and 0.2 seconds. |
 | `retain_clause_telemetry_artifacts` | `false` | Write full Tool clause-telemetry files for diagnostics. Compact learning and integrity records are always retained. |
 | `submission.concurrency_levels` | `[1]` | Positive offered session counts |
 | `submission.max_active_sessions` | `null` | Optional positive limit on simultaneously live sessions (Runtime/Tool VM pairs). All offered sessions still run; freed slots admit the next session. Host quota and storage preflight use the largest possible active set. A new run ID is required; no host apply, image rebuild, or retraining. |
@@ -915,8 +921,10 @@ because reflink copies can share physical blocks.
 `agent.driver` defaults to `openclaw`; `inference.backend` defaults to `replay`.
 Replay serves recorded model responses and executes Tools normally. `serving_sim`
 uses live simulator scheduling and token timing for the adapted responses;
-Tools still execute in real VMs. Qualification accepts replay and serving_sim.
-Live API inference still has no complete supported qualification path. Fields below are in
+Tools still execute in real VMs. Qualification accepts replay, serving_sim and
+API inference. API qualification runs the selected complete live tasks, including
+child Sessions, with the configured credentials and arm timeout. It does not
+inject the single-step replay stop. Fields below are in
 `inference.configuration`:
 
 | Field | Default | Meaning |
@@ -938,6 +946,33 @@ Live API inference still has no complete supported qualification path. Fields be
 | `openclaw_exec_yield_ms` | Unset | Optional integer from 10 to 120000 milliseconds for background-capable OpenClaw exec calls. Synchronous replay recordings disable automatic background execution; see [workloads](workloads.md). |
 | `openclaw_tool_home` | `/root` | Absolute home directory inside the Tool VM. OpenClaw shell commands use it to find the image's Git and Conda configuration. Change for a custom Tool user; takes effect with a new run ID, without host apply or retraining. |
 | `clawtune_config`, `clawtune_root` | Unset | Reuse a ClawTune model configuration and source root |
+
+Fields under `agent` for shared OpenClaw Sessions:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `subagents` | `false` | Enable native Gateway execution and Session tools, including `sessions_spawn`, inside the existing Runtime. Requires `driver: openclaw`, `inference.backend: api`, `conditions.prediction_source: host-live` with a validated seed, and `mechanisms.idle_reclaim.scope: tool`. Runtime remains resident. |
+| `subagent_max_concurrent` | `8` | Integer 1–128; maximum concurrent native child runs across this Runtime's Gateway. This is not a VM count or a CPU reservation. Native OpenClaw also limits each parent's active children to its default of 5. |
+| `subagent_max_spawn_depth` | `1` | Integer 1–5; nesting depth of native subagent spawning. Depth 1 allows root children; deeper nesting requires increasing this field. |
+
+These fields require a new run ID and qualification. First install matching
+ClawBox host code and refresh the Runtime predictor/plugin; no Tool image rebuild,
+KB retraining or host apply is required for these fields. Replay/serving_sim child
+trajectories are not synthesized. Concurrent model waits are tracked by request
+ID. Host prediction receipts distinguish gateway, runtime, logical Session, run
+and tool call; sharing a Tool VM does not merge these invocations. Learning still
+uses the pair's shared KB namespace. Equal live API prompts remain separate
+requests; only an explicit shared request ID identifies a retry. Native artifact
+validation checks physical Runtime ownership and includes all child recordings.
+
+The awaited agent-start hook registers each logical Session with the host. A
+pair observed to contain multiple Sessions is protected from Runtime checkpointing;
+Tool reclaim retains its activity/admission fences. Child next-LLM forecasts do
+not predict parent completion; unknown parent waits stay unknown. Native child
+cleanup and stable idle state of every observed Session gate final collection.
+Five seconds of stable idle plus polling/transport are included in completion
+latency. The first CLI reply is saved as `initial_root_response`, with drain
+evidence under `shared_sessions`; subsequent replies are in Runtime traces.
 
 Qualification limit changes require a matching receipt and a new run ID when
 editing a frozen specification; no host apply, image rebuild or retraining.

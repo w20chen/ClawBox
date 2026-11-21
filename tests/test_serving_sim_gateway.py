@@ -559,7 +559,8 @@ def worker_prewarm_environment(*, reclaim="gpu_aware_pressure", runtime_snapshot
         _execute_idempotent=lambda *_args: SimpleNamespace(exit_code=0),
         observe_openclaw_agent_pid=lambda _phase: 42, _record_time_span=lambda *_args, **_kwargs: None,
         timeline={}, wait_lock=wait_lock, generated_model_requests_lock=Lock(),
-        wait_state={"request_id": "request", "runtime_agent_pid_before_pause": 42},
+        wait_states={"request": {"request_id": "request"}},
+        pair_wait_state={"runtime_agent_pid_before_pause": 42},
         generated_model_requests=set(), completed_model_requests=set(),
         self=SimpleNamespace(_restore_with_one_victim=restore),
         prepare_restored_tool=lambda **kwargs: tool_ready.append(kwargs), tool_ready=tool_ready,
@@ -601,10 +602,10 @@ def test_worker_gpu_boundary_prewarms_both_vms(signal_event, runtime_resident, t
     assert env["lifecycle"].resident
     assert env["tool_ready"] == ([] if tool_resident else [{"request_id": "request"}])
     if not tool_resident:
-        assert env["wait_state"]["restore_request_id"] == "request"
-        assert env["wait_state"]["restore_completed_at"] >= env["wait_state"]["restore_started_at"]
+        assert env["wait_states"]["request"]["restore_request_id"] == "request"
+        assert env["wait_states"]["request"]["restore_completed_at"] >= env["wait_states"]["request"]["restore_started_at"]
     if not runtime_resident:
-        assert env["wait_state"]["runtime_restore_request_id"] == "request"
+        assert env["wait_states"]["request"]["runtime_restore_request_id"] == "request"
     assert any(event["event"] == "model_relay_reconnected" for event in events) is (not runtime_resident)
     ready = [event for event in events if event["event"] == "gpu_pair_prewarm_ready"]
     assert len(ready) == 1 and ready[0]["trigger"] == signal_event

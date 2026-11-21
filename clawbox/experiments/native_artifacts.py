@@ -248,7 +248,7 @@ def _jsonl(raw: bytes, label: str) -> list[dict[str, Any]]:
     return records
 
 
-def runtime_request_failures(paths: list[str], *, session_id: str) -> list[dict[str, Any]]:
+def runtime_request_failures(paths: list[str], *, runtime_id: str) -> list[dict[str, Any]]:
     """Retain explicit Runtime refusals and transport failures before the join.
 
     These are request outcomes, not invented native executions. In particular,
@@ -266,7 +266,7 @@ def runtime_request_failures(paths: list[str], *, session_id: str) -> list[dict[
             raise ValueError(f"Runtime ClawTune trace is missing: {path}")
         for record in _jsonl(path.read_bytes(), str(path)):
             if (record.get("record_type") != "span_end" or record.get("kind") != "tool"
-                    or record.get("session_id") != session_id):
+                    or record.get("runtime_id") != runtime_id):
                 continue
             result = (record.get("output") or {}).get("result") or {}
             details = result.get("details") or {}
@@ -283,11 +283,13 @@ def runtime_request_failures(paths: list[str], *, session_id: str) -> list[dict[
                 reason = "ssh_transport_failed"
             else:
                 continue
-            key = (record.get("span_id"), record.get("name"), reason, message)
+            key = (record.get("session_id"), record.get("trace_id"),
+                   record.get("span_id"), record.get("name"), reason, message)
             if key in seen:
                 continue
             seen.add(key)
             failures.append({
+                "session_id": record.get("session_id"), "run_id": record.get("run_id"),
                 "call_id": record.get("span_id"), "tool": record.get("name"),
                 "execution_id": (record.get("execution") or {}).get("execution_id"),
                 "reason": reason, "message": message,
@@ -643,10 +645,10 @@ def validate_native_tool_join(
     if runtime_span_records is not None:
         for span in runtime_span_records:
             if (expected_session_id is not None
-                    and span.get("session_id") != expected_session_id):
+                    and span.get("runtime_id") != expected_session_id):
                 raise ValueError(
-                    f"Runtime trace is routed to the wrong session: "
-                    f"expected={expected_session_id!r} got={span.get('session_id')!r}"
+                    f"Runtime trace is routed to the wrong VM pair: "
+                    f"expected={expected_session_id!r} got={span.get('runtime_id')!r}"
                 )
             execution = span.get("execution")
             execution_id = str(

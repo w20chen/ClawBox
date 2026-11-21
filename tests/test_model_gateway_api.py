@@ -12,6 +12,41 @@ from trace_fixtures import llm_spans, write_spans
 from clawbox.replay.model_gateway import ModelGateway, _defer_exec_tool_timeouts, _response_message
 
 
+@pytest.mark.parametrize('logical_ids', [(None, None), ('parent-call', 'child-call'), ('retry', 'retry')])
+def test_parallel_live_calls_do_not_merge_equal_payloads(tmp_path, monkeypatch, logical_ids):
+    from concurrent.futures import ThreadPoolExecutor
+    import httpx
+    entered, release = threading.Event(), threading.Event()
+    upstream = []
+    def post(_client, _url, **_kwargs):
+        upstream.append(1)
+        entered.set()
+        assert release.wait(5)
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'done'}}]})
+    monkeypatch.setattr(httpx.Client, 'post', post)
+    gateway = ModelGateway(tmp_path / 'live.json', mode='api', timeout_s=5,
+        upstream_base_url='http://model.test/v1', upstream_api_key='test', upstream_model='model')
+    payload = {'messages': [{'role': 'user', 'content': 'same child task'}]}
+    expected = 1 if logical_ids == ('retry', 'retry') else 2
+    try:
+        with ThreadPoolExecutor(2) as pool:
+            first = pool.submit(gateway.complete_http, payload, logical_request_id=logical_ids[0])
+            assert entered.wait(2)
+            second = pool.submit(gateway.complete_http, payload, logical_request_id=logical_ids[1])
+            try:
+                deadline = time.monotonic() + 2
+                while sum(r['http_attempts'] for r in gateway.records()) < 2 and time.monotonic() < deadline:
+                    time.sleep(.005)
+                assert len(gateway.records()) == expected
+            finally:
+                release.set()
+            ids = {first.result(timeout=3)[3], second.result(timeout=3)[3]}
+            assert len(ids) == expected and len(upstream) == expected
+    finally:
+        release.set()
+        gateway.close()
+
+
 def test_standalone_gateway_compacts_successful_content_on_close(tmp_path: Path) -> None:
     trace = tmp_path / "trace.jsonl"
     store = tmp_path / "store.json"

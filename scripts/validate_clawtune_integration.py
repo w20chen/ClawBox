@@ -54,6 +54,11 @@ def main() -> None:
         sidecar_dir / "src" / "tool_resource" / "_mvdan_adapter" / "go.mod",
         sidecar_dir / "src" / "tool_resource" / "_mvdan_adapter" / "main.go",
         sidecar_dir / "src" / "clawtune_kb" / "store.py",
+        sidecar_dir / "src" / "clawtune_sidecar" / "session_state.py",
+        root / "contracts" / "signal.schema.json",
+        root / "contracts" / "tool-prediction.schema.json",
+        plugin_dir / "src" / "session-observations.ts",
+        plugin_dir / "src" / "signals.ts",
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -119,6 +124,15 @@ def main() -> None:
     sys.path.insert(0, str(project_root))
     from clawbox.experiments.prediction import clawtune_extra_peak
     from clawbox.tuning.schema import PmuProfile
+    from clawtune_sidecar.contracts.models import ToolPrediction
+    from clawtune_sidecar.predictors.tool_resource import ToolResourcePredictor
+    if set(ToolPrediction.model_fields) != {"tool", "trie", "lattice"}:
+        fail("expected independent ToolKB/TrieKB/LatticeKB prediction branches; "
+             "export the pinned ClawTune source with scripts/prepare-clawtune.py")
+    if not callable(getattr(ToolResourcePredictor, "predict_session_load", None)):
+        fail("ClawTune lacks read-only Session previews; select the pinned source")
+    ToolPrediction.model_validate(json.loads(
+        (root / "contracts/examples/tool-prediction.json").read_text(encoding="utf-8")))
 
     load_contract = json.loads((root / "contracts" / "call-load.schema.json").read_text(encoding="utf-8"))
     backends = load_contract["$defs"]["estimate"]["properties"]["backend"]["enum"]
@@ -170,7 +184,7 @@ def main() -> None:
         fail("current command parser did not project the expected pytest features")
     envelope_source = (plugin_dir / "src" / "exec-instrumentation.ts").read_text(encoding="utf-8")
     if not all(marker in envelope_source for marker in (
-        'model === "lattice" ? decision?.prediction.lattice',
+        'model === "lattice" ? decision?.prediction.lattice?.load',
         "memory_measurement: tool.memory_measurement",
         "targets: tool.targets",
     )):
@@ -215,6 +229,8 @@ def main() -> None:
                 "plugin_id": "clawtune",
                 "sidecar_package": "clawtune-sidecar",
                 "prediction_backends": sorted(backends),
+                "signal_protocol": "clawtune.signal.v1",
+                "session_preview": True,
                 "assets_required": args.require_assets,
             },
             indent=2,

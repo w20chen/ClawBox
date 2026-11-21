@@ -2,6 +2,7 @@ import type {
   ExecutionRegistrationRequest,
   ExecutionRegistrationResponse,
   ExecutionTelemetryResponse,
+  CallLoadPrediction,
   PluginConfig,
   ResourceScope,
   ToolBeforeRequest,
@@ -9,9 +10,17 @@ import type {
   ToolDecision
 } from "./contracts.js";
 import {sidecarRequestHeaders} from "./sidecar-auth.js";
+import {eventSignal} from "./signals.js";
 
 export class SidecarClient {
   constructor(private readonly config: PluginConfig) {}
+  private logicalSessions = new Set<string>();
+
+  async registerLogicalSession(key: string | null): Promise<void> {
+    if (!this.config.requireHostPrediction || key === null || this.logicalSessions.has(key)) return;
+    await this.post<unknown>("/v1/clawbox/session-register", {session_key: key}, this.config.decisionTimeoutMs, 2);
+    this.logicalSessions.add(key);
+  }
 
   async decide(payload: ToolBeforeRequest): Promise<ToolDecision> {
     // Single retry (2 total attempts).  The sidecar deduplicates concurrent
@@ -21,12 +30,23 @@ export class SidecarClient {
     return this.post<ToolDecision>("/v1/decisions/tool", payload, this.config.decisionTimeoutMs, 2);
   }
 
+  async predict(payload: ToolBeforeRequest): Promise<CallLoadPrediction> {
+    return this.post<CallLoadPrediction>(
+      "/v1/predictions/tool", payload, this.config.decisionTimeoutMs
+    );
+  }
+
   async reportCompletion(payload: ToolCompletedEvent): Promise<void> {
-    await this.post<unknown>("/v1/events/tool-completed", payload, this.config.reportTimeoutMs, 3);
+    await this.post<unknown>("/v1/signals", eventSignal(payload), this.config.reportTimeoutMs, 3);
   }
 
   async reportModel(payload: unknown): Promise<void> {
-    await this.post<unknown>("/v1/events/model", payload, this.config.reportTimeoutMs, 3);
+    await this.post<unknown>("/v1/signals", eventSignal(payload), this.config.reportTimeoutMs, 3);
+  }
+
+  async reportSession(message: unknown): Promise<void> {
+    // Full snapshots are periodically refreshed; never retry an obsolete transition.
+    await this.post<unknown>("/v1/signals", message, Math.min(this.config.reportTimeoutMs, 500));
   }
 
   async registerExecution(payload: ExecutionRegistrationRequest): Promise<ExecutionRegistrationResponse> {

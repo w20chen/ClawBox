@@ -29,6 +29,16 @@ class Pausable(Protocol):
 
 
 @dataclass(slots=True)
+class ModelWait:
+    started_monotonic_s: float
+    gpu_phase: str | None = None
+    gpu_prefill_estimate_s: float | None = None
+    gpu_prefill_observed_monotonic_s: float | None = None
+    gpu_prewarm_requested: bool = False
+    gpu_signal_sequences: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class SessionState:
     session_id: str
     lifecycle: Pausable
@@ -39,15 +49,11 @@ class SessionState:
     runtime_lifecycle: Pausable | None = None
     pair_before_pause: Callable[[], None] | None = None
     runtime_before_pause: Callable[[], None] | None = None
-    wait_id: str | None = None
-    wait_started_monotonic_s: float | None = None
+    model_waits: dict[str, ModelWait] = field(default_factory=dict)
+    completed_model_waits: set[str] = field(default_factory=set)
     response_ready: bool = False
     migration_in_progress: bool = False
-    gpu_phase: str | None = None
-    gpu_prefill_estimate_s: float | None = None
-    gpu_prefill_observed_monotonic_s: float | None = None
-    gpu_prewarm_requested: bool = False
-    gpu_signal_sequences: dict[str, int] = field(default_factory=dict)
+    shared_runtime: bool = False
     snapshot_next_use_revision: int = 0
 
 
@@ -303,20 +309,30 @@ class PolicyCoordinator:
         now = time.monotonic()
         with self.demand.progress_lock:
             state = self._sessions[session_id]
-            state.wait_id = wait_id
-            state.wait_started_monotonic_s = now
+            if wait_id in state.model_waits or wait_id in state.completed_model_waits:
+                return
+            # Concurrent model calls prove that single-thread quiescence cannot
+            # authorize pausing this shared Runtime. Keep Tool reclamation.
+            state.shared_runtime |= bool(state.model_waits)
+            state.model_waits[wait_id] = ModelWait(now)
             state.response_ready = False
             state.eviction_eligible = True
             state.last_used = now
-            state.gpu_phase = None
-            state.gpu_prefill_estimate_s = None
-            state.gpu_prefill_observed_monotonic_s = None
-            state.gpu_prewarm_requested = False
-            state.gpu_signal_sequences.clear()
             state.snapshot_next_use_revision += 1
             revision = state.snapshot_next_use_revision
             self._condition.notify_all()
         self._publish_snapshot_next_use(state, None, revision)
+
+    def protect_shared_runtime(self, session_id: str) -> bool:
+        """An individual child's wait never establishes whole-Runtime idleness."""
+        with self.demand.progress_lock:
+            state = self._sessions[session_id]
+            changed = not state.shared_runtime
+            state.shared_runtime = True
+            while state.eviction_in_progress or state.migration_in_progress:
+                self._condition.wait()
+            self._condition.notify_all()
+            return changed
 
     def observe_gpu_signal(self, session_id: str, wait_id: str, event: dict) -> dict:
         """Use online GPU observations without inventing a completion deadline.
@@ -331,7 +347,8 @@ class PolicyCoordinator:
             return {**result, "reason": "gpu_policy_disabled"}
         with self.demand.progress_lock:
             state = self._sessions.get(session_id)
-            if state is None or state.wait_id != wait_id or state.response_ready:
+            wait = state.model_waits.get(wait_id) if state else None
+            if wait is None:
                 return {**result, "reason": "request_not_waiting"}
             if (event.get("session_id", session_id) != session_id
                     or event.get("request_id", wait_id) != wait_id):
@@ -353,20 +370,20 @@ class PolicyCoordinator:
             if sequence is not None:
                 if type(sequence) is not int or sequence < 0:
                     raise ValueError("GPU signal_sequence must be a nonnegative integer")
-                if sequence <= state.gpu_signal_sequences.get(engine, -1):
+                if sequence <= wait.gpu_signal_sequences.get(engine, -1):
                     return {**result, "reason": "duplicate_or_stale_signal"}
-                state.gpu_signal_sequences[engine] = sequence
+                wait.gpu_signal_sequences[engine] = sequence
             now = time.monotonic()
-            previous_phase = state.gpu_phase
-            previous_remaining = self._gpu_prefill_remaining(state, now)
-            state.gpu_phase = str(phase)
+            previous_phase = wait.gpu_phase
+            previous_remaining = self._gpu_prefill_remaining(wait, now)
+            wait.gpu_phase = str(phase)
             if phase == "queued":
                 estimate = event.get("est_wait_s")
                 if (isinstance(estimate, bool) or not isinstance(estimate, (int, float))
                         or not math.isfinite(estimate) or estimate < 0
                         or role == "D" or event.get("layer") == "kv_transfer"):
-                    state.gpu_prefill_estimate_s = None
-                    state.gpu_prefill_observed_monotonic_s = None
+                    wait.gpu_prefill_estimate_s = None
+                    wait.gpu_prefill_observed_monotonic_s = None
                 else:
                     age = event.get("signal_age_seconds", 0.0)
                     if (isinstance(age, bool) or not isinstance(age, (int, float))
@@ -376,22 +393,23 @@ class PolicyCoordinator:
                     if (type(published) in (int, float) and type(queued) in (int, float)
                             and math.isfinite(published) and math.isfinite(queued)):
                         age += max(0.0, published - queued)
-                    state.gpu_prefill_estimate_s = float(estimate)
-                    state.gpu_prefill_observed_monotonic_s = now - age
+                    wait.gpu_prefill_estimate_s = float(estimate)
+                    wait.gpu_prefill_observed_monotonic_s = now - age
             elif phase in {"first_token", "think_start", "think_end", "finish"}:
-                state.gpu_prefill_estimate_s = None
-                state.gpu_prefill_observed_monotonic_s = None
+                wait.gpu_prefill_estimate_s = None
+                wait.gpu_prefill_observed_monotonic_s = None
             prewarm_boundary = phase in self.policy.gpu_prewarm_events
             if prewarm_boundary and role in {"A", "D"}:
-                result["should_prewarm"] = not state.gpu_prewarm_requested
+                result["should_prewarm"] = not wait.gpu_prewarm_requested
                 result["prewarm_trigger"] = phase
-                state.gpu_prewarm_requested = True
+                wait.gpu_prewarm_requested = True
                 state.eviction_eligible = False
             # P-leg finish only completes prefill, not the logical model request.
             if phase == "finish" and role in {"A", "D"}:
                 state.eviction_eligible = False
-            remaining = self._gpu_prefill_remaining(state, now)
-            next_use_deadline = now + remaining if remaining is not None else None
+            remaining = self._gpu_prefill_remaining(wait, now)
+            pair_remaining = self._pair_prefill_remaining(state, now)
+            next_use_deadline = now + pair_remaining if pair_remaining is not None else None
             state.snapshot_next_use_revision += 1
             next_use_revision = state.snapshot_next_use_revision
             threshold = self.policy.gpu_reclaim_min_remaining_seconds
@@ -426,7 +444,7 @@ class PolicyCoordinator:
                         "should_log": should_log,
                         "queued_observations_suppressed": suppressed,
                         "estimated_prefill_remaining_seconds": remaining,
-                        "prewarm_requested": state.gpu_prewarm_requested}
+                        "prewarm_requested": wait.gpu_prewarm_requested}
         # Keep per-VM metadata publication out of the global progress lock.
         # A busy checkpoint must not stall signal handling for every session.
         self._publish_snapshot_next_use(
@@ -455,14 +473,14 @@ class PolicyCoordinator:
         with self.demand.progress_lock:
             while True:
                 state = self._sessions.get(session_id)
-                if (state is None or state.wait_id != wait_id or state.response_ready
-                        or not state.gpu_prewarm_requested or state.tool_active):
+                wait = state.model_waits.get(wait_id) if state else None
+                if (wait is None or not wait.gpu_prewarm_requested or state.tool_active):
                     return False
                 if not state.eviction_in_progress and not state.migration_in_progress:
                     return True
                 self._condition.wait()
 
-    def _gpu_prefill_remaining(self, state: SessionState, now: float) -> float | None:
+    def _gpu_prefill_remaining(self, state: ModelWait, now: float) -> float | None:
         if state.gpu_prefill_estimate_s is None or state.gpu_prefill_observed_monotonic_s is None:
             return None
         age = max(0.0, now - state.gpu_prefill_observed_monotonic_s)
@@ -470,20 +488,28 @@ class PolicyCoordinator:
             return None
         return max(0.0, state.gpu_prefill_estimate_s - age)
 
+    def _pair_prefill_remaining(self, state: SessionState, now: float) -> float | None:
+        values = [self._gpu_prefill_remaining(wait, now)
+                  if not wait.gpu_prewarm_requested else None
+                  for wait in state.model_waits.values()]
+        return min(values) if values and all(v is not None for v in values) else None
+
     def _publish_snapshot_next_use(
         self, state: SessionState, deadline: float | None, revision: int,
     ) -> None:
         if not self.policy.snapshot_next_use_residency:
             return
         state.lifecycle.set_snapshot_next_use(deadline, revision)
-        if state.runtime_lifecycle is not None:
+        if state.runtime_lifecycle is not None and not state.shared_runtime:
             state.runtime_lifecycle.set_snapshot_next_use(deadline, revision)
 
     def complete_model_wait(self, session_id: str, wait_id: str) -> None:
         with self.demand.progress_lock:
             state = self._sessions[session_id]
-            if state.wait_id != wait_id:
+            if wait_id not in state.model_waits:
                 return
+            state.model_waits.pop(wait_id)
+            state.completed_model_waits.add(wait_id)
             state.response_ready = True
             state.eviction_eligible = False
             state.snapshot_next_use_revision += 1
@@ -1577,7 +1603,7 @@ class PolicyCoordinator:
                 'admission_queue_last_blockers': dict(blockers),
                 'registered_sessions': len(session_states),
                 'model_waiting_sessions': sum(
-                    state.wait_id is not None and not state.response_ready
+                    bool(state.model_waits) and not state.response_ready
                     for state in session_states
                 ),
                 'tool_active_sessions': sum(
@@ -1719,10 +1745,10 @@ class PolicyCoordinator:
                 return None
             lifecycles = [victim.lifecycle]
             if (
-                self.policy.runtime_snapshot
+                self.policy.runtime_snapshot and not victim.shared_runtime
                 and victim.runtime_lifecycle is not None
                 and victim.runtime_lifecycle.resident
-                and victim.wait_id is not None
+                and bool(victim.model_waits)
                 and not victim.response_ready
             ):
                 lifecycles.append(victim.runtime_lifecycle)
@@ -1759,7 +1785,7 @@ class PolicyCoordinator:
                 if not (
                     victim is not None
                     and victim.session_id != exclude
-                    and victim.wait_id is not None
+                    and bool(victim.model_waits)
                     and not victim.response_ready
                     and not victim.tool_active
                     and not victim.eviction_in_progress
@@ -1776,8 +1802,8 @@ class PolicyCoordinator:
                 return False
             # Once claimed, response delivery and Tool start wait for the whole
             # pair. Do not change scope halfway through when a response arrives.
-            runtime = (victim.runtime_lifecycle if self.policy.runtime_snapshot
-                       and victim.wait_id is not None and not victim.response_ready
+            runtime = (victim.runtime_lifecycle if self.policy.runtime_snapshot and not victim.shared_runtime
+                       and bool(victim.model_waits) and not victim.response_ready
                        and victim.runtime_lifecycle is not None
                        and victim.runtime_lifecycle.resident else None)
         capacity_skipped = False
@@ -1876,11 +1902,11 @@ class PolicyCoordinator:
             # Model duration is unknown online. A request remains idle until
             # its response is generated. No predicted or trace duration is consulted.
             candidates = [state for state in candidates
-                          if state.wait_id is not None and not state.response_ready]
+                          if bool(state.model_waits) and not state.response_ready]
         if self.policy.eviction is EvictionPolicy.GPU_AWARE_PRESSURE:
             now = time.monotonic()
-            estimates = [(self._gpu_prefill_remaining(state, now), state)
-                         for state in candidates if not state.gpu_prewarm_requested]
+            estimates = [(self._pair_prefill_remaining(state, now), state)
+                         for state in candidates]
             eligible = [(remaining, state) for remaining, state in estimates
                         if remaining is not None and remaining > 0
                         and remaining >= self.policy.gpu_reclaim_min_remaining_seconds]

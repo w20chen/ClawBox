@@ -134,6 +134,9 @@ class WorkloadSpec(StrictFrozenModel):
 
 class AgentSpec(StrictFrozenModel):
     driver: AgentDriver = AgentDriver.OPENCLAW
+    subagents: bool = False
+    subagent_max_concurrent: int = Field(default=8, ge=1, le=128)
+    subagent_max_spawn_depth: int = Field(default=1, ge=1, le=5)
 
 
 class ServingSimLaunchSpec(StrictFrozenModel):
@@ -459,7 +462,41 @@ class SnapshotPageManagementSpec(StrictFrozenModel):
         return self
 
 
+class ClawTuneSignalsSpec(StrictFrozenModel):
+    admission_eta: bool = True
+    endpoint: str | None = None
+    token_env: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    tool_events: bool = True
+    queue_size: int = Field(default=1024, ge=1)
+    timeout_seconds: float = Field(default=1., gt=0, allow_inf_nan=False)
+
+    @field_validator('endpoint')
+    @classmethod
+    def valid_endpoint(cls, value):
+        if value is not None:
+            url = urllib.parse.urlsplit(value)
+            if (url.scheme not in {'http', 'https'} or not url.hostname
+                    or url.username is not None or url.password is not None or url.fragment or url.port == 0):
+                raise ValueError('ClawTune signal endpoint must be an HTTP(S) URL without credentials or fragment')
+        return value
+
+    def environment(self):
+        import os
+        token = os.environ.get(self.token_env, '') if self.token_env else ''
+        if self.token_env and not token:
+            raise ValueError(f'set {self.token_env} before running the experiment: ClawTune signal receiver token is missing')
+        return {
+            'CLAWBOX_ADMISSION_ETA': str(self.admission_eta).lower(),
+            'CLAWTUNE_SIGNAL_ENDPOINT': self.endpoint or '',
+            'CLAWTUNE_SIGNAL_TOKEN': token,
+            'CLAWTUNE_SIGNAL_TOOL_EVENTS': str(self.tool_events).lower(),
+            'CLAWTUNE_SIGNAL_QUEUE_SIZE': str(self.queue_size),
+            'CLAWTUNE_SIGNAL_TIMEOUT_S': str(self.timeout_seconds),
+        }
+
+
 class ExecutionSpec(StrictFrozenModel):
+    clawtune_signals: ClawTuneSignalsSpec = Field(default_factory=ClawTuneSignalsSpec)
     kb_scope_policy: Literal['pair'] = 'pair'
     retain_clause_telemetry_artifacts: bool = False
     kb_http_timeout_seconds: float = Field(default=30., gt=0, allow_inf_nan=False)
@@ -1325,6 +1362,13 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError('host-live requires an explicit validated seed prediction_artifact')
             if self.agent.driver is not AgentDriver.OPENCLAW:
                 raise ValueError('host-live requires the OpenClaw Runtime/Tool workflow')
+        if self.agent.subagents:
+            if self.agent.driver is not AgentDriver.OPENCLAW or self.inference.backend is not InferenceBackend.API:
+                raise ValueError('agent.subagents requires OpenClaw with inference.backend=api; single-trajectory replay/simulator inputs do not describe child trajectories')
+            if self.resources.prediction_mode != 'host-live':
+                raise ValueError('agent.subagents requires host-live prediction for shared Runtime/Tool identity and execution binding')
+            if any(p.runtime_snapshot for p in self.policies):
+                raise ValueError('agent.subagents requires mechanisms.idle_reclaim.scope=tool: shared Runtime remains resident while child sessions can run')
         if self.resources.observe_predictions and not self.resources.prediction_artifact:
             raise ValueError("observe_predictions requires prediction_artifact from experiment train")
         return self

@@ -53,7 +53,7 @@ def test_native_success_handoff_preserves_wait_and_unrelated_claims():
     assert 'session' not in source._sessions
     target = s.domains['n1'].coordinator
     assert target._sessions['session'] is state
-    assert state.wait_id == 'request' and state.response_ready
+    assert 'request' in state.model_waits and state.response_ready
     assert not state.migration_in_progress
     assert ledger.claims['session', 'lifetime'] is retained
     assert retained.scope == 'n1'

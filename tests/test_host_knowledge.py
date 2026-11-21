@@ -122,7 +122,7 @@ def test_published_generations_keep_samples_and_tool_class_results(tmp_path):
     assert first.tool.predict_load_samples(query) == before
     assert next_view.generation == 71
     commandless = replace(query, command=None)
-    original, _ = next_view.predict(commandless)
+    original = next_view.predict(commandless)['runtime']
     assert next_view.predict_tool_class(commandless) == original
 
 

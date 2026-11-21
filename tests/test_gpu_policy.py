@@ -188,6 +188,7 @@ def test_new_model_wait_rejects_previous_signals_and_clears_prewarm():
     c = coordinator()
     waiting(c)
     signal(c, event="think_end")
+    c.complete_model_wait("session", "request")
     c.begin_model_wait("session", "next")
     assert not signal(c, event="think_end")["accepted"]
     assert not c.wait_for_gpu_prewarm("session", "request")

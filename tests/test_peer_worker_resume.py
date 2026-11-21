@@ -101,7 +101,7 @@ def test_worker_stages_both_roles_then_restores_runtime_and_moves_authority(tmp_
     assert binding.current == 'n1' and binding.epoch == 1
     assert env['coordinator'] is scheduler.domains['n1'].coordinator
     assert env['coordinator']._sessions['session'] is original
-    assert original.wait_id == 'request'
+    assert 'request' in original.model_waits
     assert binding.lifecycles['tool']._state == 'swapped'
     assert calls == [('export', 'runtime'), ('export', 'tool'),
                      ('stage', 'runtime'), ('stage', 'tool'),

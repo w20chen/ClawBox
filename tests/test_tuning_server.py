@@ -105,7 +105,7 @@ def test_native_api_publishes_atomic_pair_and_replays_idempotently(
         "guest_memtotal_minus_memavailable"
     )
     assert set(prediction_body["model_predictions"]) == {
-        "tool", "trie", "lattice", "diagnostics",
+        "tool", "trie", "lattice",
     }
     missing = client.get(
         "/v1/kb/admission-prediction",

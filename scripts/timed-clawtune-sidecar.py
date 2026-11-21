@@ -40,7 +40,7 @@ def _time_host_predictions(predictor: Any) -> None:
         try:
             result = predict(request)
             record["remote_prediction"] = bool(
-                (result.tool_resource or {}).get("host_kb")
+                predictor.receipts.get(predictor._key(request))
             )
             return result
         except Exception as exc:
@@ -111,6 +111,9 @@ def main() -> None:
         state.tool_monitor.prepare = timed_prepare
         app_started = time.monotonic()
         app = create_app(state)
+        if os.environ.get('CLAWTUNE_HOST_KB_ENDPOINT'):
+            from clawbox.experiments.knowledge.session_forecast import install_host_session_forecasts
+            install_host_session_forecasts(app, state)
         timing.update({
             "app_construction_seconds": time.monotonic() - app_started,
             "status": "starting_server",

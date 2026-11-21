@@ -69,7 +69,7 @@ class PolicyHTTPServer:
             from .knowledge.protocol import PROTOCOL, MAX_BODY_BYTES
             await self._json(send, 200, dict(protocol_versions=[PROTOCOL], max_body_bytes=MAX_BODY_BYTES))
             return
-        routes = {'/v1/tool/admit', '/v1/tool/complete', '/v1/tool/start', '/v1/kb/predict', '/v1/kb/observe'}
+        routes = {'/v1/runtime/session', '/v1/tool/admit', '/v1/tool/complete', '/v1/tool/start', '/v1/tool/forecast', '/v1/kb/predict', '/v1/kb/preview', '/v1/kb/observe'}
         if method != 'POST' or path not in routes:
             await self._json(send, 404, {'error': 'unknown control route'})
             return
@@ -111,7 +111,20 @@ class PolicyHTTPServer:
                         disconnected.set()
                         return
             watcher = asyncio.create_task(watch_disconnect())
-            if path.startswith('/v1/kb/'):
+            if path == '/v1/runtime/session':
+                key = body.get('session_key')
+                if not isinstance(key, str) or not 1 <= len(key) <= 512:
+                    raise ValueError('invalid logical session key')
+                response = await self._callback(state.register_logical_session, key)
+                record.update(status=200, session_id=state.session_id)
+            elif path == '/v1/tool/forecast':
+                receipts = body.get('receipts')
+                if not isinstance(receipts, list) or len(receipts) > 1024 or any(
+                        not isinstance(r, str) or not 1 <= len(r) <= 256 for r in receipts):
+                    raise ValueError('receipts must be a list of at most 1024 receipt strings')
+                response = await self._callback(owner.forecaster.snapshot, state.session_id, receipts)
+                record.update(status=200, session_id=state.session_id)
+            elif path.startswith('/v1/kb/'):
                 if owner.knowledge_manager is None:
                     raise RuntimeError('host KB is not configured')
                 if path.endswith('/observe'):
@@ -126,6 +139,7 @@ class PolicyHTTPServer:
                 owner._validate(body, state.session_id)
                 record.update(session_id=state.session_id, execution_id=body['execution_id'])
                 if path.endswith('/admit'):
+                    owner.forecaster.begin(state.session_id, body)
                     if (owner.knowledge_manager is not None and body.get('execution_scope', 'agent-tool') == 'agent-tool'
                             and body.get('operation') != 'filesystem'):
                         body['prediction'] = await self._knowledge('claim', state.session_id, body)
@@ -148,6 +162,10 @@ class PolicyHTTPServer:
                 record['admission_rolled_back'] = True
             record.update(status=499, error_type=type(exc).__name__, error=str(exc))
         except Exception as exc:
+            if path.endswith('/admit') and state is not None and isinstance(body, dict):
+                with state.condition:
+                    if body.get('execution_id') not in state.executions:
+                        owner.forecaster.finish(state.session_id, body.get('execution_id'))
             status = (400 if isinstance(exc, (KeyError, TypeError, ValueError)) else
                       409 if isinstance(exc, RuntimeError) else 503)
             record.update(status=status, error_type=type(exc).__name__, error=str(exc))

@@ -50,6 +50,7 @@ class VMState:
     cooldown_until: float = 0
     modified: set[str] = field(default_factory=set)
     cpu_idle: bool = False
+    control_revision: int = 0
 
     def refresh(self):
         self.phase = (Phase.TOOL_ACTIVE if self.active else Phase.READY if self.pending
@@ -288,6 +289,7 @@ class PressureControl:
             path = vm.group / name
             if path.exists():
                 path.write_text(value)
+                vm.control_revision += 1
                 self.stats['rollbacks'] += 1
             vm.modified.discard(name)
         vm.action_since = None
@@ -401,6 +403,7 @@ class PressureControl:
                     if path.read_text().strip() != value:
                         vm.modified.add(name)
                         path.write_text(value)
+                        vm.control_revision += 1
                         self.stats[metric] += int(value not in ('0', '100'))
                         actions.append({'event': 'pressure_control_action', 'session_id': vm.session,
                                         'generation': vm.generation, 'control': name, 'value': value,

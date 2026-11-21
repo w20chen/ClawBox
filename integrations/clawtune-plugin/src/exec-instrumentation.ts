@@ -15,6 +15,7 @@ export type ExecutionScopeLookup = {
 
 type ToolRegistrationFunction = (payload: {
   execution_id: string;
+  prediction_id?: string | null;
   gateway_id?: string | null;
   runtime_id?: string | null;
   repo?: string | null;
@@ -61,12 +62,12 @@ export const CLAWBOX_EXEC_ENVELOPE_PREFIX = "__CBX_EXEC_1__";
  */
 export function buildSandboxExecEnvelope(command: string, executionId: string, decision?: ToolDecision | null,
   model: PluginConfig["sandboxExecPredictionModel"] = "tool"): string {
-  const tool = model === "lattice" ? decision?.prediction.lattice
-    : decision?.prediction.tool ?? decision?.prediction.call_prediction;
+  const tool = model === "lattice" ? decision?.prediction.lattice?.load
+    : decision?.prediction.tool?.load;
   const header = Buffer.from(JSON.stringify({
     v: 1,
     execution_id: executionId,
-    tool_name: (decision?.prediction.tool_resource as {host_kb?: {tool_name?: string}} | null)?.host_kb?.tool_name ?? "exec",
+    tool_name: (decision?.placement as {host_kb?: {tool_name?: string}} | null)?.host_kb?.tool_name ?? "exec",
     ...(hostReceipt(decision) ? {prediction_receipt: hostReceipt(decision)} : {}),
     profile_command_b64: Buffer.from(command, "utf8").toString("base64url"),
     ...(tool
@@ -183,6 +184,7 @@ export async function instrumentExecParams(
   try {
     const registration = await client.registerExecution({
       execution_id: executionId,
+      prediction_id: decision?.decision_id ?? null,
       gateway_id: payload.gateway_id,
       runtime_id: payload.runtime_id,
       repo: payload.repo,
@@ -196,8 +198,7 @@ export async function instrumentExecParams(
       command: requestedCommand,
       workdir: typeof params.workdir === "string" ? params.workdir : null,
       host: typeof params.host === "string" ? params.host : "gateway",
-      // placement_advice is deliberately observational in this MVP.  Only a
-      // separately authorized placement object may reach the launcher.
+      // Only explicit placement settings may reach the launcher.
       placement: decision?.placement ?? null,
       profiling: decision?.profiling ?? {
         mode: config.profilingMode,
@@ -240,7 +241,8 @@ export async function instrumentExecParams(
     CLAWTUNE_TOOL_CALL_ID: payload.tool_call_id ?? "",
     CLAWTUNE_RUN_ID: runId ?? "",
     CLAWTUNE_SESSION_HASH: sessionKeyHash ?? "",
-    CLAWTUNE_COMMAND_DIGEST: commandDigest
+    CLAWTUNE_COMMAND_DIGEST: commandDigest,
+
   };
 
   let effectiveCommand: string | null = params.command as string;
@@ -536,6 +538,6 @@ function extractFiniteNumber(value: unknown, keys: string[]): number | null {
 }
 
 function hostReceipt(decision: ToolDecision | null | undefined): string | null {
-  const data = decision?.prediction.tool_resource as {host_kb?: {prediction_receipt?: string}} | null;
+  const data = decision?.placement as {host_kb?: {prediction_receipt?: string}} | null;
   return data?.host_kb?.prediction_receipt ?? null;
 }

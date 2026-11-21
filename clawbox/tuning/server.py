@@ -236,7 +236,6 @@ def create_app(db_url: str | None = None) -> FastAPI:
                 "tool": models["tool"].model_dump(mode="json"),
                 "trie": models["trie"].model_dump(mode="json"),
                 "lattice": models["lattice"].model_dump(mode="json"),
-                "diagnostics": models["diagnostics"].model_dump(mode="json"),
             },
             "prediction": {
                 "cpu_metric": "cpu_avg_cores",

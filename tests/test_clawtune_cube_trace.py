@@ -8,6 +8,25 @@ from clawbox.replay.lifecycle import CommandResult
 from clawbox.tuning.dataset import build_joined_dataset
 
 
+def test_selected_lattice_prediction_is_recorded_without_filling_other_models(tmp_path):
+    from clawbox.tuning.clawtune import trace_tool_prediction
+    from clawtune_kb.contracts import data_root
+    example = json.loads((data_root() / 'contracts/examples/tool-prediction.json').read_text(encoding='utf-8'))
+    selected = {'call_prediction': example['lattice']['load']}
+    converted = trace_tool_prediction(selected)
+    assert converted.lattice.load.model_dump(mode='json') == example['lattice']['load']
+    assert all(t.status == 'unavailable' for t in converted.tool.load.targets.values())
+    assert all(t.status == 'unavailable' for t in converted.trie.load.targets.values())
+    writer = ClawTuneTraceWriter(tmp_path, run_id='run', session_id='session')
+    try:
+        writer.record('true', CommandResult(0, '', '', .1), execution_id='exec', prediction=selected)
+    finally:
+        writer.close()
+    text = writer.trace_path.read_text(encoding='utf-8')
+    assert 'not_recorded' in text
+    assert 'lattice' in text
+
+
 def test_cube_trace_is_exactly_joinable_and_trusted(tmp_path):
     writer = ClawTuneTraceWriter(
         tmp_path, run_id="run-1", session_id="session-1",

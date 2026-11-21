@@ -16,7 +16,7 @@ from clawtune_sidecar.policies.concurrency import ConcurrencyPolicy
 from clawtune_sidecar.policies.observe import ObserveOnlyPolicy
 from clawtune_sidecar.predictors.tool_resource import ToolResourcePredictor
 from clawtune_sidecar.telemetry.metrics import Metrics
-from clawtune_sidecar.topology.linux import NumaCpuUsageSampler, read_topology
+from clawtune_sidecar.topology.linux import read_topology
 from clawtune_sidecar.trace import AgentTestBenchTraceWriter
 from tool_resource.runtime_kb import LatencyBuckets
 
@@ -121,9 +121,6 @@ def build_state(config: SidecarConfig | None = None) -> AppState:
                 else cfg.trace_dir / "tool-resource"
             ),
             container_executable=cfg.tool_resource_container_executable,
-            ttl_by_bucket_s=cfg.tool_resource_ttl_by_bucket_s,
-            miss_penalty_s=cfg.tool_resource_miss_penalty_s,
-            numa_usage_sampler=NumaCpuUsageSampler(),
         )
         if predictor.artifact_dir is not None and not cfg.tool_resource_frozen:
             predictor.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -150,11 +147,6 @@ def build_state(config: SidecarConfig | None = None) -> AppState:
         policy = ConcurrencyPolicy(leases, cfg.admission_wait_ms)
     else:
         policy = ObserveOnlyPolicy()
-    tool_monitor = RealtimeToolMonitor(
-        poll_interval_s=max(0.01, cfg.resource_poll_interval_ms / 1000),
-        max_timeline_points=max(1, cfg.resource_timeline_max_points),
-        enable_ebpf=cfg.tool_resource_ebpf_enabled,
-    )
     pmu_max_active = cfg.pmu_max_active or max_active_tools
     pmu_max_fds = (
         cfg.pmu_max_fds
@@ -166,6 +158,15 @@ def build_state(config: SidecarConfig | None = None) -> AppState:
         max_active=pmu_max_active,
         max_fds=pmu_max_fds,
         reliable_ratio=cfg.pmu_reliable_running_ratio,
+    )
+    if cfg.host_kb_endpoint:
+        from .remote import HostReceiptPolicy
+        policy = HostReceiptPolicy(policy, predictor)
+    tool_monitor = RealtimeToolMonitor(
+        poll_interval_s=max(0.01, cfg.resource_poll_interval_ms / 1000),
+        max_timeline_points=max(1, cfg.resource_timeline_max_points),
+        enable_ebpf=cfg.tool_resource_ebpf_enabled,
+        pmu_collector=pmu_collector,
     )
     topology["pmu"] = pmu_collector.diagnostics()
     docker_exec_observer = (

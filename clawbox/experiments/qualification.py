@@ -1196,8 +1196,8 @@ def _case_ids_digest(cases: list[Any] | tuple[Any, ...]) -> str:
 
 
 def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) -> ExperimentSpec:
-    if spec.inference.backend not in {InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}:
-        raise ValueError("qualification requires inference.backend=replay or serving_sim")
+    if spec.inference.backend not in {InferenceBackend.API, InferenceBackend.REPLAY, InferenceBackend.SERVING_SIM}:
+        raise ValueError("qualification requires inference.backend=api, replay or serving_sim")
     source_cases = load_workload_cases(spec.workload)
     case_limit = _qualification_configuration_int(
         spec.inference.configuration,
@@ -1222,7 +1222,9 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         # execute their first native Tool call. Replaying the full corpus adds a
         # second workload run but does not strengthen this capability proof.
         **({"time_scale": 0.0} if spec.inference.backend is InferenceBackend.REPLAY else {}),
-        "max_model_steps": 1,
+        # Live API tasks (including child Sessions) must reach their ordinary
+        # terminal state; a fabricated replay stop would invalidate this check.
+        **({"max_model_steps": 1} if spec.inference.backend is not InferenceBackend.API else {}),
         "qualification_max_parallel_sessions": level,
     }
     if spec.inference.backend is InferenceBackend.SERVING_SIM:
