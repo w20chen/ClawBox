@@ -46,6 +46,16 @@ def positive_float_or_auto(value: str) -> float | str:
     return parsed
 
 
+def positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive number") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number")
+    return parsed
+
+
 def emit_overview(value: dict[str, Any]) -> None:
     if 'dimensions' in value:
         print(f"Experiment: {value['experiment_id']} | baseline: {value['arms'][0]['name']} | trials: {value['arm_count']}")
@@ -157,10 +167,18 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--attempt-id")
             command.add_argument("--owner-id")
             command.add_argument("--qualification", type=Path)
+            command.add_argument(
+                "--cleanup-timeout-seconds", type=positive_float, default=180.0,
+                help="deadline for owned-VM cleanup in seconds (default: 180)",
+            )
             command.add_argument("--detach", action="store_true")
     resume = sub.add_parser("resume", help="resume non-successful arms from a frozen run")
     resume.add_argument("run_id")
     resume.add_argument("--attempt-id")
+    resume.add_argument(
+        "--cleanup-timeout-seconds", type=positive_float, default=180.0,
+        help="deadline for owned-VM cleanup in seconds (default: 180)",
+    )
     resume.add_argument("--detach", action="store_true")
     host = sub.add_parser("host", help="inspect, configure and check a standalone host before changing it")
     host_actions = host.add_subparsers(dest="host_action", required=True)
@@ -297,6 +315,10 @@ def parser() -> argparse.ArgumentParser:
     launch.add_argument("--qualification-concurrency", type=int,
                         help="bound simultaneous smoke sessions (default: minimum of target concurrency, sandbox-create concurrency, and sampled case count); samples up to qualification_case_limit cases, does not prove target density")
     launch.add_argument("--force-qualify", action="store_true")
+    launch.add_argument(
+        "--cleanup-timeout-seconds", type=positive_float, default=180.0,
+        help="deadline for owned-VM cleanup in seconds (default: 180)",
+    )
     launch.add_argument("--detach", action="store_true")
     importer = sub.add_parser("import-trace", help="convert a supported research trace to replay schema 6")
     importer.add_argument("source", type=Path)
@@ -359,7 +381,7 @@ def parser() -> argparse.ArgumentParser:
                 help="maximum concurrent Cube destroy requests (default: 8)",
             )
             command.add_argument(
-                "--cleanup-timeout-seconds", type=float, default=180.0,
+                "--cleanup-timeout-seconds", type=positive_float, default=180.0,
                 help="deadline for owned-VM cleanup in seconds (default: 180)",
             )
     trace = sub.add_parser("trace", help="inspect a JSONL recording without starting VMs")
@@ -460,6 +482,10 @@ def launch_experiment(args: argparse.Namespace) -> int:
         ]
     else:
         action_args = [run_id]
+    action_args.extend([
+        "--cleanup-timeout-seconds",
+        str(getattr(args, "cleanup_timeout_seconds", 180.0)),
+    ])
     if args.detach:
         action_args.append("--detach")
     code = main([
@@ -829,6 +855,10 @@ def main(argv: list[str] | None = None) -> int:
                     ])
                 else:
                     command.extend([run_id, "--attempt-id", attempt_id])
+                command.extend([
+                    "--cleanup-timeout-seconds",
+                    str(args.cleanup_timeout_seconds),
+                ])
                 with log_path.open("ab") as log:
                     process = subprocess.Popen(
                         command, stdout=log, stderr=subprocess.STDOUT,
@@ -849,6 +879,7 @@ def main(argv: list[str] | None = None) -> int:
                 owner_id=owner_id, output_root=output,
                 resume=args.command == "resume",
                 qualification_receipt=qualification_receipt,
+                cleanup_timeout_seconds=args.cleanup_timeout_seconds,
             ).run()
             emit({"runId": run_id, "attemptId": attempt_id, "ownerId": owner_id,
                   "output": str(output),

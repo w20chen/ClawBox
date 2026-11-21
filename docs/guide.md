@@ -776,7 +776,8 @@ throughput timing.
 
 ```bash
 bash scripts/clawbox --sudo experiment launch \
-  /data/clawbox-results/eval-01/experiment.yaml --run-id eval-01 --detach
+  /data/clawbox-results/eval-01/experiment.yaml --run-id eval-01 \
+  --cleanup-timeout-seconds 180 --detach
 bash scripts/clawbox --sudo experiment abort eval-01
 bash scripts/clawbox experiment status eval-01
 ```
@@ -791,6 +792,13 @@ delete requests and a 180-second deadline; use `--cleanup-workers` and
 `--cleanup-timeout-seconds` for a larger cleanup window. They fail if remaining
 ownership cannot be verified. Retry with the same run ID after resolving the
 reported service or transport error.
+
+`launch`, lower-level `run`, and `resume` also accept
+`--cleanup-timeout-seconds` (seconds, default 180). This is the supervisor's
+deadline for final owned-VM cleanup; it does not change workload timing or VM
+lifetimes. Set a larger value for dense runs when the host cannot destroy every
+owned VM within 180 seconds. A new value affects only that invocation and does
+not require host apply, image/template rebuild, retraining, or a new run ID.
 
 After an ambiguous VM-creation error, run `abort` before starting a replacement
 run. Preserve the failed run directory. See [results and measurements](results.md)

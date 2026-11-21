@@ -124,6 +124,7 @@ def test_launch_qualifies_when_needed_then_starts_run(
         qualification_concurrency=4,
         force_qualify=False,
         run_id="self-service",
+        cleanup_timeout_seconds=3600.0,
         detach=True,
     )) == 0
     assert calls[:2] == ["inputs", "host"]
@@ -135,9 +136,33 @@ def test_launch_qualifies_when_needed_then_starts_run(
         [
             "--output-root", str(tmp_path), "experiment", "run",
             str(spec_path), "--run-id", "self-service",
-            "--qualification", str(receipt), "--detach",
+            "--qualification", str(receipt),
+            "--cleanup-timeout-seconds", "3600.0", "--detach",
         ],
     )
+
+
+def test_run_resume_and_launch_accept_cleanup_timeout() -> None:
+    parse = cli.parser().parse_args
+    assert parse([
+        "experiment", "launch", "--baseline", "baseline.yaml",
+        "--workload", "workload.yaml",
+        "--cleanup-timeout-seconds", "3600",
+    ]).cleanup_timeout_seconds == 3600.0
+    assert parse([
+        "experiment", "run", "--baseline", "baseline.yaml",
+        "--workload", "workload.yaml",
+        "--cleanup-timeout-seconds", "900",
+    ]).cleanup_timeout_seconds == 900.0
+    assert parse([
+        "experiment", "resume", "run-1",
+    ]).cleanup_timeout_seconds == 180.0
+    with pytest.raises(SystemExit):
+        parse([
+            "experiment", "launch", "--baseline", "baseline.yaml",
+            "--workload", "workload.yaml",
+            "--cleanup-timeout-seconds", "0",
+        ])
 
 
 def test_launch_rejects_an_invalid_explicit_receipt_without_requalifying(
