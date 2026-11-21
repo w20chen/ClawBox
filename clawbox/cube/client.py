@@ -317,8 +317,16 @@ class CubeSandboxClient:
                 raise
 
         def reconcile_placement() -> None:
-            if (refresh_placement is None
-                    or getattr(last_error, "status_code", None) != 130562):
+            # The current CubeSandbox SDK exposes the HTTP status (500) as
+            # ``status_code`` and retains CubeMaster's application code only in
+            # the message. Older/fake clients exposed 130562 directly. Accept
+            # both shapes so an interrupted resume can republish its consumed
+            # placement capability instead of retrying it until the deadline.
+            assigned_capability = (
+                getattr(last_error, "status_code", None) == 130562
+                or "error code 130562:" in str(last_error)
+            )
+            if refresh_placement is None or not assigned_capability:
                 return
             try:
                 state = self.get_sandbox_state(sandbox_id)

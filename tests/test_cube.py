@@ -1501,6 +1501,45 @@ def test_connect_never_republishes_capability_for_running_sandbox(
     assert refreshed == []
 
 
+def test_connect_republishes_capability_from_current_sdk_error_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AssignedCapabilityApiError(RuntimeError):
+        # Current SDK keeps CubeMaster's 130562 only in the exception message.
+        status_code = 500
+
+    class CurrentSdkSandbox(_Sandbox):
+        connect_calls = 0
+
+        def get_info(self):
+            return {"state": self.state}
+
+        @classmethod
+        def connect(cls, sandbox_id, **kwargs):
+            cls.connect_calls += 1
+            if cls.connect_calls == 1:
+                raise AssignedCapabilityApiError(
+                    "CubeMaster returned error code 130562: "
+                    "ClawBox placement capability is already assigned"
+                )
+            return super().connect(sandbox_id, **kwargs)
+
+    monkeypatch.setattr("clawbox.cube.api_retry.time.sleep", lambda _seconds: None)
+    paused = CurrentSdkSandbox({"sandboxID": "sb-paused", "state": "paused"})
+    CurrentSdkSandbox.items = {"sb-paused": paused}
+    refreshed = []
+    client = CubeSandboxClient(sandbox_class=CurrentSdkSandbox)
+    client._handles["sb-paused"] = paused
+
+    sandbox = client.connect_sandbox(
+        "sb-paused", refresh_placement=lambda: refreshed.append(True),
+    )
+
+    assert sandbox.state == "running"
+    assert CurrentSdkSandbox.connect_calls == 2
+    assert refreshed == [True]
+
+
 def test_connect_uses_configured_restore_budget_beyond_ten_fast_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
