@@ -68,9 +68,9 @@ def test_doctor_checks_current_clawtune_images(monkeypatch, tmp_path, image_revi
         'sandbox': {'template_id': 'tool'},
     }, current_images=True)
     assert revisions == [tmp_path]
-    assert templates == ['runtime', 'tool']
+    assert templates == ['runtime']
     image_failures = [name for name in failures if 'current ClawTune' in name]
-    assert len(image_failures) == (0 if image_revision == 'current' else 2)
+    assert len(image_failures) == (0 if image_revision == 'current' else 1)
 
 
 def test_bad_template_digest_rejected(monkeypatch):

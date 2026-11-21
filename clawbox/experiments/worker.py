@@ -5707,12 +5707,16 @@ class ExperimentWorker:
                     if arm.inference.backend.value == 'serving_sim':
                         audit = self.serving_sim.validate_tool_outcomes(session_id=session_id,
                             trace_id=simulator_binding['trace_id'],
-                            spans=_runtime_spans(outcome['runtime_traces']), reported_failures=agent_tool_failures)
+                            spans=_runtime_spans(
+                                outcome['runtime_traces'], collection_runtime_id=session_id,
+                            ), reported_failures=agent_tool_failures)
                         matched_failures, harmless_failures, unexpected_failures = (
                             audit['matched'], audit['harmless'], audit['unexpected'])
                     else:
                         matched_failures = match_recorded_tool_failures(
-                            trace_path, _runtime_spans(outcome["runtime_traces"]),
+                            trace_path, _runtime_spans(
+                                outcome["runtime_traces"], collection_runtime_id=session_id,
+                            ),
                             session_id=session_id, reported_failures=agent_tool_failures,
                             harmless_failures=harmless_failures,
                             unexpected_failures=unexpected_failures,

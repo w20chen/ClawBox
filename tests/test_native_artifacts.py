@@ -48,6 +48,14 @@ def test_request_failure_evidence_survives_missing_native_id_and_ok_status(tmp_p
                            "reason": reason, "message": details.get("error") or content}
     assert runtime_request_failures([str(path)], runtime_id="another-runtime") == []
 
+    # The plugin fallback writer omits runtime_id inside schema-6 rows.  Its
+    # caller supplies the identity of the private Runtime trace root.
+    record.pop("runtime_id")
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    scoped = runtime_request_failures([str(path)], runtime_id="r")
+    assert len(scoped) == 1
+    assert scoped[0]["reason"] == reason
+
 
 def test_expected_file_diagnostics_are_not_transport_rejections(tmp_path):
     record = {"record_type": "span_end", "kind": "tool", "name": "edit", "session_id": "s", "runtime_id": "r",
@@ -396,6 +404,31 @@ def test_runtime_spans_collapse_only_agreeing_mirrored_writers(
     distinct = {**base, "span_id": "call-b"}
     second.write_text(json.dumps(distinct) + "\n", encoding="utf-8")
     assert len(_runtime_spans([str(first), str(second)])) == 2
+
+
+def test_runtime_spans_use_private_collection_scope_for_plugin_fallback(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime-a__session-a_run-a__digest.jsonl"
+    fallback = {
+        "record_type": "span_end", "kind": "tool", "name": "exec",
+        "trace_id": "trace-a", "span_id": "call-a", "session_id": "session-a",
+        "status": {"code": "ok"}, "output": {"exit_code": 0},
+        "execution": {"execution_id": "exec-a", "mode": "launcher"},
+    }
+    path.write_text(json.dumps(fallback) + "\n", encoding="utf-8")
+
+    spans = _runtime_spans([str(path)], collection_runtime_id="runtime-a")
+
+    assert spans[0]["runtime_id"] == "runtime-a"
+    assert spans[0]["runtime_id_source"] == "clawbox_private_collection_scope"
+
+    path.write_text(json.dumps({
+        **fallback, "runtime_id": "runtime-b",
+    }) + "\n", encoding="utf-8")
+    explicit = _runtime_spans([str(path)], collection_runtime_id="runtime-a")
+    assert explicit[0]["runtime_id"] == "runtime-b"
+    assert "runtime_id_source" not in explicit[0]
 
 
 def test_runtime_spans_recovers_exact_clawtune_envelope_identity(

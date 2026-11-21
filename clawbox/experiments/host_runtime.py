@@ -346,11 +346,17 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
             containers = (item.create_request or {}).get("containers") or []
             env = {e["key"]: e.get("value") for c in containers for e in c.get("envs", [])}
             return revision != "unknown" and env.get("CLAWTUNE_REVISION") == revision
-        for role in ("runtime", "sandbox"):
-            checks.append((
-                role + " current ClawTune (update with clawbox experiment images)",
-                lambda r=role: matches(r),
-            ))
+        # Session state, prediction sidecar and the OpenClaw plugin live in the
+        # shared Runtime image, so that image must match the selected ClawTune
+        # source exactly.  Task-specific Tool images intentionally remain
+        # reusable when their collector/bridge contract is unchanged.  Their
+        # required progress and telemetry capabilities are exercised by real-VM
+        # qualification; comparing the whole ClawTune repository revision here
+        # would reject compatible corpus images after Runtime-only changes.
+        checks.append((
+            "runtime current ClawTune (update with clawbox experiment images)",
+            lambda: matches("runtime"),
+        ))
     if warm:
         for unit in ("cube-sandbox-cubemaster", "cube-sandbox-cubelet"):
             checks.append((unit + " WARM root", lambda u=unit: service_setting(u, "CLAWBOX_WARM_SNAPSHOT_ROOT") == profile["warm_root"]))

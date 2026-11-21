@@ -265,8 +265,15 @@ def runtime_request_failures(paths: list[str], *, runtime_id: str) -> list[dict[
         if not path.is_file():
             raise ValueError(f"Runtime ClawTune trace is missing: {path}")
         for record in _jsonl(path.read_bytes(), str(path)):
+            # ClawTune's plugin-side schema-6 fallback writer scopes records by
+            # its per-Runtime trace directory and filename, but the individual
+            # records do not contain runtime_id.  These paths were collected
+            # from this Runtime's private trace root by the caller.  Continue
+            # to reject an explicitly different identity while accepting the
+            # scoped fallback record.
+            record_runtime_id = record.get("runtime_id")
             if (record.get("record_type") != "span_end" or record.get("kind") != "tool"
-                    or record.get("runtime_id") != runtime_id):
+                    or record_runtime_id not in (None, runtime_id)):
                 continue
             result = (record.get("output") or {}).get("result") or {}
             details = result.get("details") or {}
@@ -298,13 +305,19 @@ def runtime_request_failures(paths: list[str], *, runtime_id: str) -> list[dict[
 
 
 @operation('finalize.runtime_parse')
-def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
+def _runtime_spans(
+    paths: list[str], *, collection_runtime_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Load Runtime ClawTune tool span ends from the copied trace files.
 
     ClawTune can persist the same logical span through its direct writer and
-    its sidecar-normalized writer.  Collapse only those mirrored records that
-    have the same trace/span/execution identity and agree on outcome; distinct
-    spans reusing one execution ID remain visible to the strict join check.
+    its sidecar-normalized writer.  The direct schema-6 writer scopes identity
+    by the per-Runtime collection root and may omit ``runtime_id`` inside each
+    row.  A caller that collected one such private root supplies that identity
+    explicitly; an identity present in a row is never replaced.  Collapse only
+    mirrored records that have the same trace/span/execution identity and agree
+    on outcome; distinct spans reusing one execution ID remain visible to the
+    strict join check.
     """
     spans: list[dict[str, Any]] = []
     for rendered_path in paths:
@@ -315,6 +328,12 @@ def _runtime_spans(paths: list[str]) -> list[dict[str, Any]]:
             raise ValueError(f"Runtime ClawTune trace is missing: {path}")
         starts: dict[tuple, dict[str, Any]] = {}
         for record in _jsonl(path.read_bytes(), str(path)):
+            if record.get("runtime_id") is None and collection_runtime_id is not None:
+                record = {
+                    **record,
+                    "runtime_id": collection_runtime_id,
+                    "runtime_id_source": "clawbox_private_collection_scope",
+                }
             key = tuple(record.get(field) for field in (
                 "gateway_id", "runtime_id", "trace_id", "span_id", "session_id",
             ))
@@ -901,7 +920,9 @@ def collect_and_validate_native_tool_artifacts(
                 pmu_artifacts[execution_id] = payload
 
     runtime_span_records = (
-        _runtime_spans(runtime_trace_paths)
+        _runtime_spans(
+            runtime_trace_paths, collection_runtime_id=session_id,
+        )
         if runtime_trace_paths is not None else None
     )
     # The bridge embeds PMU in new cgroup artifacts; accept the standalone
