@@ -330,13 +330,25 @@ class CubeSandboxClient:
                 refresh_placement()
 
         with span('native.connect_with_retries'):
+            # A restore wave can leave CubeAPI returning a fast HTTP 500 while
+            # Cubelet finishes the pause/restore state transition.  Ten
+            # backoff attempts cover less than twenty seconds, which is shorter
+            # than the configured Cube request/reconciliation budget and caused
+            # otherwise healthy VMs to fail Tool admission at Full-1280.  Keep
+            # the operation idempotent, but let retries consume that existing
+            # public budget before failing closed.
+            max_delay_s = 2.0
+            attempts = max(
+                10, int(self.restore_retry_deadline_s / max_delay_s) + 4,
+            )
             sandbox = retry_with_backoff(
                 connect,
                 label=f"resume sandbox {sandbox_id}",
-                attempts=10,
+                attempts=attempts,
                 initial_delay_s=0.25,
-                max_delay_s=2.0,
+                max_delay_s=max_delay_s,
                 before_retry=reconcile_placement,
+                deadline_s=self.restore_retry_deadline_s,
             )
         self._handles[sandbox_id] = sandbox
         return sandbox

@@ -693,6 +693,14 @@ verified obsolete templates, or edit `resources.cubelet_storage_root` and the
 measured `resources.cube_cow_headroom_per_vm_mib`; either edit requires a new
 run ID but no image rebuild.
 
+Under a large pause/restore wave, Cube may transiently reject an idempotent
+sandbox resume while its state transition settles. The baseline field
+`execution.cube_request_timeout_seconds` (seconds, default 130) bounds both an
+individual Cube HTTP request and the total resume retry window. Increase it only
+when retained logs show a longer transient transition; a change requires a new
+run ID, not host apply, image rebuild or predictor retraining. Permanent resume
+failure still fails the session after this budget.
+
 Qualification executes the first model step and its real Tool calls for up to
 16 cases, selected at evenly spaced positions in workload order (including both
 ends). It validates all input cases and keeps the required snapshot, placement,

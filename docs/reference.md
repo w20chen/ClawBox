@@ -867,7 +867,7 @@ Fields below are under baseline `execution` except the rows explicitly prefixed
 | `dependency_install_concurrency` | `null` | Optional arm-wide bound on active apt/apt-get/pip installs |
 | `apt_cache_proxy_url` | `null` | Explicit Tool-only `http://host:port` APT proxy, with either internet policy. Requires a reachable proxy; change requires a new run ID, no image rebuild. |
 | `pypi_cache_index_url` | `null` | Explicit Tool-only `http://host:port/.../+simple/` pip index, with either internet policy. Requires a reachable cache; change requires a new run ID, no image rebuild. |
-| `cube_request_timeout_seconds` | 130 | Per-request Cube HTTP deadline, seconds |
+| `cube_request_timeout_seconds` | 130 | Per-request Cube HTTP deadline and total retry budget for an idempotent sandbox resume, seconds. A new run ID is required; no host apply, image rebuild or retraining. |
 | `policy_progress_timeout_seconds` | 30 | Total deadline in seconds for each Tool start/end acknowledgement; at most three idempotent notification attempts share it. Commands are never retried and policy rejection remains fatal. Requires the matching Runtime shim and Tool bridge images; a changed value needs a new run ID. |
 | `cube_create_capacity_retry_seconds` | 60 | Retry window for definite Cube `130597` rejection; 0 disables retries |
 | `worker_thread_switch_interval_seconds` | 0.001 | Python handoff interval, `(0,0.1]` seconds |

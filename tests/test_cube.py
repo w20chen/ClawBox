@@ -1501,6 +1501,34 @@ def test_connect_never_republishes_capability_for_running_sandbox(
     assert refreshed == []
 
 
+def test_connect_uses_configured_restore_budget_beyond_ten_fast_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SlowStateTransitionSandbox(_Sandbox):
+        connect_calls = 0
+
+        @classmethod
+        def connect(cls, sandbox_id, **kwargs):
+            cls.connect_calls += 1
+            if cls.connect_calls <= 12:
+                raise RuntimeError("Cube pause transition still settling")
+            return super().connect(sandbox_id, **kwargs)
+
+    monkeypatch.setattr("clawbox.cube.api_retry.time.sleep", lambda _seconds: None)
+    paused = SlowStateTransitionSandbox({
+        "sandboxID": "sb-slow-transition", "state": "paused",
+    })
+    SlowStateTransitionSandbox.items = {"sb-slow-transition": paused}
+    client = CubeSandboxClient(
+        sandbox_class=SlowStateTransitionSandbox, request_timeout_s=130,
+    )
+
+    sandbox = client.connect_sandbox("sb-slow-transition")
+
+    assert sandbox.state == "running"
+    assert SlowStateTransitionSandbox.connect_calls == 13
+
+
 def test_failed_warm_manifest_retains_inflight_capacity_until_destroy():
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)
