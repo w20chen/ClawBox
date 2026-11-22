@@ -1316,6 +1316,72 @@ def test_checkpoint_does_not_retry_begin_failure_when_remote_state_is_not_runnin
     assert lifecycle.state.value == "unknown"
 
 
+def test_checkpoint_reconciles_already_committed_pause_with_complete_metadata(tmp_path) -> None:
+    class AlreadyCommitted(RuntimeError):
+        status_code = 130400
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(65536)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    pause = client.pause_sandbox
+
+    def commit_then_report_existing(sandbox, **kwargs):
+        pause(sandbox, **kwargs)
+        raise AlreadyCommitted(
+            "begin pause snapshot: sandbox sandbox already has pause snapshot snap-id"
+        )
+
+    client.pause_sandbox = commit_then_report_existing
+    lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+
+    assert lifecycle.state.value == "swapped"
+    assert pool.committed_bytes > 0
+    timing = lifecycle.timings[-1]
+    assert timing["snapshot_metrics"]["control_response_reconciled"] is True
+    lifecycle.restore()
+    snapshot = Path(timing["snapshot_path"])
+    (Path(str(snapshot) + ".layers") / "000000.mem").unlink()
+    Path(str(snapshot) + ".layers").rmdir()
+    Path(str(snapshot) + ".lineage.json").unlink()
+    snapshot.unlink()
+    lifecycle.close()
+
+
+def test_checkpoint_does_not_reconcile_already_committed_pause_without_metadata(tmp_path) -> None:
+    class AlreadyCommitted(RuntimeError):
+        status_code = 130400
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(65536)
+    lifecycle = CubeSandboxLifecycle(
+        client, template="tpl", node_name="node-a", ownership=_owner(),
+        warm_snapshot_root=str(tmp_path / "warm"),
+        cold_snapshot_root=str(tmp_path / "cold"),
+        snapshot_pool=pool, snapshot_reservation_bytes=8192,
+    )
+    lifecycle.start()
+    client.get_sandbox_state = lambda _sandbox: "paused"
+
+    def report_existing_without_files(_sandbox, **_kwargs):
+        raise AlreadyCommitted(
+            "begin pause snapshot: sandbox sandbox already has pause snapshot snap-id"
+        )
+
+    client.pause_sandbox = report_existing_without_files
+    with pytest.raises(AlreadyCommitted, match="already has pause snapshot"):
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert lifecycle.state.value == "unknown"
+    assert pool.reserved_bytes == 8192
+
+
 def test_checkpoint_releases_generation_after_repeated_begin_failure(tmp_path) -> None:
     class BeginFailure(RuntimeError):
         status_code = 130400

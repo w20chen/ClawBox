@@ -512,6 +512,22 @@ class CubeSandboxLifecycle:
             and "begin pause snapshot: invalid connection" in str(exc).lower()
         )
 
+    @staticmethod
+    def _is_pause_already_committed_error(exc: BaseException) -> bool:
+        """Recognize Cube's idempotent BeginPause conflict precisely.
+
+        CubeMaster can commit PauseToSnapshot and then retry BeginPause after
+        the original control response is lost.  The retry reports 130400 even
+        though the VM is paused and the requested snapshot is complete.  The
+        caller still requires both of those authoritative facts before it
+        reconciles the operation.
+        """
+        return (
+            getattr(exc, "status_code", None) == 130400
+            and "begin pause snapshot:" in str(exc).lower()
+            and "already has pause snapshot" in str(exc).lower()
+        )
+
     def checkpoint_and_evict(self, *, tier: SnapshotTier | None = None) -> float | None:
         """Ask CubeSandbox to snapshot the VM and destroy its live runtime.
 
@@ -756,7 +772,10 @@ class CubeSandboxLifecycle:
                 # or for a failure after the manifest was already returned.
                 if (
                     pause_attempted and not pause_completed
-                    and getattr(exc, "status_code", None) in {None, 130595}
+                    and (
+                        getattr(exc, "status_code", None) in {None, 130595}
+                        or self._is_pause_already_committed_error(exc)
+                    )
                     and remote_state == "paused"
                     and key is not None and tier is not None and path is not None
                 ):
