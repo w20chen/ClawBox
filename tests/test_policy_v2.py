@@ -1051,11 +1051,13 @@ def test_response_during_tool_pause_still_finishes_committed_runtime_pause():
 def test_admission_uses_configured_selector_instead_of_direct_checkpoint():
     c, tool, runtime = idle_pair_coordinator()
     calls = []
-    c.pressure_relief = lambda: calls.append(True) or False
+    c.pressure_relief = lambda context, exclude: calls.append(
+        (context, exclude)
+    ) or False
     c.physical_sample = lambda: (64 * 1024**2, 1024 * 1024**2)
     with pytest.raises(AdmissionTimeout):
         c.acquire("other", 1, 0)
-    assert calls
+    assert calls == [('active_progress', 'other')]
     assert tool.pauses == runtime.pauses == 0
 
 

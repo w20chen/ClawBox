@@ -205,7 +205,7 @@ def test_c0_and_c2_effective_arms_differ_only_in_cpu_policy():
 
 
 @pytest.mark.parametrize('switch,value', [('idle_reclaim.policy', 'off'), ('shared_memory.borrow', 'off')])
-def test_full_single_capability_ablation_retains_cost_coordination(switch, value):
+def test_full_single_capability_ablation_retains_context_coordination(switch, value):
     raw = base()
     raw['mechanisms']['placement']['policy'] = 'load_aware'
     raw['mechanisms']['runtime'].update(memory_protection=True, cpu_release_boost=True)
@@ -213,16 +213,16 @@ def test_full_single_capability_ablation_retains_cost_coordination(switch, value
     raw['mechanisms']['shared_memory']['borrow'] = 'pressure'
     raw['mechanisms']['idle_reclaim']['policy'] = 'wait'
     raw['mechanisms']['checkpoint']['storage'] = 'tiered'
-    raw['mechanisms']['coordination']['action_selection'] = 'measured_cost'
+    raw['mechanisms']['coordination']['action_selection'] = 'context-first'
     raw['comparison']['arms'] = [{'name': 'full'}, {'name': 'ablation', 'override': {switch: value}}]
     spec = ExperimentSpec.model_validate(raw)
     full, ablation = spec.policies
     differences = {f'{group}.{key}' for group in GROUPS for key in full.mechanisms[group]
                    if full.mechanisms[group][key] != ablation.mechanisms[group][key]}
     assert differences == {switch}
-    assert ablation.mechanisms['coordination']['action_selection'] == 'measured_cost'
+    assert ablation.mechanisms['coordination']['action_selection'] == 'context-first'
     assert effective_spec(spec, full).resources.physical_live_limit_mib == effective_spec(spec, ablation).resources.physical_live_limit_mib
-    assert effective_spec(spec, ablation).resources.memory_action_costs is not None
+    assert effective_spec(spec, ablation).resources.memory_action_costs is None
 
 
 
@@ -261,7 +261,7 @@ def test_os_only_design_checks_common_physical_shared_pool(monkeypatch):
     raw = base()
     raw['mechanisms'].update(
         deployment={'mode': 'os-default'},
-        coordination={'action_selection': 'reclaim_first'},
+        coordination={'action_selection': 'context-first'},
         admission={**raw['mechanisms']['admission'], 'tool': 'off'},
         runtime={**raw['mechanisms']['runtime'], 'memory_protection': False,
                  'cpu_release_boost': False, 'proactive_memory_reclaim': False},
@@ -295,7 +295,7 @@ def test_os_only_design_checks_common_physical_shared_pool(monkeypatch):
 @pytest.mark.parametrize('field,value', [
     ('idle_reclaim.restore', 'reactive'), ('placement.template_base_sharing', 'required'),
     ('checkpoint.lazy_restore', False), ('admission.prediction_mode', 'frozen'),
-    ('admission.lifecycle_admission', 'os-managed'), ('shared_memory.action_selection', 'reclaim_first'),
+    ('admission.lifecycle_admission', 'os-managed'), ('shared_memory.action_selection', 'context-first'),
     ('runtime.proactive_cache_reclaim', True),
 ])
 def test_removed_or_reclassified_fields_are_not_silently_accepted(field, value):
@@ -362,7 +362,7 @@ def test_disk_snapshots_keep_live_borrow_pool_but_target_cold():
     ({'runtime.backend':'agentcgroup', 'runtime.cpu_release_boost': True}, 'unknown mechanism'),
     ({'placement.template_affinity':True}, 'load_aware'),
     ({'idle_reclaim.policy':'release_cost', 'idle_reclaim.scope':'agent_and_tool'}, "Input should be 'off', 'wait' or 'gpu'"),
-    ({'coordination.action_selection':'measured_cost'}, 'measured-cost'),
+    ({'coordination.action_selection':'measured_cost'}, 'context-first'),
     ({'idle_reclaim.policy':'wait', 'checkpoint.residency':'value'}, 'value residency'),
     ({'checkpoint.lazy_restore':False}, 'unknown mechanism'),
     ({'resources.pool_memory_budget_mib':1}, 'mechanism field'),
@@ -525,10 +525,6 @@ def base():
                     snapshot_residency_costs=dict(provenance='unit-test', warm_restore_seconds_per_gib=1, cold_restore_seconds_per_gib=2),
                     idle_reclaim_costs=dict(provenance='unit-test', warm_checkpoint_seconds_per_gib=1,
                         warm_restore_seconds_per_gib=1, cold_checkpoint_seconds_per_gib=2,
-                        cold_restore_seconds_per_gib=2),
-                    memory_action_costs=dict(provenance='unit-test', live_borrow_service_seconds_per_gib=1,
-                        live_borrow_runtime_penalty_seconds_per_gib=0, warm_checkpoint_seconds_per_gib=1,
-                        warm_restore_seconds_per_gib=1, cold_checkpoint_seconds_per_gib=2,
-                        cold_restore_seconds_per_gib=2, expected_restore_probability=.5)),
+                        cold_restore_seconds_per_gib=2)),
                 execution=dict(concurrency_levels=[2], randomized_order=False),
                 comparison=dict(recipe='custom', arms=[dict(name='custom')]))

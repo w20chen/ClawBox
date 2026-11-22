@@ -61,7 +61,7 @@ rules after combining the two files.
 | Fixed template base cache | Requires incremental-cow private mappings and a prepared WARM pool; works with resident VMs. It is not a subset of idle reclaim. Preparation is host-wide for selected bases and must match the baseline. |
 | Shared borrowing off/hard/pressure | Mutually exclusive borrowing policies, independent of whether snapshots exist. Borrowing needs a positive allowance and physical WARM pool. |
 | Borrowing + WARM snapshots + base cache | Compete for the same physical shared pool. Disabling an operation does not remove the physical pool or expand another limit automatically. |
-| Action selection reclaim_first/measured_cost | Measured selection needs measured costs and at least reclaim or pressure borrowing. Hard borrowing is not that controller. COLD rates are required only when tiered reclaim can execute, not for borrow-only selection. |
+| Action selection context-first | Active Tool admission/progress uses borrow then one safe idle checkpoint fallback. Idle/model-wait pressure uses checkpoint then one live-VM borrow fallback. The actions are not compared with a shared cost score. |
 | Deployment os-default | A deliberately bundled uncontrolled baseline: OS placement, no Tool admission/runtime controls/borrowing/affinity, resident VMs. This is not a general switch orthogonal to managed mechanisms. |
 | Resident capacity accounting | Managed resident-only ledger; excludes snapshots and shared borrowing. Reservation scale in (0,1] requires this mode. Discounted reservations are promises, not measured RAM. |
 | Non-home peer resume | Requires managed peer-local-SSD storage and pair reclaim; placement moves the VM pair. Tool-only migration is not implemented by that path. |

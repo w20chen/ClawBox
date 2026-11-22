@@ -262,12 +262,21 @@ MiB value. No implicit `auto` calibration changes the baseline. The reference
 contains [prediction options](reference.md#prediction-and-evidence); training
 uses `experiment train --help` and requires separate training evidence.
 
-For next-use residency set `mechanisms.checkpoint.residency: next-use`, storage
+Future WARM/tiered baselines use `mechanisms.checkpoint.residency: next-use`;
+keep `lru` and `value` only for explicit comparison arms. Set storage
 `tiered`, and idle reclaim `wait` or `gpu`; use `inference.backend: serving_sim`.
 Both Tool-only and pair scope are supported. Prewarming is separately selected by
 `mechanisms.restore.prewarm_events: [think_end]`, `[first_token]`, or both; the
 default `[]` leaves restore reactive. Native snapshot, WARM budget and measured
-cost prerequisites still apply. See [option relationships](option-relations.md).
+snapshot support prerequisites still apply; no borrow/checkpoint cost model is
+used. See [option relationships](option-relations.md).
+
+Keep `mechanisms.coordination.action_selection: context-first`. Tool admission
+and active Tool progress first try to borrow shared memory for that Tool, then
+may checkpoint one safe idle model-wait Session. Periodic/model-wait pressure
+uses the reverse order. Each path tries each action at most once, and an active
+requester is excluded from checkpoint fallback. Changing either residency or
+coordination policy requires a new run ID, but no image rebuild or retraining.
 
 Retain the verified kunpeng creation environment unless studying a component of
 it. The historical creation reference is provenance, not a loadable new input.

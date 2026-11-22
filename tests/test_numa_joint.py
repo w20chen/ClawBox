@@ -28,7 +28,7 @@ def controller(mode, *, idle=False, costs=None):
         borrow_cooldown_seconds=5, return_cooldown_seconds=5,
         memory_action_costs=costs),
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
-    def evict():
+    def evict(**_kwargs):
         calls.append('reclaim')
         return idle
     c = WatermarkController(arm, SimpleNamespace(
@@ -108,7 +108,8 @@ def test_joint_borrows_at_high_when_no_safe_idle_victim():
     c._sample_once(.2, False)
     assert calls == ['reclaim', 'borrow']
     assert events[-1]['action'] == 'borrow'
-    assert events[-1]['cost_model'] == 'uncalibrated_deterministic_fallback'
+    assert events[-1]['selection_policy'] == 'context-first'
+    assert events[-1]['context'] == 'idle_reclaim'
 
 
 def test_checkpoint_http_timeout_rejects_one_victim_without_killing_controller():
@@ -116,11 +117,13 @@ def test_checkpoint_http_timeout_rejects_one_victim_without_killing_controller()
         status_code = 408
 
     c, calls, events = controller('joint')
-    c.coordinator.evict_one_for_watermark = lambda: (_ for _ in ()).throw(
+    c.coordinator.evict_one_for_watermark = lambda **_kwargs: (_ for _ in ()).throw(
         ApiError('HTTP 408')
     )
 
-    assert c._joint_relieve_pressure(reason='test-pressure') == 'borrow'
+    assert c._joint_relieve_pressure(
+        reason='test-pressure', context='idle_reclaim',
+    ) == 'borrow'
     assert calls == ['borrow']
     assert c._error is None
     assert c.reclaim_rejection_count == 1
@@ -141,11 +144,13 @@ def test_checkpoint_http_timeout_rejects_one_victim_without_killing_controller()
 
 def test_stale_pressure_candidate_does_not_kill_shared_controller():
     c, calls, events = controller('joint')
-    c.coordinator.evict_one_for_watermark = lambda: (_ for _ in ()).throw(
+    c.coordinator.evict_one_for_watermark = lambda **_kwargs: (_ for _ in ()).throw(
         PressureReclaimRejected('Runtime agent ended before pressure checkpoint')
     )
 
-    assert c._joint_relieve_pressure(reason='test-pressure') == 'borrow'
+    assert c._joint_relieve_pressure(
+        reason='test-pressure', context='idle_reclaim',
+    ) == 'borrow'
     assert calls == ['borrow']
     assert c.reclaim_rejection_count == 1
     assert c.checkpoint_timeout_count == 0
@@ -155,12 +160,14 @@ def test_stale_pressure_candidate_does_not_kill_shared_controller():
 
 def test_non_timeout_checkpoint_failure_remains_controller_fatal():
     c, _, _ = controller('joint')
-    c.coordinator.evict_one_for_watermark = lambda: (_ for _ in ()).throw(
+    c.coordinator.evict_one_for_watermark = lambda **_kwargs: (_ for _ in ()).throw(
         RuntimeError('snapshot accounting corrupt')
     )
 
     with pytest.raises(RuntimeError, match='snapshot accounting corrupt'):
-        c._joint_relieve_pressure(reason='test-pressure')
+        c._joint_relieve_pressure(
+            reason='test-pressure', context='idle_reclaim',
+        )
 
 
 def test_concurrent_pressure_does_not_queue_behind_slow_borrow():
@@ -169,12 +176,14 @@ def test_concurrent_pressure_does_not_queue_behind_slow_borrow():
     c._borrow_lock.acquire()
     try:
         assert c._joint_relieve_pressure(
-            preferred_borrow=lifecycle, reason='test-pressure',
+            preferred_borrow=lifecycle, context='active_progress',
+            exclude='requester', reason='test-pressure',
         ) == 'wait'
     finally:
         c._borrow_lock.release()
-    assert calls == ['reclaim']
+    assert calls == []
     assert events[-1]['reason'] == 'borrow_in_progress'
+    assert events[-1]['attempted_actions'] == []
 
 
 def test_snapshot_only_never_borrows():
@@ -198,9 +207,10 @@ def test_disabled_borrow_is_not_a_calibrated_candidate(mode):
         pytest.fail('disabled borrowing must not inspect live VM candidates')
     c._next_borrow_candidate = unexpected_borrow_scan
     assert c._joint_relieve_pressure(
-        preferred_borrow=SimpleNamespace(), reason='test-pressure') == 'wait'
-    assert calls == []
-    assert events[-1]['candidates']['borrow'] is None
+        preferred_borrow=SimpleNamespace(), context='active_progress',
+        exclude='requester', reason='test-pressure') == 'wait'
+    assert calls == ['reclaim']
+    assert events[-1]['attempted_actions'] == ['reclaim']
 
 
 def test_snapshot_watermarks_work_without_a_live_borrower():
@@ -213,7 +223,9 @@ def test_snapshot_watermarks_work_without_a_live_borrower():
     assert c._sample_once(.2, False) is True
     assert blocked == [True] and calls == ['reclaim']
     assert events[0]['compute_node'] == 'node0'
-    assert c.route_progress_to_shared(SimpleNamespace(), 100) is False
+    assert c.route_progress_to_shared(
+        SimpleNamespace(), 100, session_id='session',
+    ) is False
     c.sampler.tier_usage = lambda: (27*1024**2, 0, 27*1024**2)
     assert c._sample_once(.2, True) is False
     assert blocked == [True, False]
@@ -323,16 +335,8 @@ def test_describe_exposes_joint_calibration_and_return_cooldown():
     assert overview['memory_action_costs']['remote_access_latency_ns'] == 400
 
 
-def test_joint_uses_calibrated_order_and_records_candidate_costs():
+def test_active_progress_borrows_requester_before_checkpoint_fallback():
     gib = 1024**3
-    costs = MemoryActionCostSpec(
-        provenance='/results/calibration.json',
-        live_borrow_service_seconds_per_gib=.05,
-        live_borrow_runtime_penalty_seconds_per_gib=.05,
-        warm_checkpoint_seconds_per_gib=1,
-        warm_restore_seconds_per_gib=1,
-        expected_restore_probability=1,
-    )
     events = []
     pool = WarmSnapshotPool(32*gib, borrow_capacity_bytes=16*gib)
     borrowed = set()
@@ -373,69 +377,62 @@ def test_joint_uses_calibrated_order_and_records_candidate_costs():
         local_memory_high_watermark_mib=32*1024,
         local_memory_capacity_mib=36*1024,
         memory_scheduling='joint', borrow_cooldown_seconds=0,
-        return_cooldown_seconds=0, memory_action_costs=costs, snapshot_destination='auto'),
+        return_cooldown_seconds=0, memory_action_costs=None),
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
     c = WatermarkController(
         arm, coordinator, SimpleNamespace(), Borrower(),
         SimpleNamespace(write=events.append),
     )
     assert c._joint_relieve_pressure(
-        preferred_borrow=Lifecycle(), reason='test_pressure',
+        preferred_borrow=Lifecycle(), context='active_progress',
+        exclude='requester', reason='test_pressure',
     ) == 'borrow'
     assert reclaim_calls == []
     decision = events[-1]
-    assert decision['cost_model'] == 'configured_empirical_action_cost_v1'
-    assert decision['cost_provenance'] == '/results/calibration.json'
-    assert decision['cost_estimates']['borrow']['estimated_seconds'] < \
-        decision['cost_estimates']['reclaim']['estimated_seconds']
+    assert decision['selection_policy'] == 'context-first'
+    assert decision['context'] == 'active_progress'
+    assert decision['primary_action'] == 'borrow'
+    assert decision['attempted_actions'] == ['borrow']
+    assert decision['fallback_used'] is False
 
 
-@pytest.mark.parametrize('forced_cold', [False, True])
-def test_calibrated_joint_plans_cold_when_warm_capacity_is_reserved(forced_cold):
+def test_active_borrow_failure_falls_back_once_and_excludes_requester():
     gib = 1024**3
-    costs = MemoryActionCostSpec(
-        provenance='/results/calibration.json',
-        live_borrow_service_seconds_per_gib=3,
-        live_borrow_runtime_penalty_seconds_per_gib=3,
-        warm_checkpoint_seconds_per_gib=.1,
-        warm_restore_seconds_per_gib=.1,
-        cold_checkpoint_seconds_per_gib=.2,
-        cold_restore_seconds_per_gib=.2,
-        expected_restore_probability=1,
-    )
     pool = WarmSnapshotPool(8*gib, borrow_capacity_bytes=8*gib)
-    if not forced_cold:
-        pool.reserve_borrow('existing-vm', 8*gib)
-    events, tiers = [], []
+    events, reclaims = [], []
     coordinator = SimpleNamespace(
-        evict_one_for_watermark=lambda **kwargs: tiers.append(kwargs['tier']) or True,
-        watermark_reclaim_candidate=lambda: {
-            'session_id': 'idle-1', 'configured_bytes': 4*gib,
-            'snapshot_reservation_bytes': 5*gib, 'vm_count': 1,
-            'predicted_idle_seconds_remaining': 10,
-        },
+        evict_one_for_watermark=lambda **kwargs: reclaims.append(kwargs) or True,
     )
     arm = SimpleNamespace(resources=SimpleNamespace(
         local_memory_low_watermark_mib=28*1024,
         local_memory_high_watermark_mib=32*1024,
         local_memory_capacity_mib=36*1024,
         memory_scheduling='joint', borrow_cooldown_seconds=0,
-        return_cooldown_seconds=0, memory_action_costs=costs,
-        snapshot_storage='tiered', cold_snapshot_root='/cold',
-        snapshot_destination='cold' if forced_cold else 'auto'),
+        return_cooldown_seconds=0, memory_action_costs=None),
         policy=SimpleNamespace(reclamation=ReclamationPolicy.SNAPSHOT_PAUSE))
     borrower = SimpleNamespace(
-        node_id='node0', shared_pool=pool, borrowed=lambda: ('existing-vm',),
-        allocates_shared=lambda sandbox_id: sandbox_id == 'existing-vm',
+        node_id='node0', shared_pool=pool, borrowed=lambda: (),
+        allocates_shared=lambda _sandbox_id: False,
     )
     c = WatermarkController(
         arm, coordinator, SimpleNamespace(), borrower,
         SimpleNamespace(write=events.append),
     )
-    assert c._joint_relieve_pressure(reason='test_pressure') == 'reclaim'
-    assert tiers == [SnapshotTier.COLD]
-    assert events[-1]['candidates']['reclaim']['planned_snapshot_tier'] == 'cold'
-    assert events[-1]['cost_estimates']['reclaim']['snapshot_tier'] == 'cold'
+    lifecycle = SimpleNamespace(
+        sandbox_id='requester-tool', role='tool',
+        borrow_shared=lambda: (_ for _ in ()).throw(
+            NumaBorrowUnavailable('no shared capacity')
+        ),
+    )
+    assert c._joint_relieve_pressure(
+        preferred_borrow=lifecycle, context='active_progress',
+        exclude='requester', reason='test_pressure',
+    ) == 'reclaim'
+    assert reclaims == [{'exclude': 'requester'}]
+    assert events[0]['event'] == 'shared_memory_borrow_rejected'
+    decision = events[-1]
+    assert decision['attempted_actions'] == ['borrow', 'reclaim']
+    assert decision['fallback_used'] is True
 
 
 def test_low_watermark_returns_only_shared_residency_that_fits_below_high():

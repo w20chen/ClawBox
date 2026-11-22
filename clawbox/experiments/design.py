@@ -31,8 +31,9 @@ RESOURCE_FIELDS = {
     'checkpoint': ('pool_transfer_concurrency', 'snapshot_transfer_concurrency',
                    'pool_transfer_timeout_seconds'),
 }
-EVIDENCE_FIELDS = ('prediction_artifact', 'memory_action_costs', 'snapshot_residency_costs',
+EVIDENCE_FIELDS = ('prediction_artifact', 'snapshot_residency_costs',
                    'idle_reclaim_costs', 'template_base_sharing_artifact')
+REMOVED_FIELDS = ('memory_action_costs',)
 DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
                   'snapshot_destination', 'template_base_sharing', 'observe_predictions', 'lazy_restore', 'physical_live_limit_mib',
                   'prediction_mode', 'lifecycle_admission', 'proactive_cache_reclaim',
@@ -93,7 +94,7 @@ class Deployment(StrictFrozenModel):
 
 
 class Coordination(StrictFrozenModel):
-    action_selection: Literal['reclaim_first', 'measured_cost'] = 'reclaim_first'
+    action_selection: Literal['context-first'] = 'context-first'
 
 
 class Conditions(StrictFrozenModel):
@@ -114,7 +115,8 @@ class Mechanisms(StrictFrozenModel):
 
 owned = {key for fields in RESOURCE_FIELDS.values() for key in fields}
 EnvironmentResources = subset('EnvironmentResources', ResourcesSpec,
-                              set(ResourcesSpec.model_fields) - owned - set(EVIDENCE_FIELDS) - set(DERIVED_FIELDS))
+                              set(ResourcesSpec.model_fields) - owned - set(EVIDENCE_FIELDS)
+                              - set(REMOVED_FIELDS) - set(DERIVED_FIELDS))
 DesignExecution = subset('DesignExecution', ExecutionSpec,
                           set(ExecutionSpec.model_fields) - set(PLACEMENT_FIELDS) - set(MEASUREMENT_FIELDS) - {'placement_policy'})
 Evidence = subset('Evidence', ResourcesSpec, EVIDENCE_FIELDS)
@@ -226,10 +228,6 @@ def lower_arm(design, name, m):
     if rt['cpu_release_boost'] and (pl['policy'] == 'os_default' or
             (not r['compute_nodes'] and r['local_numa_node'] is None)):
         raise ValueError(f'{name}: cpu_release_boost requires fixed LOCAL NUMA placement; configure compute_nodes or local_numa_node and use managed placement')
-    if coordination['action_selection'] == 'measured_cost' and (
-            shared['borrow'] == 'hard' or not (snapshots or shared['borrow'] == 'pressure')
-            or not e['memory_action_costs']):
-        raise ValueError(f'{name}: measured-cost selection needs reclaim or pressure borrowing and empirical memory_action_costs')
     if shared['borrow'] != 'off' and not r['shared_memory_borrow_limit_mib']:
         raise ValueError(f'{name}: borrowing requires a positive environment shared_memory_borrow_limit_mib')
     if snapshots and ck['residency'] in {'value', 'next-use'} and ck['storage'] != 'tiered':
@@ -252,7 +250,9 @@ def lower_arm(design, name, m):
     if shared['borrow'] == 'off':
         r['shared_memory_borrow_limit_mib'] = None
         r['shared_memory_resident_headroom_mib'] = None
-    r['memory_action_costs'] = e['memory_action_costs'] if coordination['action_selection'] == 'measured_cost' else None
+    # Borrowing and idle checkpointing serve different execution contexts.
+    # Do not flatten them into a synthetic seconds/GiB comparison.
+    r['memory_action_costs'] = None
     r['memory_scheduling'] = ('joint' if shared['borrow'] == 'pressure' else
                               'static' if shared['borrow'] == 'hard' else
                               'snapshot_only' if snapshots else 'local_only')

@@ -28,7 +28,7 @@ measurement:
 conditions: {prediction_source: kb}
 mechanisms:
   deployment: {mode: managed}
-  coordination: {action_selection: reclaim_first}
+  coordination: {action_selection: context-first}
   admission: {tool: 'off'}
   runtime: {memory_protection: false, cpu_release_boost: false, proactive_memory_reclaim: false}
   placement: {policy: round_robin, template_affinity: false}

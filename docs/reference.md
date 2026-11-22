@@ -360,7 +360,7 @@ validation checks their dependencies.
 | `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`, `next-use`); transfer limits below |
 | `restore` | `prewarm_events: []`; explicitly select `think_end`, `first_token`, or both. Requires snapshot reclaim and serving_sim; independent of victim selection and scope. |
 | `deployment` | `mode: managed` (`managed`, `os-default`); `resident_capacity_accounting: false`; `lifecycle_reservation_scale: 1.0` |
-| `coordination` | `action_selection: reclaim_first` (`reclaim_first`, `measured_cost`) |
+| `coordination` | `action_selection: context-first` |
 
 Predicted reservations are `ceil(predicted_MiB * prediction_reservation_scale)`,
 with minimum zero. `static_tool_memory_mib` sets fixed admission;
@@ -406,6 +406,13 @@ Cube connects the VM; failure leaves the mixed/COLD lineage unchanged. This
 policy requires matching Cube relocation support and qualification. Changing it
 requires a new run ID, but no retraining or guest-image rebuild; host apply is
 needed only when storage paths/capacity or installed native components change.
+
+`coordination.action_selection: context-first` does not compare borrowing and
+checkpointing with a common cost score. For active Tool admission/progress it
+tries borrowing that Tool first and one safe idle checkpoint only as fallback.
+For idle/model-wait pressure it tries one safe checkpoint first and one live-VM
+borrow only as fallback. Each action is attempted at most once. The requester is
+explicitly excluded from checkpoint selection; active Tools remain ineligible.
 
 Resident-capacity accounting requires managed deployment, Tool admission off,
 and no shared-memory borrowing or proactive reclaim. Its scale must be greater
@@ -786,11 +793,11 @@ to `cold-start`, `host-live` to `host-live`, and `command-table` to `frozen`. It
 Use `clawbox experiment train --help` for training inputs and options. Keep
 training evidence separate from evaluation runs.
 
-Measured-cost policies require evidence with a nonempty `provenance` string:
+Evidence models that remain part of the supported workflow require a nonempty
+`provenance` string:
 
 | Evidence field | Required content |
 | --- | --- |
-| `memory_action_costs` | Live-borrow service and runtime-penalty seconds/GiB, WARM checkpoint/restore seconds/GiB, expected restore probability; optional COLD costs, remote latency ns, and bandwidth MiB/s |
 | `snapshot_residency_costs` | WARM and COLD restore seconds/GiB |
 | `idle_reclaim_costs` | WARM checkpoint/restore seconds/GiB; optional COLD costs |
 | `template_base_sharing_artifact` | Path to reusable proof for the exact Tool templates and node |

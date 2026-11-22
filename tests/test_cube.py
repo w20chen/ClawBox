@@ -2954,6 +2954,51 @@ def test_idle_pair_reserves_both_snapshots_before_either_pause(tmp_path, capacit
     assert pool.reserved_bytes == pool.committed_bytes == 0
 
 
+def test_next_use_pair_warm_rejection_falls_back_together_to_cold(tmp_path):
+    """A second WARM rejection must not leave a half-WARM paused pair."""
+    from clawbox.experiments.policy import PolicyCoordinator
+    from clawbox.experiments.spec import PolicySpec
+
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(1536, next_use_aware=True)
+    vms = [
+        CubeSandboxLifecycle(
+            client, template="tpl", node_name="node-a", ownership=_owner(),
+            role=role, snapshot_mechanism="full-copy",
+            snapshot_storage="tiered",
+            warm_snapshot_root=str(tmp_path / "warm"),
+            cold_snapshot_root=str(tmp_path / "cold"),
+            snapshot_pool=pool, snapshot_reservation_bytes=1024,
+            default_snapshot_tier=SnapshotTier.WARM,
+            next_use_residency=True,
+        )
+        for role in ("tool", "runtime")
+    ]
+    for vm in vms:
+        vm.start()
+        vm.set_snapshot_next_use(10.0, revision=1)
+    coordinator = PolicyCoordinator(
+        PolicySpec(
+            name="wait", admission="off", reclamation="snapshot_pause",
+            eviction="wait_aware_pressure", restore="reactive",
+            runtime_snapshot=True, snapshot_next_use_residency=True,
+        ),
+        budget_mib=32, emergency_free_mib=0, operation_headroom_mib=0,
+    )
+    coordinator.register("session", vms[0])
+    coordinator.register_runtime("session", vms[1])
+    coordinator.begin_model_wait("session", "request")
+    try:
+        assert coordinator.evict_one_for_watermark()
+        assert all(not vm.resident for vm in vms)
+        assert all(vm._snapshot_tier is SnapshotTier.COLD for vm in vms)
+        assert pool.reserved_bytes == pool.committed_bytes == 0
+    finally:
+        for vm in vms:
+            vm.close()
+
+
 def test_reserved_checkpoint_failure_keeps_unknown_snapshot_charge(tmp_path):
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)

@@ -30,7 +30,12 @@ def test_client_timing_preserves_prediction_and_failure(failure, capsys, monkeyp
             raise error
         return result
 
-    predictor = SimpleNamespace(predict=predict)
+    receipt_key = ('session', 'call')
+    predictor = SimpleNamespace(
+        predict=predict,
+        receipts={receipt_key: {'prediction_receipt': 'present'}},
+        _key=lambda _request: receipt_key,
+    )
     launcher._time_host_predictions(predictor)
     if failure:
         with pytest.raises(RuntimeError) as raised:

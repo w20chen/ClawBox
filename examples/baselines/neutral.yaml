@@ -24,7 +24,7 @@ mechanisms:
   shared_memory: {borrow: 'off'}
   checkpoint: {mechanism: incremental-cow, storage: disk, residency: lru}
   deployment: {mode: managed}
-  coordination: {action_selection: reclaim_first}
+  coordination: {action_selection: context-first}
 execution:
   sandbox_create_concurrency: 8
   dependency_install_concurrency: null

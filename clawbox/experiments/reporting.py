@@ -702,8 +702,8 @@ def render_run_report(run_root: Path) -> str:
                 f"{_mean_sd_text(values('performance', 'agents_per_minute'))} | "
                 f"{_mean_sd_text(values('performance', 'jct_p95_seconds'))} | "
                 f"{_mean_sd_text(values('performance', 'blocked_admission_seconds'))} | "
-                f"{_mean_sd_text(values('memory', 'peak_local_tier_bytes'), 1024 ** 3)} | "
-                f"{_mean_sd_text(values('memory', 'host_peak_used_delta_bytes'), 1024 ** 3)} | "
+                f"{_mean_sd_text(values('memory', 'peak_local_tier_bytes', 1024 ** 3))} | "
+                f"{_mean_sd_text(values('memory', 'host_peak_used_delta_bytes', 1024 ** 3))} | "
                 f"{_mean_sd_text(values('performance', 'local_high_overshoot_seconds'))} |"
             )
     lines.extend(['', '## Trial outcomes', '',

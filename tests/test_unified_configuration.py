@@ -208,18 +208,20 @@ def test_page_preparation_allows_uncompressed_wait_tool_snapshots(compression):
     assert spec.policies[0].consumes_gpu_signals
 
 
-def test_borrow_only_does_not_require_unused_cold_costs():
+def test_context_first_borrow_only_does_not_require_action_costs():
     b, w = documents()
     b['mechanisms']['shared_memory']['borrow'] = 'pressure'
-    b['mechanisms']['coordination']['action_selection'] = 'measured_cost'
-    b['evidence']['memory_action_costs'] = dict(provenance='synthetic-unit-test',
-        live_borrow_service_seconds_per_gib=1, live_borrow_runtime_penalty_seconds_per_gib=0,
-        warm_checkpoint_seconds_per_gib=1, warm_restore_seconds_per_gib=1,
-        expected_restore_probability=.5)
+    b['mechanisms']['coordination']['action_selection'] = 'context-first'
     spec = compile_pair(b, w)
-    assert spec.resources.memory_action_costs.cold_restore_seconds_per_gib is None
+    assert spec.resources.memory_action_costs is None
     b['mechanisms']['idle_reclaim']['policy'] = 'wait'
-    with pytest.raises(ValueError, match='COLD'):
+    assert compile_pair(b, w).resources.memory_action_costs is None
+
+
+def test_removed_memory_action_cost_evidence_is_rejected():
+    b, w = documents()
+    b['evidence']['memory_action_costs'] = {'provenance': 'obsolete'}
+    with pytest.raises(ValueError, match='memory_action_costs'):
         compile_pair(b, w)
 
 

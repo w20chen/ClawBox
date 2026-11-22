@@ -139,7 +139,7 @@ def test_watermark_controller_drains_to_low_after_crossing_high() -> None:
         def set_new_session_admission_blocked(self, blocked):
             self.new_sessions_blocked = blocked
 
-        def evict_one_for_watermark(self):
+        def evict_one_for_watermark(self, **_kwargs):
             self.evictions += 1
             return True
 
@@ -258,12 +258,18 @@ def test_predicted_hard_crossing_routes_existing_tool_to_shared_memory() -> None
         Borrower(), SimpleNamespace(write=events.append),
     )
 
-    assert controller.route_progress_to_shared(Lifecycle(), 2048) is True
-    assert controller.route_progress_to_shared(Lifecycle(), 2048) is True
+    assert controller.route_progress_to_shared(
+        Lifecycle(), 2048, session_id='session-1',
+    ) is True
+    assert controller.route_progress_to_shared(
+        Lifecycle(), 2048, session_id='session-1',
+    ) is True
     assert controller.borrow_count == 1
     assert events[0]["reason"] == "predicted_local_hard_guard"
     shared_policy.clear()  # LOCAL return retained the existing reservation
-    assert controller.route_progress_to_shared(Lifecycle(), 2048) is True
+    assert controller.route_progress_to_shared(
+        Lifecycle(), 2048, session_id='session-1',
+    ) is True
     assert controller.borrow_count == 2
 
 
@@ -302,6 +308,7 @@ def test_tool_routing_skips_exact_memory_check_below_conservative_low_bound() ->
 
     assert controller.route_progress_to_shared(
         SimpleNamespace(sandbox_id='tool', resident=True), 1024,
+        session_id='session-1',
     ) is False
 
 
@@ -504,7 +511,7 @@ def test_round_robin_requires_multiple_explicit_cases() -> None:
         ExperimentSpec.model_validate(raw)
 
 
-def test_snapshot_aware_policy_requires_measured_costs_and_case_reuse() -> None:
+def test_value_residency_requires_restore_costs_and_case_reuse() -> None:
     raw = raw_spec()
     raw["resources"].update(
         snapshot_storage="tiered", warm_snapshot_root="/warm",
@@ -740,15 +747,18 @@ def test_compact_memory_decisions_avoid_pool_snapshot_and_keep_action():
     controller.events = SimpleNamespace(compact_diagnostics=True, write=rows.append)
     controller.node_id = 'node0'
     controller.memory_scheduling = 'joint'
-    controller.action_cost_model = None
     def forbidden():
         pytest.fail('compact diagnostics must not construct a full pool snapshot')
     controller.shared_pool = SimpleNamespace(snapshot=forbidden)
-    controller._decision('checkpoint', 'local_high_watermark', estimates={'seconds': 0.2}, effect={'released': 10})
-    assert rows[0]['action'] == 'checkpoint' and rows[0]['reason'] == 'local_high_watermark'
-    assert rows[0]['cost_estimates'] == {'seconds': 0.2}
+    controller._decision(
+        'reclaim', 'local_high_watermark', context='idle_reclaim',
+        attempted_actions=('reclaim',), effect={'released': 10},
+    )
+    assert rows[0]['action'] == 'reclaim' and rows[0]['reason'] == 'local_high_watermark'
+    assert rows[0]['selection_policy'] == 'context-first'
+    assert rows[0]['attempted_actions'] == ['reclaim']
     assert rows[0]['physical_effect'] == {'released': 10}
-    assert 'pool' not in rows[0] and 'cost_provenance' not in rows[0]
+    assert 'pool' not in rows[0]
 
 
 def test_event_writer_assigns_joinable_wall_and_monotonic_timestamps(tmp_path: Path) -> None:
@@ -971,7 +981,7 @@ def test_paused_tool_is_restored_before_growth_admission_and_routing():
         ),
     )
     watermark = SimpleNamespace(
-        route_progress_to_shared=lambda candidate, amount: (
+        route_progress_to_shared=lambda candidate, amount, **_kwargs: (
             calls.append(("route", candidate.resident, amount)) or True
         )
     )

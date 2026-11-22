@@ -27,7 +27,7 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Event, Lock, RLock, Semaphore, Thread
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 _WORKER_MODULE_STARTED_MONOTONIC = time.monotonic()
 _WORKER_MODULE_STARTED_PROCESS_CPU = time.process_time()
@@ -54,7 +54,6 @@ from .native_artifacts import collect_and_validate_native_tool_artifacts
 from .numa_borrow import (
     NumaBorrowUnavailable, NumaRebindIncomplete, SandboxNumaBorrower,
 )
-from .memory_actions import MemoryActionCostModel
 from .openclaw_driver import (
     NativeSSHConfig, NativeSSHRoute, native_ssh_host_key_alias, native_ssh_route,
     native_tool_bridge_setup_command, openclaw_real_ssh_path,
@@ -566,10 +565,6 @@ class WatermarkController:
         self._last_return = float('-inf')
         self._last_borrow_effect: dict[str, Any] | None = None
         self._last_borrow_rejection: str | None = None
-        configured_costs = getattr(arm.resources, 'memory_action_costs', None)
-        self.action_cost_model = (
-            MemoryActionCostModel(configured_costs) if configured_costs is not None else None
-        )
 
     def register(self, session_id: str, tool: CubeSandboxLifecycle,
                  runtime: CubeSandboxLifecycle) -> None:
@@ -665,28 +660,43 @@ class WatermarkController:
             self._borrow_lock.release()
 
     def _decision(self, action: str, reason: str, *,
-                  candidates: dict[str, Any] | None = None,
-                  estimates: dict[str, Any] | None = None,
+                  context: Literal[
+                      'active_progress', 'idle_reclaim', 'low_watermark_return',
+                  ],
+                  attempted_actions: tuple[str, ...],
                   effect: dict[str, Any] | None = None):
+        primary_action = {
+            'active_progress': 'borrow',
+            'idle_reclaim': 'reclaim',
+            'low_watermark_return': 'return',
+        }[context]
+        fallback_used = bool(
+            attempted_actions
+            and (
+                attempted_actions[0] != primary_action
+                or len(attempted_actions) > 1
+            )
+        )
         record = {'event': 'memory_scheduling_decision',
             'compute_node': self.node_id, 'action': action, 'reason': reason,
             'policy': self.memory_scheduling,
-            'cost_model': (self.action_cost_model.name if self.action_cost_model
-                           else 'uncalibrated_deterministic_fallback'),
-            'candidates': candidates, 'cost_estimates': estimates,
+            'selection_policy': 'context-first', 'context': context,
+            'primary_action': primary_action,
+            'attempted_actions': list(attempted_actions),
+            'fallback_used': fallback_used,
             'physical_effect': effect}
         if not getattr(self.events, 'compact_diagnostics', False):
-            record.update(cost_provenance=(self.action_cost_model.provenance
-                          if self.action_cost_model else None), pool=self.shared_pool.snapshot())
+            record['pool'] = self.shared_pool.snapshot()
         self.events.write(record)
 
     def _reclaim_one(self, *, reason: str,
-                     tier: SnapshotTier | None = None) -> bool:
+                     tier: SnapshotTier | None = None,
+                     exclude: str = "") -> bool:
         """Keep one timed-out Cube victim from killing the shared controller."""
         try:
             if tier is None:
-                return self.coordinator.evict_one_for_watermark()
-            return self.coordinator.evict_one_for_watermark(tier=tier)
+                return self.coordinator.evict_one_for_watermark(exclude=exclude)
+            return self.coordinator.evict_one_for_watermark(tier=tier, exclude=exclude)
         except Exception as exc:
             # Cube reports a server-side request timeout as ApiError(408).
             # The lifecycle has already reconciled the remote state and keeps
@@ -752,98 +762,70 @@ class WatermarkController:
     @operation('prepare.joint_reclaim')
     def _joint_relieve_pressure(self, *,
                                preferred_borrow: CubeSandboxLifecycle | None = None,
+                               context: Literal['active_progress', 'idle_reclaim'],
+                               exclude: str = "",
                                reason: str) -> str:
-        """Try each safe action once, ordered by calibrated cost when present."""
+        """Try each safe action once in the order required by its context."""
+        if context not in {'active_progress', 'idle_reclaim'}:
+            raise ValueError(f"unknown pressure-relief context: {context}")
         self._last_borrow_rejection = None
         borrowing_enabled = (self.borrower is not None
                              and self.memory_scheduling not in {'local_only', 'snapshot_only'})
         borrow_available = borrowing_enabled and not self._borrow_lock.locked()
         if borrowing_enabled and not borrow_available:
             self._last_borrow_rejection = 'borrow_in_progress'
-        if self.action_cost_model is None:
-            if self._reclaim_one(reason=reason):
-                self._decision('reclaim', reason)
-                return 'reclaim'
-            borrowed = borrow_available and (
-                self._record_borrow(preferred_borrow, reason=reason)
-                if preferred_borrow is not None else self._borrow_one()
-            )
-            action = 'borrow' if borrowed else 'wait'
+        # A borrow already in flight is the active request's primary relief.
+        # Do not checkpoint an unrelated idle session while that action is
+        # merely pending. The ordinary admission loop will recheck capacity.
+        if context == 'active_progress' and borrowing_enabled and not borrow_available:
             self._decision(
-                action, self._last_borrow_rejection if action == 'wait' else reason,
-                effect=self._last_borrow_effect if action == 'borrow' else None,
+                'wait', self._last_borrow_rejection or reason,
+                context=context, attempted_actions=(),
             )
-            return action
+            return 'wait'
 
-        borrow_candidate = ((preferred_borrow or self._next_borrow_candidate())
-                            if borrow_available else None)
-        reclaim_candidate_fn = getattr(
-            self.coordinator, 'watermark_reclaim_candidate', None,
+        order = (
+            ('borrow', 'reclaim')
+            if context == 'active_progress'
+            else ('reclaim', 'borrow')
         )
-        reclaim_candidate = (
-            reclaim_candidate_fn() if reclaim_candidate_fn is not None else None
-        )
-        reclaim_tier = 'cold' if self.arm.resources.snapshot_destination == 'cold' else 'warm'
-        if reclaim_candidate is not None and reclaim_tier == 'warm':
-            pool = self.shared_pool.snapshot()
-            warm_usage = int(pool['accounted_bytes'])
-            required = int(
-                reclaim_candidate.get('snapshot_reservation_bytes') or 0
-            )
-            if required <= 0:
-                reclaim_candidate = None
-            elif warm_usage + required > int(pool['capacity_bytes']):
-                if (self.arm.resources.snapshot_storage == 'tiered'
-                        and self.arm.resources.cold_snapshot_root):
-                    # A calibrated action must match its cost estimate. Keep
-                    # existing WARM generations in place and target COLD
-                    # directly instead of triggering an implicit LRU spill.
-                    reclaim_tier = 'cold'
-                else:
-                    reclaim_candidate = None
-        borrow_bytes = (
-            int(borrow_candidate.configured_memory_bytes or 0)
-            if borrow_candidate is not None else None
-        )
-        reclaim_bytes = (
-            int(reclaim_candidate.get('configured_bytes') or 0)
-            if reclaim_candidate is not None else None
-        )
-        chosen, estimates = self.action_cost_model.choose(
-            borrow_bytes=borrow_bytes, reclaim_bytes=reclaim_bytes,
-            reclaim_tier=reclaim_tier,
-        )
-        candidates = {
-            'borrow': ({'sandbox_id': borrow_candidate.sandbox_id,
-                        'role': borrow_candidate.role,
-                        'configured_bytes': borrow_bytes}
-                       if borrow_candidate is not None else None),
-            'reclaim': ({**reclaim_candidate, 'planned_snapshot_tier': reclaim_tier}
-                        if reclaim_candidate is not None else None),
-        }
-        order = [chosen] if chosen is not None else []
-        order.extend(action for action in ('reclaim', 'borrow') if action not in order)
+        attempted: list[str] = []
         for action in order:
-            if action == 'reclaim' and reclaim_candidate is not None:
-                if self._reclaim_one(
-                    tier=SnapshotTier(reclaim_tier), reason=reason,
-                ):
-                    self._decision('reclaim', reason, candidates=candidates,
-                                   estimates=estimates)
+            if action == 'reclaim':
+                attempted.append(action)
+                if self._reclaim_one(reason=reason, exclude=exclude):
+                    self._decision(
+                        'reclaim', reason, context=context,
+                        attempted_actions=tuple(attempted),
+                    )
                     return 'reclaim'
-            if action == 'borrow' and borrow_candidate is not None:
-                if self._record_borrow(borrow_candidate, reason=reason):
-                    self._decision('borrow', reason, candidates=candidates,
-                                   estimates=estimates,
-                                   effect=self._last_borrow_effect)
+            if action == 'borrow':
+                if not borrow_available:
+                    continue
+                if context == 'active_progress' and preferred_borrow is None:
+                    continue
+                attempted.append(action)
+                borrowed = (
+                    self._record_borrow(preferred_borrow, reason=reason)
+                    if preferred_borrow is not None else self._borrow_one()
+                )
+                if borrowed:
+                    self._decision(
+                        'borrow', reason, context=context,
+                        attempted_actions=tuple(attempted),
+                        effect=self._last_borrow_effect,
+                    )
                     return 'borrow'
-        self._decision('wait', self._last_borrow_rejection or reason,
-                       candidates=candidates, estimates=estimates)
+        self._decision(
+            'wait', self._last_borrow_rejection or reason,
+            context=context, attempted_actions=tuple(attempted),
+        )
         return 'wait'
 
     @operation('prepare.route')
     def route_progress_to_shared(self, lifecycle: CubeSandboxLifecycle,
-                                 predicted_increment_mib: int) -> bool:
+                                 predicted_increment_mib: int, *,
+                                 session_id: str) -> bool:
         """Borrow before an existing Tool's prediction would cross LOCAL HARD."""
         if self.borrower is None or self.memory_scheduling in {'local_only', 'snapshot_only'}:
             return False
@@ -867,7 +849,8 @@ class WatermarkController:
             return False
         if self.memory_scheduling == 'joint':
             action = self._joint_relieve_pressure(
-                preferred_borrow=lifecycle, reason='predicted_local_high_guard',
+                preferred_borrow=lifecycle, context='active_progress',
+                exclude=session_id, reason='predicted_local_high_guard',
             )
             return action == 'borrow'
         # Lack of shared capacity means wait on LOCAL admission, not fabricate
@@ -980,7 +963,10 @@ class WatermarkController:
             'event': 'shared_memory_returned', 'role': lifecycle.role,
             'reason': 'local_low_hysteresis', **asdict(record),
         })
-        self._decision('return', 'local_low_hysteresis', effect=effect)
+        self._decision(
+            'return', 'local_low_hysteresis', context='low_watermark_return',
+            attempted_actions=('return',), effect=effect,
+        )
         return True
 
     def _run(self) -> None:
@@ -1084,10 +1070,11 @@ class WatermarkController:
             self._joint_relieve_pressure(reason=(
                 'local_high_or_blocked_demand' if above_high
                 else 'blocked_demand_below_high'
-            ))
+            ), context='idle_reclaim')
             return above_high
         if above_high and self.arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE:
-            if self._joint_relieve_pressure(reason="local_high_watermark") != "wait":
+            if self._joint_relieve_pressure(
+                    reason="local_high_watermark", context='idle_reclaim') != "wait":
                 return above_high
         if self.memory_scheduling in {'local_only', 'snapshot_only'}:
             return above_high
@@ -2637,10 +2624,22 @@ class ExperimentWorker:
                 and domain_arm.resources.local_memory_high_watermark_mib is not None else None
             )
             if controller is not None:
-                coordinator.pressure_relief = (
-                    lambda controller=controller: controller._joint_relieve_pressure(
-                        reason="memory_admission_or_model_wait") != "wait"
-                )
+                def context_first_relief(
+                    context: str, exclude: str, *, controller=controller,
+                ) -> bool:
+                    preferred = None
+                    if context == 'active_progress':
+                        with controller._lock:
+                            pair = controller._lifecycles.get(exclude)
+                            if pair is not None and pair[0].resident:
+                                preferred = pair[0]
+                    return controller._joint_relieve_pressure(
+                        preferred_borrow=preferred,
+                        context=context,
+                        exclude=exclude,
+                        reason="memory_admission_or_model_wait",
+                    ) != "wait"
+                coordinator.pressure_relief = context_first_relief
             domains[node.node_id if node else "local"] = SimpleNamespace(
                 arm=domain_arm, sampler=domain_sampler, coordinator=coordinator, cpus=node.cpus if node else None,
                 borrower=numa_borrower, controller=controller, peak_bytes=0,
@@ -3577,10 +3576,7 @@ class ExperimentWorker:
                     (shared_borrow_mib or 0) * 1024 * 1024
                     if watermark_controller is not None else None
                 ),
-                "memory_action_cost_model": (
-                    arm.resources.memory_action_costs.model_dump(mode="json")
-                    if arm.resources.memory_action_costs is not None else None
-                ),
+                "memory_action_selection": "context-first",
                 "peak_local_tier_bytes": (
                     watermark_controller.peak_local_bytes
                     if watermark_controller is not None else None
@@ -4200,7 +4196,7 @@ class ExperimentWorker:
                     # Recheck live pressure; the queued event may be stale.
                     # Candidate selection/claim shares the Tool admission lock.
                     if coordinator.blocked_demand_pressure():
-                        coordinator.relieve_pressure()
+                        coordinator.relieve_pressure(context='idle_reclaim')
                 except Exception as exc:
                     events.write({"event": "policy_event_failed", "session_id": session_id,
                                   "operation": "pause", "error": str(exc),
@@ -6120,7 +6116,9 @@ class ExperimentWorker:
         if (
             not fast_local and
             watermark_controller is not None
-            and watermark_controller.route_progress_to_shared(lifecycle, amount_mib)
+            and watermark_controller.route_progress_to_shared(
+                lifecycle, amount_mib, session_id=session_id,
+            )
         ):
             local_amount = 0
             admission_memory_tier = "shared"

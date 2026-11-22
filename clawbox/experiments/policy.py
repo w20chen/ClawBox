@@ -241,7 +241,7 @@ class PolicyCoordinator:
         self._cache_reclaim_error: Exception | None = None
         self.physical_sample = physical_sample or (lambda: (0, 1 << 62))
         self.on_pressure_pause = on_pressure_pause
-        self.pressure_relief: Callable[[], bool] | None = None
+        self.pressure_relief: Callable[[str, str], bool] | None = None
         self.checkpoint_capacity_skips = 0
         self.demand_scope = demand_scope
         self.demand = demand_ledger or DemandLedger(
@@ -1470,7 +1470,14 @@ class PolicyCoordinator:
                             and 'execution_already_inflight' not in safety_reasons):
                         self._condition.release()
                         try:
-                            relieved = self.relieve_pressure(exclude=session_id)
+                            relieved = self.relieve_pressure(
+                                context=(
+                                    "active_progress"
+                                    if wait_class == "tool_admission"
+                                    else "idle_reclaim"
+                                ),
+                                exclude=session_id,
+                            )
                         finally:
                             self._condition.acquire()
                         if relieved:
@@ -1767,10 +1774,10 @@ class PolicyCoordinator:
                 "vm_count": len(lifecycles),
             }
 
-    def relieve_pressure(self, *, exclude: str = "") -> bool:
-        """Use the arm's common action selector for admission and idle callbacks."""
+    def relieve_pressure(self, *, context: str, exclude: str = "") -> bool:
+        """Use the arm's context-first selector without losing requester identity."""
         if self.pressure_relief is not None:
-            return self.pressure_relief()
+            return self.pressure_relief(context, exclude)
         return self.evict_one_for_watermark(exclude=exclude, reason="memory_admission")
 
     def evict_one_for_watermark(self, *, tier: SnapshotTier | None = None,
