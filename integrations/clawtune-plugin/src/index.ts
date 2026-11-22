@@ -231,6 +231,7 @@ export default definePluginEntry({
       ?? extractString(context, ["childSessionKey"]));
     sessionObservations.spawned(event, context);
   });
+  api.on("subagent_ended", (event, context) => sessionObservations.ended(event, context));
   const correlation = new CorrelationMap(300_000, 10_000);
 
   // Initialize trace v6 if trace_dir is configured

@@ -337,6 +337,10 @@ class PolicyControlServer:
             raise ValueError("invalid execution_id")
         if not _SHA256.fullmatch(str(body.get("command_sha256") or "")):
             raise ValueError("invalid command_sha256")
+        for name in ("logical_session_id", "session_key", "agent_id", "tool_call_id", "run_id"):
+            value = body.get(name)
+            if value is not None and (not isinstance(value, str) or not value or len(value) > 512):
+                raise ValueError(f"invalid {name}")
 
     def register(self, session_id: str, *,
                  admit: Callable[[dict[str, Any]], dict[str, Any]],

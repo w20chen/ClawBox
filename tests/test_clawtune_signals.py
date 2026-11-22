@@ -222,6 +222,7 @@ def test_queued_host_admission_reaches_session_eta_over_http(tmp_path):
                 command_sha256=prediction_payload()['command_sha256'], prediction_receipt=receipt)
             message = envelope('session.observation', dict(revision=1, observer_id='observer',
                 observer_started_at=time.time()-1, session_key='key', parent_session_key=None,
+                active_child_session_keys=[], wait=None,
                 run_status='active', model_call_id=None, batch=dict(batch_id='batch',
                 execution_mode='parallel', mode_source='observed_overlap', tools=[dict(
                     tool_call_id=request['tool_call_id'], started=True, settled=False, foreground=True,

@@ -1,7 +1,7 @@
 # ClawTune integration source
 
 Upstream: https://github.com/w20chen/ClawTune
-Revision: `ba4eb595a67fcfb4f3e4da54102afbc220565905`
+Revision: `1b119259c06ac95cead9e5edd5e062ff57499343`
 License: MIT; see LICENSE.
 
 ClawTune is an unmodified dependency. ClawBox owns the host protocol and all

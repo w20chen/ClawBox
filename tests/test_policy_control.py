@@ -22,6 +22,11 @@ def _post(session, path: str, execution_id: str, *, digest: str | None = None) -
         "execution_id": execution_id,
         "command_sha256": digest or hashlib.sha256(execution_id.encode()).hexdigest(),
         "operation": "exec",
+        "logical_session_id": "logical-session",
+        "session_key": "agent:main:child",
+        "agent_id": "agent",
+        "tool_call_id": "tool-call",
+        "run_id": "run",
     }).encode()
     request = urllib.request.Request(
         session.url + path, data=body, method="POST",
@@ -60,6 +65,8 @@ def test_policy_control_is_idempotent_and_drains_inflight_completion() -> None:
         assert completion["duplicate"] is False
         assert _post(session, "/v1/tool/complete", "exec-a")["duplicate"] is True
         assert completed == ["exec-a"]
+        assert session.records()[0]["request"]["session_key"] == "agent:main:child"
+        assert session.records()[0]["completion"]["tool_call_id"] == "tool-call"
         timing = session.records()[0]["timing"]
         assert timing["admission_started_monotonic_s"] <= timing[
             "admission_completed_monotonic_s"

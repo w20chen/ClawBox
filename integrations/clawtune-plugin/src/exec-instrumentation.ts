@@ -48,6 +48,9 @@ export type InstrumentResult = {
 /** Marker prefix for the ClawBox SSH tool-bridge execution envelope. */
 export const CLAWBOX_EXEC_ENVELOPE_PREFIX = "__CBX_EXEC_1__";
 
+type SandboxExecIdentity = Pick<ToolBeforeRequest,
+  "session_id" | "session_key" | "agent_id" | "tool_call_id" | "run_id">;
+
 /**
  * Builds the single-line envelope the ClawBox tool bridge parses so it adopts
  * the runtime-generated execution_id.  Format mirrors the Go parser
@@ -61,13 +64,19 @@ export const CLAWBOX_EXEC_ENVELOPE_PREFIX = "__CBX_EXEC_1__";
  * command and execute the wrapper unchanged.
  */
 export function buildSandboxExecEnvelope(command: string, executionId: string, decision?: ToolDecision | null,
-  model: PluginConfig["sandboxExecPredictionModel"] = "tool"): string {
+  model: PluginConfig["sandboxExecPredictionModel"] = "tool",
+  identity?: Partial<SandboxExecIdentity>): string {
   const tool = model === "lattice" ? decision?.prediction.lattice?.load
     : decision?.prediction.tool?.load;
   const header = Buffer.from(JSON.stringify({
     v: 1,
     execution_id: executionId,
     tool_name: (decision?.placement as {host_kb?: {tool_name?: string}} | null)?.host_kb?.tool_name ?? "exec",
+    ...(identity?.session_id ? {logical_session_id: identity.session_id} : {}),
+    ...(identity?.session_key ? {session_key: identity.session_key} : {}),
+    ...(identity?.agent_id ? {agent_id: identity.agent_id} : {}),
+    ...(identity?.tool_call_id ? {tool_call_id: identity.tool_call_id} : {}),
+    ...(identity?.run_id ? {run_id: identity.run_id} : {}),
     ...(hostReceipt(decision) ? {prediction_receipt: hostReceipt(decision)} : {}),
     profile_command_b64: Buffer.from(command, "utf8").toString("base64url"),
     ...(tool
@@ -88,7 +97,8 @@ export function buildSandboxExecEnvelope(command: string, executionId: string, d
  * the bridge envelope so the tool bridge records the SAME execution_id as the
  * ClawTune span (exact join, no time window).  Otherwise it returns empty.
  */
-function instrumentHookOnlyExec(event: unknown, config: PluginConfig, decision: ToolDecision | null): InstrumentResult {
+function instrumentHookOnlyExec(event: unknown, payload: ToolBeforeRequest,
+  config: PluginConfig, decision: ToolDecision | null): InstrumentResult {
   const empty: InstrumentResult = {
     params: null,
     executionId: null,
@@ -116,7 +126,7 @@ function instrumentHookOnlyExec(event: unknown, config: PluginConfig, decision: 
     CLAWTUNE_EXECUTION_ID: executionId,
   };
   const effectiveCommand = buildSandboxExecEnvelope(requestedCommand, executionId, decision,
-    config.sandboxExecPredictionModel);
+    config.sandboxExecPredictionModel, payload);
   params.command = effectiveCommand;
   return {
     params,
@@ -144,7 +154,7 @@ export async function instrumentExecParams(
   };
 
   if (config.executionBackend === "hook-only") {
-    return instrumentHookOnlyExec(event, config, decision);
+    return instrumentHookOnlyExec(event, payload, config, decision);
   }
   const shouldInstrumentResult = shouldInstrument(event, config);
   if (!shouldInstrumentResult) {

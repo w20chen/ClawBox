@@ -4908,6 +4908,9 @@ class ExperimentWorker:
                     nonlocal admitted_route, admitted_route_requires_preflight
                     control_marks = {"started": time.monotonic()}
                     execution_id = str(request["execution_id"])
+                    logical_identity = {name: request.get(name) for name in (
+                        'logical_session_id', 'session_key', 'agent_id', 'tool_call_id', 'run_id')
+                        if request.get(name) is not None}
                     if progress_control:
                         progress_control.execution_ready(session_id, execution_id,
                             (arm.sandbox.template_id, request['command_sha256']))
@@ -4959,7 +4962,8 @@ class ExperimentWorker:
                                   'session_id': session_id,
                                   'execution_id': execution_id,
                                   'execution_scope': execution_scope,
-                                  'operation': request.get('operation')})
+                                  'operation': request.get('operation'),
+                                  **logical_identity})
                     control_marks["prediction_and_queue"] = time.monotonic()
                     if dependency_limited:
                         try:
@@ -5160,6 +5164,7 @@ class ExperimentWorker:
                                  "command_sha256": request["command_sha256"],
                                  "operation": request.get("operation"),
                                  "execution_scope": execution_scope,
+                                 **logical_identity,
                                  "actual_measured_memory_mib": None,
                                  "admitted_reservation_mib": accounted_amount,
                                  "prediction_reservation_scale": arm.resources.prediction_reservation_scale,
@@ -5183,6 +5188,7 @@ class ExperimentWorker:
                         "control_total_seconds": control_marks['bookkeeping']-control_marks['started'],
                         "execution_id": execution_id,
                         "execution_scope": execution_scope,
+                        **logical_identity,
                         "operation": request.get("operation"),
                         "command_sha256": request["command_sha256"],
                         "prediction_key": prediction_record.get("canonical_prediction_key"),
@@ -5217,6 +5223,9 @@ class ExperimentWorker:
                 @trace_callback('tool_completion_timing', events.write, session_id)
                 def complete_openclaw_tool(request: dict[str, Any]) -> dict[str, Any]:
                     execution_id = str(request["execution_id"])
+                    logical_identity = {name: request.get(name) for name in (
+                        'logical_session_id', 'session_key', 'agent_id', 'tool_call_id', 'run_id')
+                        if request.get(name) is not None}
                     timestamp_names = (
                         "execution_started_at", "ssh_reaped_at", "execution_completed_at",
                     )
@@ -5325,6 +5334,7 @@ class ExperimentWorker:
                     events.write({"event": "tool_completed", "session_id": session_id,
                                   "execution_id": execution_id,
                                   "execution_scope": str(request.get('execution_scope') or 'agent-tool'),
+                                  **logical_identity,
                                   "exit_code": request.get("exit_code"),
                                   "execution_started_at": timestamps["execution_started_at"],
                                   "execution_completed_at": timestamps["execution_completed_at"],

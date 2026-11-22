@@ -507,6 +507,10 @@ def _main() -> int:
         "runtime_request_at": time.time(),
         "tool_timeout_seconds": tool_timeout_seconds,
     }
+    for name in ("logical_session_id", "session_key", "agent_id", "tool_call_id", "run_id"):
+        value = metadata.get(name)
+        if isinstance(value, str) and value:
+            request[name] = value
     capture = None
     capture_path = None
     capture_root = os.environ.get('CLAWBOX_PLACEMENT_CAPTURE_ROOT')
@@ -550,6 +554,9 @@ def _main() -> int:
             'session_id': session_id, 'execution_id': execution_id,
             'command_sha256': command_sha256, 'endpoint_sandbox_id': route['sandbox_id'],
             'endpoint_epoch': route['epoch'],
+            **{name: request[name] for name in
+               ('logical_session_id', 'session_key', 'agent_id', 'tool_call_id', 'run_id')
+               if name in request},
         }}
         for index, argument in enumerate(ssh_argv):
             marker = argument.find(PREFIX + 'b64:')

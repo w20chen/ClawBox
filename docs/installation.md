@@ -360,7 +360,7 @@ new run ID; `launch` reuses qualification when its capability inputs still match
 ### Refresh the Runtime predictor and KB
 
 The Python dependency is pinned to unchanged ClawTune
-`ba4eb595a67fcfb4f3e4da54102afbc220565905`. ClawBox owns its host KB adapters,
+`1b119259c06ac95cead9e5edd5e062ff57499343`. ClawBox owns its host KB adapters,
 Runtime plugin adaptation, and compact Tool collector. Keep the ClawTune source
 unchanged. The canonical seed contains ToolKB, TrieKB, and LatticeKB; the removed
 execution-context KB is not restored.

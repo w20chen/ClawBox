@@ -334,7 +334,7 @@ is required; use a new run ID. Setting `admission_eta: false` disables this host
 correction and uses upstream ClawTune's execution-only estimate.
 
 The receiver must accept `clawtune.signal.v1`; see
-[ClawTune's signal contract and receiver rules](https://github.com/w20chen/ClawTune/blob/ba4eb595a67fcfb4f3e4da54102afbc220565905/docs/signals.md).
+[ClawTune's signal contract and receiver rules](https://github.com/w20chen/ClawTune/blob/main/docs/signals.md).
 Session previews query LatticeKB then ToolKB without reserving an execution
 or learning a sample. Formal tool decisions retain all three independent model
 branches. Cube's SSH execution path supplies logical tool/model lifecycle and
@@ -343,6 +343,15 @@ progress or fabricate `execution.finishing_soon`. Host-live non-shell calls
 have explicit unavailable predictions. Signals are best effort, and Session
 forecasts may be null; they do not automatically enable a GPU or KV scheduling
 policy. Existing serving_sim lifecycle signals keep their separate meaning.
+
+Session snapshots also carry direct active children and the parent wait set after
+`sessions_yield`. One-shot completion delivery is `any`; uncertain thread-bound
+delivery remains `unknown`. ClawBox preserves the logical Session, Session key,
+Agent, run and tool-call identities through Tool admission and result artifacts,
+so a CPU policy can use these facts without changing ClawTune. The current
+serving_sim request still belongs to the physical ClawBox pair: OpenClaw does not
+put a trustworthy logical Session identifier on the model HTTP request, so
+ClawBox does not infer a Subagent GPU identity from arrival order.
 
 For native OpenClaw subagents, merge the following into the baseline, retaining
 your reviewed host/template configuration, API endpoint/model and validated KB seed:

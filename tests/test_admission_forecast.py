@@ -120,7 +120,8 @@ def setup_session(tools=('a',), mode='parallel'):
     manager = HostSessionStateManager(hub.publish, SimpleNamespace(), clock=lambda: now[0])
     manager.handoff_history[('gateway', 'runtime')].append(100.)
     message = envelope('session.observation', dict(revision=1, observer_id='observer', observer_started_at=1,
-        session_key='session', parent_session_key=None, run_status='active', model_call_id=None,
+        session_key='session', parent_session_key=None, active_child_session_keys=[], wait=None,
+        run_status='active', model_call_id=None,
         batch=dict(batch_id='batch', execution_mode=mode, mode_source='observed_sequence', tools=[
             dict(tool_call_id=t, started=True, settled=False, foreground=True,
                  predicted_duration_ms=10000, prediction_source='lattice') for t in tools])),

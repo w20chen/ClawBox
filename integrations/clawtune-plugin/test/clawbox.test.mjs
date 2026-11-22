@@ -82,17 +82,48 @@ test("parent and multiple child sessions with identical tool IDs remain independ
   } finally { await observer.close(); }
 });
 
+test("yielded parent identifies active children and excludes no-completion work", async () => {
+  const sent = [];
+  const owner = {gatewayId: "g", runtimeId: "shared", sessionId: "parent",
+    sessionKey: "parent-key", runId: "parent-run", agentId: "agent"};
+  const observer = new SessionObservations(() => owner, async value => sent.push(value));
+  try {
+    observer.model({callId: "model"}, {}, true);
+    for (const [child, completion] of [["critical", true], ["background", false]]) {
+      observer.spawned({childSessionKey: child, runId: child + "-run"},
+        {requesterSessionKey: "parent-key"});
+      observer.afterTool({toolName: "sessions_spawn", toolCallId: "spawn-" + child,
+        params: {mode: "run", expectsCompletionMessage: completion}, result: {details: {
+          status: "accepted", childSessionKey: child, runId: child + "-run"}}}, {});
+    }
+    observer.afterTool({toolName: "sessions_yield", toolCallId: "yield", params: {},
+      result: {details: {status: "yielded"}}}, {});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(sent.at(-1).payload.active_child_session_keys, ["background", "critical"]);
+    assert.deepEqual(sent.at(-1).payload.wait, {reason: "subagent_completion", mode: "any",
+      session_keys: ["critical"]});
+  } finally { await observer.close(); }
+});
+
 test("Cube envelope selects the nested model and carries only the control receipt", () => {
   const load = backend => ({schema_version: "call_load.v2", scope: "tool_call",
     memory_measurement: "guest_memtotal_minus_memavailable", targets: {duration_ms: {backend}}});
   const decision = {prediction: {tool: {load: load("runtime")}, lattice: {load: load("lattice")}},
     placement: {host_kb: {prediction_receipt: "opaque-host-receipt", tool_name: "terminal_exec"}}};
   for (const [model, backend] of [["tool", "runtime"], ["lattice", "lattice"]]) {
-    const envelope = buildSandboxExecEnvelope("echo hello", "execution", decision, model);
+    const envelope = buildSandboxExecEnvelope("echo hello", "execution", decision, model, {
+      session_id: "logical-session", session_key: "agent:main:subagent:child",
+      agent_id: "agent", tool_call_id: "tool-call", run_id: "run",
+    });
     const header = JSON.parse(Buffer.from(envelope.split("\n")[0].split("b64:")[1], "base64url"));
     assert.equal(header.call_prediction.targets.duration_ms.backend, backend);
     assert.equal(header.prediction_receipt, "opaque-host-receipt");
     assert.equal(header.tool_name, "terminal_exec");
+    assert.equal(header.logical_session_id, "logical-session");
+    assert.equal(header.session_key, "agent:main:subagent:child");
+    assert.equal(header.agent_id, "agent");
+    assert.equal(header.tool_call_id, "tool-call");
+    assert.equal(header.run_id, "run");
     assert.equal(Buffer.from(header.profile_command_b64, "base64url").toString(), "echo hello");
   }
 });
@@ -102,6 +133,20 @@ test("required host prediction fails before hook-only execution without a receip
     {toolName: "exec", params: {command: "true"}}, {}, {}, null, {},
     {executionBackend: "hook-only", sandboxExecEnvelope: true, instrumentTools: ["exec"], instrumentHosts: ["*"],
       requireHostPrediction: true}), /Host prediction receipt/);
+});
+
+test("hook-only instrumentation forwards logical Tool identity into the Cube envelope", async () => {
+  const result = await instrumentExecParams(
+    {toolName: "exec", params: {command: "true"}}, {}, {
+      session_id: "logical-session", session_key: "agent:main:child", agent_id: "agent",
+      tool_call_id: "tool-call", run_id: "run",
+    }, null, {}, {executionBackend: "hook-only", sandboxExecEnvelope: true,
+      instrumentTools: ["exec"], instrumentHosts: ["*"], requireHostPrediction: false});
+  const header = JSON.parse(Buffer.from(
+    result.params.command.split("\n")[0].split("b64:")[1], "base64url"));
+  assert.equal(header.logical_session_id, "logical-session");
+  assert.equal(header.session_key, "agent:main:child");
+  assert.equal(header.tool_call_id, "tool-call");
 });
 
 test("delivered session observer previews full batches and settles logical returns", async () => {

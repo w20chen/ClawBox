@@ -972,11 +972,19 @@ uses the pair's shared KB namespace. Equal live API prompts remain separate
 requests; only an explicit shared request ID identifies a retry. Native artifact
 validation checks physical Runtime ownership and includes all child recordings.
 
+ClawTune Session publications expose `active_child_session_keys` and a nullable
+`wait` relation (`subagent_completion`, `any` or `unknown`). ClawBox carries
+`logical_session_id`, `session_key`, `agent_id`, `run_id` and `tool_call_id`
+through the Tool execution envelope, host admission ledger and worker events.
+These are scheduling inputs only; this release does not assign different CPU
+priorities. serving_sim remains keyed by the physical pair and request ID because
+the model HTTP path has no authoritative logical Session correlation field.
+
 The awaited agent-start hook registers each logical Session with the host. A
 pair observed to contain multiple Sessions is protected from Runtime checkpointing;
 Tool reclaim retains its activity/admission fences. Child next-LLM forecasts do
-not predict parent completion; unknown parent waits stay unknown. Native child
-cleanup and stable idle state of every observed Session gate final collection.
+not predict parent completion; absent or unknown parent waits stay unknown.
+Native child cleanup and stable idle state of every observed Session gate final collection.
 Five seconds of stable idle plus polling/transport are included in completion
 latency. The first CLI reply is saved as `initial_root_response`, with drain
 evidence under `shared_sessions`; subsequent replies are in Runtime traces.

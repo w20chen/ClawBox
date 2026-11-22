@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 
-PINNED_REVISION = "ba4eb595a67fcfb4f3e4da54102afbc220565905"
+PINNED_REVISION = "1b119259c06ac95cead9e5edd5e062ff57499343"
 
 
 def prepare(root: Path, output: Path, *, working_tree: bool = False) -> str:

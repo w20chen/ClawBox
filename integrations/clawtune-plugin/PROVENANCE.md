@@ -1,5 +1,5 @@
 Derived from ClawTune `packages/clawtune-plugin` at
-`ba4eb595a67fcfb4f3e4da54102afbc220565905`, under the accompanying MIT license.
+`1b119259c06ac95cead9e5edd5e062ff57499343`, under the accompanying MIT license.
 
 ClawBox carries the host prediction receipt in its SSH execution envelope and
 blocks execution when `requireHostPrediction` is enabled and prediction fails.

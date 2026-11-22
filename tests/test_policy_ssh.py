@@ -73,7 +73,9 @@ def test_post_accepts_sanitizer_safe_policy_auth(
 
 def _argv(tool_name: str = "exec") -> list[str]:
     metadata = json.dumps(
-        {"v": 1, "execution_id": "exec-a", "tool_name": tool_name},
+        {"v": 1, "execution_id": "exec-a", "tool_name": tool_name,
+         "logical_session_id": "logical-session", "session_key": "agent:main:child",
+         "agent_id": "agent", "tool_call_id": "tool-call", "run_id": "run"},
         separators=(",", ":"),
     )
     return [
@@ -143,7 +145,14 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
     assert posted[0][1]["command_sha256"] == hashlib.sha256(
         posted[0][1]["command"].encode()
     ).hexdigest()
+    assert {name: posted[0][1][name] for name in (
+        "logical_session_id", "session_key", "agent_id", "tool_call_id", "run_id",
+    )} == {
+        "logical_session_id": "logical-session", "session_key": "agent:main:child",
+        "agent_id": "agent", "tool_call_id": "tool-call", "run_id": "run",
+    }
     completion = posted[-1][1]
+    assert completion["logical_session_id"] == "logical-session"
     assert completion["endpoint_sandbox_id"] == "tool-a"
     assert completion["endpoint_epoch"] == 9
     assert completion["ssh_reaped_at"] <= completion["execution_completed_at"]
