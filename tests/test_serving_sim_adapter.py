@@ -155,7 +155,8 @@ def app():
     result.state.feed = feed
     result.state.service = NS(feed=feed, cfg={'topology': {'cards': []}},
         running=True, driver=NS(done=lambda: False), registry=NS(requests={}),
-        refs=NS(traces={'trace': ()}), clock=NS(v0=0., k=1.), epoch0=100., trace_prompts=None)
+        refs=NS(traces={'trace': ()}), clock=NS(v0=0., k=1.), epoch0=100., trace_prompts=None,
+        cpu_refill=NS(stats=lambda: {'config': {'mode': 'off'}}))
     return attach_management(result, input_digest='catalog')
 
 
@@ -173,6 +174,7 @@ def test_adapter_auth_readiness_and_original_routes(monkeypatch):
             assert data['adapter'] == 'clawbox' and data['accepted_requests'] == 0
             assert data['catalog_digest'] == 'catalog' and data['clock']['k'] == 1
             assert data['prompt_source'] == 'actual'
+            assert data['cpu_refill']['config']['mode'] == 'off'
             assert data['decode_time'] == data['non_physical'] == {}
             application.state.service.cfg.update(tpot_ms=20, validity={'non_physical': {'tpot_ms': 20}})
             timed = (await client.get(INFO_PATH, headers=headers)).json()

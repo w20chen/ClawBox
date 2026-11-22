@@ -20,6 +20,7 @@ INFO_PATH = "/v1/clawbox/simulator/info"
 EVENTS_PATH = "/request-signals/clawbox/events"
 ADAPTER_PROTOCOL = 2
 OUTCOMES_PATH = '/v1/clawbox/simulator/tool-outcomes'
+CPU_FEEDBACK_PATH = '/v1/clawbox/simulator/cpu-feedback'
 
 
 def attach_diagnostics(app, out: Path, interval_s: float):
@@ -249,6 +250,7 @@ def attach_management(app, *, input_digest: str):
                       topology_digest=hashlib.sha256(topology.encode()).hexdigest(),
                       decode_time={key: service.cfg[key] for key in ('decode_time_scale', 'tpot_ms')
                                    if service.cfg.get(key) is not None},
+                      cpu_refill=service.cpu_refill.stats(),
                       non_physical=service.cfg.get('validity', {}).get('non_physical', {}),
                       signals=dict(**service.feed.head(), service_events_path=EVENTS_PATH),
                       cpu_affinity=sorted(os.sched_getaffinity(0)),

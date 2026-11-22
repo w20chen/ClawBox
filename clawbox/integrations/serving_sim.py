@@ -85,6 +85,15 @@ def main(argv=None):
                        help='positive finite decode-time multiplier; non-physical, default: calibrated timing')
     speed.add_argument('--tpot-ms', type=float,
                        help='positive finite target milliseconds per output token; non-physical, excludes decode-time-scale')
+    parser.add_argument('--cpu-refill-mode', choices=['off', 'decode-first'], default='off',
+                        help='CPU-aware decode-first policy; default: off')
+    parser.add_argument('--cpu-refill-feedback-interval-seconds', type=float, default=1.)
+    parser.add_argument('--cpu-refill-enter-utilization', type=float, default=.90)
+    parser.add_argument('--cpu-refill-exit-utilization', type=float, default=.95)
+    parser.add_argument('--cpu-refill-enter-samples', type=int, default=2)
+    parser.add_argument('--cpu-refill-stale-seconds', type=float, default=3.)
+    parser.add_argument('--cpu-refill-throttle-steps', type=int, default=3)
+    parser.add_argument('--cpu-refill-release-steps', type=int, default=1)
     parser.add_argument('--trace-catalog', type=Path)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--persistence', choices=['native', 'final'], default='native',
@@ -107,6 +116,18 @@ def main(argv=None):
                     raise ValueError(f'--{name.replace("_", "-")} applies to serve only')
                 if not math.isfinite(value) or value <= 0:
                     raise ValueError(f'{name} must be positive and finite')
+        if (not all(math.isfinite(value) for value in (
+                args.cpu_refill_feedback_interval_seconds,
+                args.cpu_refill_enter_utilization,
+                args.cpu_refill_exit_utilization,
+                args.cpu_refill_stale_seconds,
+            )) or not 0 < args.cpu_refill_enter_utilization
+                < args.cpu_refill_exit_utilization <= 1
+                or not 0 < args.cpu_refill_feedback_interval_seconds
+                < args.cpu_refill_stale_seconds
+                or min(args.cpu_refill_enter_samples, args.cpu_refill_throttle_steps,
+                       args.cpu_refill_release_steps) < 1):
+            raise ValueError('invalid cpu_refill hysteresis, interval or cadence')
         require_host()
         import resource
         if args.nofile < 1 or not math.isfinite(args.diagnostic_interval_seconds) or args.diagnostic_interval_seconds <= 0:
@@ -169,6 +190,14 @@ def main(argv=None):
                              diagnostic_interval_seconds=args.diagnostic_interval_seconds,
                              v0=args.v0, k=args.k, tokenizer_dir=args.tokenizer_dir,
                              decode_time_scale=args.decode_time_scale, tpot_ms=args.tpot_ms,
+                              cpu_refill_mode=args.cpu_refill_mode,
+                              cpu_refill_feedback_interval_seconds=args.cpu_refill_feedback_interval_seconds,
+                              cpu_refill_enter_utilization=args.cpu_refill_enter_utilization,
+                              cpu_refill_exit_utilization=args.cpu_refill_exit_utilization,
+                              cpu_refill_enter_samples=args.cpu_refill_enter_samples,
+                              cpu_refill_stale_seconds=args.cpu_refill_stale_seconds,
+                              cpu_refill_throttle_steps=args.cpu_refill_throttle_steps,
+                              cpu_refill_release_steps=args.cpu_refill_release_steps,
                              api_keys=[key] if key else None)
             uvicorn.run(app, host=args.host, port=args.port,
                         ssl_keyfile=args.ssl_keyfile, ssl_certfile=args.ssl_certfile)

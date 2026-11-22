@@ -19,7 +19,10 @@ def configuration():
     ('sim_root', 'relative'), ('cache_dir', 'relative'), ('hf_hub_cache', 'relative'),
     ('shutdown_timeout_seconds', 0), ('nofile', 0),
     ('tpot_ms', 0), ('tpot_ms', float('inf')), ('tpot_ms', True),
-    ('decode_time_scale', -1), ('decode_time_scale', float('nan'))])
+    ('decode_time_scale', -1), ('decode_time_scale', float('nan')),
+    ('cpu_refill_enter_utilization', .96),
+    ('cpu_refill_feedback_interval_seconds', 3.),
+    ('cpu_refill_enter_samples', 0), ('cpu_refill_throttle_steps', 0)])
 def test_launch_rejects_invalid_environment_contract(field, value):
     config = configuration()
     config['serving_sim_launch'][field] = value
@@ -93,6 +96,26 @@ def test_decode_timing_modes_are_exclusive():
     config['serving_sim_launch'].update(tpot_ms=20., decode_time_scale=2.)
     with pytest.raises(ValueError, match='mutually exclusive'):
         InferenceSpec(backend='serving_sim', configuration=config)
+
+
+def test_cpu_refill_configuration_is_default_off_and_forwarded_to_every_cluster(tmp_path):
+    config = configuration()
+    config['serving_sim_launch'].update(
+        cluster_count=2, cpu_refill_mode='decode-first',
+        cpu_refill_enter_utilization=.85, cpu_refill_exit_utilization=.93,
+        cpu_refill_enter_samples=3, cpu_refill_stale_seconds=4.,
+        cpu_refill_throttle_steps=4, cpu_refill_release_steps=2,
+    )
+    service = ServingSimProcess(config, tmp_path)
+    expected = service.spec.cpu_refill_configuration()
+    assert expected['mode'] == 'decode-first'
+    for layout in service.layouts:
+        command = service._command(layout)
+        for field, value in expected.items():
+            flag = '--cpu-refill-' + field.replace('_', '-')
+            assert command[command.index(flag) + 1] == str(value)
+    assert ServingSimLaunchSpec.model_validate(configuration()['serving_sim_launch']) \
+        .cpu_refill_configuration()['mode'] == 'off'
 
 
 @pytest.mark.parametrize('flags', [['--tpot-ms', 'nan'], ['--decode-time-scale', '0']])

@@ -29,7 +29,12 @@ from clawbox.experiments.spec_types import EvictionPolicy
 @contextmanager
 def simulator(mode="success", *, clock_offset_s=0., info_override=None):
     state = SimpleNamespace(mode=mode, posts=[], signals=Queue(), started=Event(),
-                            disconnected=Event(), finish=Event(), stop=Event())
+                            disconnected=Event(), finish=Event(), stop=Event(),
+                            feedbacks=[], feedback_received=Event())
+    default_policy = dict(mode='off', feedback_interval_seconds=1.,
+                          enter_utilization=.90, exit_utilization=.95,
+                          enter_samples=2, stale_seconds=3.,
+                          throttle_steps=3, release_steps=1)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -56,7 +61,9 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
                         "missing_reasoning_calls": int(state.mode == "no_reasoning")}},
                     "accepted_requests": 0, "catalog_digest": "catalog",
                     "service_id": "epoch", "server_wall_time": time.time() + clock_offset_s,
-                    "signals": {"head": "epoch:0"}, **(info_override or {})}).encode()
+                    "signals": {"head": "epoch:0"},
+                    "cpu_refill": {"config": default_policy},
+                    **(info_override or {})}).encode()
                 self.send_headers("application/json", len(body))
                 self.wfile.write(body)
                 return
@@ -83,6 +90,15 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
                 state.disconnected.set()
 
         def respond(self):
+            if self.path == "/v1/clawbox/simulator/cpu-feedback":
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                state.feedbacks.append(body)
+                state.feedback_received.set()
+                result = json.dumps(dict(accepted=state.mode != 'feedback_error', sequence=body['sequence'],
+                                         active=True, feedback_age_seconds=0.)).encode()
+                self.send_headers("application/json", len(result))
+                self.wfile.write(result)
+                return
             assert self.path == "/v1/chat/completions"
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.posts.append(body)
@@ -155,7 +171,10 @@ def client_factory(monkeypatch, tmp_path):
                                 "cases": [dict(case_id='case', trace_id='trace', model_calls=1,
                                                missing_reasoning_calls=int(server.mode == "no_reasoning"))]})
         return ServingSimClient({"base_url": server.url, "model": "test-model",
-            "serving_sim_catalog_manifest": str(tmp_path / "manifest.json")}, "", tmp_path / "client")
+            "serving_sim_catalog_manifest": str(tmp_path / "manifest.json"),
+            "serving_sim_launch": dict(sim_root='/sim', venv='/venv',
+                trace_catalog='/catalog.json', cpu_affinity=[0], cores=1,
+                topology='8A')}, "", tmp_path / "client")
 
     return make
 
@@ -370,6 +389,44 @@ def test_signal_history_gap_fails_the_arm_and_cancels_pending_gpu_work(client_fa
                 pending.result(timeout=2)
             assert server.disconnected.wait(2)
             with pytest.raises(RuntimeError, match="observation failed"):
+                client.check()
+
+
+@pytest.mark.parametrize('mode, fails', [('success', False), ('feedback_error', True)])
+def test_cpu_feedback_is_nonblocking_authenticated_and_background_errors_propagate(
+    client_factory, mode, fails,
+):
+    policy = dict(mode='decode-first', feedback_interval_seconds=1.,
+                  enter_utilization=.90, exit_utilization=.95,
+                  enter_samples=2, stale_seconds=3.,
+                  throttle_steps=3, release_steps=1)
+    with simulator(mode, info_override={'cpu_refill': {'config': policy}}) as server:
+        client = client_factory(server)
+        client.configuration['serving_sim_launch']['cpu_refill_mode'] = 'decode-first'
+        with client:
+            submitted = client.publish_cpu_feedback(
+                run_id='run', attempt_id='attempt', arm_id='arm',
+                sample_monotonic_s=time.monotonic(),
+                cpu=dict(capacity_cores=160, average_cores=80,
+                         utilization_fraction=.5),
+                activity=dict(measurement='exact',
+                    tool_admitted_waiting_start_operations=0,
+                    tool_admission_waiting_operations=0,
+                    dependency_install_waiting_operations=0,
+                    tool_executing_operations=4, idle_at_llm_sessions=100),
+                admission=dict(measurement='exact', admission_queue_depth=0),
+            )
+            assert submitted and server.feedback_received.wait(2)
+            deadline = time.monotonic() + 2
+            while client.feedback_sending and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert server.feedbacks[0]['service_id'] == 'epoch'
+            assert server.feedbacks[0]['run_id'] == 'run'
+            assert server.feedbacks[0]['average_cores'] == 80
+            if fails:
+                with pytest.raises(RuntimeError, match='cpu feedback delivery failed'):
+                    client.check()
+            else:
                 client.check()
 
 

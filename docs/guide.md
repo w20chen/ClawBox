@@ -1214,6 +1214,14 @@ inference:
       topology: 8A
       decode_time_scale: null
       tpot_ms: null
+      cpu_refill_mode: off
+      cpu_refill_feedback_interval_seconds: 1.0
+      cpu_refill_enter_utilization: 0.90
+      cpu_refill_exit_utilization: 0.95
+      cpu_refill_enter_samples: 2
+      cpu_refill_stale_seconds: 3.0
+      cpu_refill_throttle_steps: 3
+      cpu_refill_release_steps: 1
       cluster_count: 1
       routing: sticky_balanced_by_case
       persistence: final
@@ -1233,6 +1241,25 @@ duration. Both are non-physical settings, recorded in service metadata and nativ
 accepts the matching `--decode-time-scale` or `--tpot-ms` option. A speed change
 requires a new run ID and qualification, but no host apply, VM image rebuild or
 retraining. Keep the same explicit speed setting across compared arms.
+
+`cpu_refill_mode: decode-first` enables the experimental CPU-aware GPU policy;
+the default `off` path uses the native simulator scheduler unchanged. Once per
+configured feedback interval, ClawBox sends every cluster the same actual VM
+cgroup CPU sample and Tool activity/admission snapshot. Two consecutive samples
+below 90% CPU enter refill mode. CPU at or above 95%, ready Tool work, blocked
+Tool admission, or feedback older than three seconds restores native scheduling.
+For an engine with both decode and prefill candidates, refill mode calls vLLM's
+native prefill-throttle option for three scheduling steps, then allows one native
+release step so prefills continue to progress. Pure-decode and prefill-only steps
+remain native.
+
+The feedback endpoint shares the simulator listener and API-key authentication.
+Effective settings, feedback transitions, active time, throttle/release counts,
+affected engines and batch composition are retained in the service receipt and
+native `validity.json`. Compare `off` and `decode-first` with identical settings;
+do not tune thresholds separately by arm. A policy or threshold change requires
+a new run ID and a bounded simulator smoke, but no host apply, guest image rebuild
+or ClawTune retraining. Manual `serve` exposes matching `--cpu-refill-*` options.
 
 Current sim-release records lag measurements without the former fixed-threshold
 warning verdict. Inspect `lag` in each cluster's `validity.json` and the retained

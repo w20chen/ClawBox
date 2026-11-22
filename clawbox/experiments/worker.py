@@ -2678,6 +2678,11 @@ class ExperimentWorker:
                 queues = aggregate_admission_queue_snapshots(
                     domains, blocking=False,
                 )
+                activity = activity_tracker.snapshot()
+                cpu = cpu_sampler.sample() if cpu_sampler is not None else {
+                    "measurement": "unavailable",
+                    "reason": cpu_unavailable_reason,
+                }
                 warm_physical = None
                 if arm.resources.warm_memory_capacity_mib and arm.resources.warm_snapshot_root:
                     stat = os.statvfs(arm.resources.warm_snapshot_root)
@@ -2686,7 +2691,7 @@ class ExperimentWorker:
                     "event": "memory_sample", "local_used_bytes": used,
                     "observation_start_monotonic_s": observation['observation_start_monotonic_s'],
                     "observation_end_monotonic_s": observation['observation_end_monotonic_s'],
-                    "queue_activity_snapshot": activity_tracker.snapshot(),
+                    "queue_activity_snapshot": activity,
                     "admission_queue_snapshot": queues,
                     "policy_event_executor": policy_events.metrics(),
                     "cgroup_memory": cgroup_memory_evidence(Path(arm.resources.local_memory_cgroup)),
@@ -2719,10 +2724,7 @@ class ExperimentWorker:
                     **({'peer_storage_sample': peer_store.storage_sample(),
                         'peer_cpu': peer_cpu.sample()} if peer_enabled else {}),
                     "host_knowledge_process": self.host_knowledge.process_sample() if self.host_knowledge else None,
-                    "cgroup_cpu": cpu_sampler.sample() if cpu_sampler is not None else {
-                        "measurement": "unavailable",
-                        "reason": cpu_unavailable_reason,
-                    },
+                    "cgroup_cpu": cpu,
                     "cpu_qos_usage": (
                         self._priority_domain.cpu_qos_usage_sampler.sample()
                         if self._priority_domain is not None
@@ -2731,6 +2733,13 @@ class ExperimentWorker:
                     ),
                     "observation_age_seconds": max(0., time.monotonic()-observation['observation_start_monotonic_s']),
                 })
+                if self.serving_sim is not None:
+                    self.serving_sim.publish_cpu_feedback(
+                        run_id=self.run_id, attempt_id=self.attempt_id,
+                        arm_id=arm.arm_id,
+                        sample_monotonic_s=observation['observation_end_monotonic_s'],
+                        cpu=cpu, activity=activity, admission=queues,
+                    )
 
             def queue_memory_sample(used: int, _available: int) -> None:
                 # This hook stays on the evidence sampler thread, so keep it to

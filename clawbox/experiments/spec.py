@@ -157,6 +157,22 @@ class ServingSimLaunchSpec(StrictFrozenModel):
     tokenizer_dir: str | None = None
     cache_dir: str | None = None
     hf_hub_cache: str | None = None
+    cpu_refill_mode: Literal['off', 'decode-first'] = 'off'
+    cpu_refill_feedback_interval_seconds: float = Field(
+        default=1., gt=0, allow_inf_nan=False, strict=True,
+    )
+    cpu_refill_enter_utilization: float = Field(
+        default=.90, gt=0, le=1, allow_inf_nan=False, strict=True,
+    )
+    cpu_refill_exit_utilization: float = Field(
+        default=.95, gt=0, le=1, allow_inf_nan=False, strict=True,
+    )
+    cpu_refill_enter_samples: int = Field(default=2, ge=1, strict=True)
+    cpu_refill_stale_seconds: float = Field(
+        default=3., gt=0, allow_inf_nan=False, strict=True,
+    )
+    cpu_refill_throttle_steps: int = Field(default=3, ge=1, strict=True)
+    cpu_refill_release_steps: int = Field(default=1, ge=1, strict=True)
 
     @model_validator(mode='after')
     def launch_contract(self):
@@ -169,7 +185,27 @@ class ServingSimLaunchSpec(StrictFrozenModel):
         if (len(set(self.cpu_affinity)) != len(self.cpu_affinity)
                 or min(self.cpu_affinity) < 0 or len(self.cpu_affinity) != self.cores):
             raise ValueError('serving_sim_launch requires exactly cores distinct nonnegative CPU IDs')
+        if self.cpu_refill_enter_utilization >= self.cpu_refill_exit_utilization:
+            raise ValueError(
+                'cpu_refill requires enter utilization below exit utilization'
+            )
+        if self.cpu_refill_stale_seconds <= self.cpu_refill_feedback_interval_seconds:
+            raise ValueError(
+                'cpu_refill requires stale seconds above the feedback interval'
+            )
         return self
+
+    def cpu_refill_configuration(self) -> dict[str, Any]:
+        return {
+            'mode': self.cpu_refill_mode,
+            'feedback_interval_seconds': self.cpu_refill_feedback_interval_seconds,
+            'enter_utilization': self.cpu_refill_enter_utilization,
+            'exit_utilization': self.cpu_refill_exit_utilization,
+            'enter_samples': self.cpu_refill_enter_samples,
+            'stale_seconds': self.cpu_refill_stale_seconds,
+            'throttle_steps': self.cpu_refill_throttle_steps,
+            'release_steps': self.cpu_refill_release_steps,
+        }
 
 
 class InferenceSpec(StrictFrozenModel):

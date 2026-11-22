@@ -1007,6 +1007,11 @@ repeat it when changing the simulator listener range.
 | `topology` | Required | Native simulated GPU topology for each independent cluster, e.g. `8A`; separate from real CPU budget. |
 | `decode_time_scale` | `null` (calibrated timing) | Positive finite multiplier for the decode part of each native step. Excludes `tpot_ms`; requires the upstream hybrid step model. Non-physical; prefill and block copy/zero work remain unchanged. Manual `serve`: `--decode-time-scale`. |
 | `tpot_ms` | `null` (calibrated timing) | Positive finite target milliseconds per output token, replacing the decode part of each step. Excludes `decode_time_scale`; requires the upstream hybrid step model. Non-physical; queueing, prefill, maintenance and transport still affect observed timing. Manual `serve`: `--tpot-ms`. |
+| `cpu_refill_mode` | `off`; `decode-first` opt-in | CPU-aware GPU scheduling switch. Off mode preserves the native scheduler path. Decode-first uses only vLLM's native prefill-throttle argument when low CPU and mixed decode/prefill work coincide. |
+| `cpu_refill_feedback_interval_seconds` | `1.0` seconds | Minimum interval between latest-only aggregate CPU/Tool snapshots sent to every cluster. Delivery is nonblocking; background delivery errors fail the arm. |
+| `cpu_refill_enter_utilization`, `cpu_refill_exit_utilization` | `0.90`, `0.95` fractions | Actual experiment-cgroup CPU hysteresis. Enter must be below exit. Ready or resource-blocked Tool work disables refill independently of these thresholds. |
+| `cpu_refill_enter_samples`, `cpu_refill_stale_seconds` | `2` samples, `3.0` seconds | Consecutive low samples needed to enter and maximum sample age. Staleness must exceed the feedback interval and restores native scheduling. |
+| `cpu_refill_throttle_steps`, `cpu_refill_release_steps` | `3`, `1` scheduling steps | Per-engine bounded cadence while active with mixed candidates. Release steps use the ordinary native scheduler to guarantee prefill progress. Both values are positive integers. |
 | `cluster_count` | `1` | Number of independent simulator clusters. Managed clusters use consecutive ports beginning at `base_url`; the entire range must fit below 65536 and be unused. Use multiple `8A` clusters to add capacity, not one enlarged topology. |
 | `routing` | `sticky_balanced_by_case` | The only supported pool route. Sorted cases assign each unique trace round-robin once; all sessions and Tool audits for that trace remain on the same cluster. |
 | `persistence` | `final` | `native` or `final`; current sim-release uses the same native incremental-input flushing and shutdown-only final summaries for both. ClawBox verifies successful native close. |
@@ -1028,8 +1033,9 @@ report is distinct from timing validity: inspect native `validity.json` and
 `correctness.gpu_validity` before making performance claims.
 These reports retain native `non_physical` settings and per-cluster lag; no
 fixed-threshold warning verdict is synthesized. `/v1/clawbox/simulator/info`
-also reports `decode_time` and `non_physical`, both empty when speed overrides
-are absent. Managed startup verifies the requested decode settings. Speed
+also reports `decode_time`, `non_physical`, and the effective `cpu_refill`
+configuration/counters; the first two are empty when speed overrides are
+absent. Managed startup verifies the requested decode and policy settings. Speed
 overrides do not change `k=1`, recorded output token counts or arrivals.
 
 Changes require a new run ID and matching qualification, but no guest image

@@ -14,6 +14,10 @@ import httpx
 
 from clawbox.replay.process_sessions import rebind_process_sessions
 from .serving_sim_diagnostics import Diagnostics, exception_record
+from .spec import ServingSimLaunchSpec
+
+
+CPU_FEEDBACK_PATH = "/v1/clawbox/simulator/cpu-feedback"
 
 
 def serving_sim_bases(configuration: dict) -> list[str]:
@@ -108,6 +112,15 @@ class ServingSimClient:
         self.error = None
         self.stopping = False
         self.compact_diagnostics = configuration.get('serving_sim_diagnostic_detail') == 'compact'
+        self.feedback_lock = threading.Lock()
+        self.feedback_pending = None
+        self.feedback_sending = False
+        self.feedback_future = None
+        self.feedback_sequence = 0
+        self.feedback_next_sample_monotonic = float('-inf')
+        self.feedback_tasks = set()
+        self.feedback_submitted = 0
+        self.feedback_coalesced = 0
 
     def __enter__(self):
         self.output.mkdir(parents=True, exist_ok=True)
@@ -137,6 +150,10 @@ class ServingSimClient:
         self.clock_offsets_s = []
         self.clock_uncertainties_s = []
         expected_topology = self.configuration.get("serving_sim_topology_digest")
+        launch = ServingSimLaunchSpec.model_validate(
+            self.configuration["serving_sim_launch"]
+        )
+        expected_cpu_refill = launch.cpu_refill_configuration()
         for cluster_id, base in enumerate(self.bases):
             sent = time.time()
             response = await self.client.get(
@@ -176,6 +193,11 @@ class ServingSimClient:
                 raise ValueError(
                     f"serving_sim cluster {cluster_id} catalog differs from the CPU manifest"
                 )
+            if (info.get('cpu_refill') or {}).get('config') != expected_cpu_refill:
+                raise ValueError(
+                    f'serving_sim cluster {cluster_id} cpu_refill configuration differs '
+                    'from the experiment'
+                )
             for row in self.case_bindings.values():
                 actual = info.get('traces', {}).get(row['trace_id'], {})
                 if any(actual.get(k) != row[k]
@@ -192,6 +214,10 @@ class ServingSimClient:
         self.clock_uncertainty_s = self.clock_uncertainties_s[0]
         self.epochs = [info["service_id"] for info in self.infos]
         self.epoch = self.epochs[0]
+        self.feedback_enabled = expected_cpu_refill['mode'] != 'off'
+        self.feedback_interval_seconds = expected_cpu_refill[
+            'feedback_interval_seconds'
+        ]
         self.trace_clusters = assign_trace_clusters(
             self.case_bindings, len(self.bases),
         )
@@ -287,6 +313,127 @@ class ServingSimClient:
     def check(self):
         if self.error is not None:
             raise RuntimeError(f"serving_sim observation failed: {self.error}") from self.error
+
+    def publish_cpu_feedback(self, *, run_id: str, attempt_id: str, arm_id: str,
+                             sample_monotonic_s: float, cpu: dict,
+                             activity: dict, admission: dict) -> bool:
+        """Queue a latest-only aggregate snapshot without blocking the sampler."""
+        self.check()
+        if not self.feedback_enabled or cpu.get('average_cores') is None:
+            return False
+        sample_monotonic_s = float(sample_monotonic_s)
+        with self.feedback_lock:
+            if sample_monotonic_s < self.feedback_next_sample_monotonic:
+                return False
+            self.feedback_next_sample_monotonic = (
+                sample_monotonic_s + self.feedback_interval_seconds
+            )
+            payload = dict(
+                run_id=run_id, attempt_id=attempt_id, arm_id=arm_id,
+                sample_monotonic_s=sample_monotonic_s,
+                sample_unix_s=time.time() - max(
+                    0., time.monotonic() - sample_monotonic_s,
+                ),
+                capacity_cores=float(cpu['capacity_cores']),
+                average_cores=float(cpu['average_cores']),
+                utilization_fraction=float(cpu['utilization_fraction']),
+                ready_tool_operations=int(activity.get(
+                    'tool_admitted_waiting_start_operations', 0,
+                )),
+                resource_blocked_tool_operations=int(
+                    activity.get('tool_admission_waiting_operations', 0)
+                    + activity.get('dependency_install_waiting_operations', 0)
+                ),
+                tool_executing_operations=int(activity.get(
+                    'tool_executing_operations', 0,
+                )),
+                idle_at_llm_sessions=int(activity.get('idle_at_llm_sessions', 0)),
+                activity_measurement=activity.get('measurement'),
+                admission_measurement=admission.get('measurement'),
+                admission_queue_depth=admission.get('admission_queue_depth'),
+            )
+            if self.feedback_sending:
+                if self.feedback_pending is not None:
+                    self.feedback_coalesced += 1
+                self.feedback_pending = payload
+                return True
+            self.feedback_sending = True
+        self._start_feedback(payload)
+        return True
+
+    def _start_feedback(self, payload: dict) -> None:
+        with self.feedback_lock:
+            sequence = self.feedback_sequence
+            self.feedback_sequence += 1
+            self.feedback_submitted += 1
+        future = asyncio.run_coroutine_threadsafe(
+            self._publish_cpu_feedback(dict(payload, sequence=sequence)), self.loop,
+        )
+        with self.feedback_lock:
+            self.feedback_future = future
+        future.add_done_callback(self._feedback_done)
+
+    def _feedback_done(self, future) -> None:
+        error = None
+        try:
+            future.result()
+        except concurrent.futures.CancelledError:
+            if not self.stopping:
+                error = RuntimeError('cpu feedback delivery was cancelled')
+        except BaseException as exc:
+            error = exc
+        next_payload = None
+        with self.feedback_lock:
+            self.feedback_future = None
+            self.feedback_sending = False
+            if error is None and not self.stopping and self.feedback_pending is not None:
+                next_payload = self.feedback_pending
+                self.feedback_pending = None
+                self.feedback_sending = True
+            elif error is not None:
+                self.feedback_pending = None
+        if error is not None:
+            if self.error is None:
+                self.error = RuntimeError(f'cpu feedback delivery failed: {error}')
+            self.diagnostics.write(
+                'cpu_feedback_failure', error=exception_record(error),
+            )
+            self.loop.call_soon_threadsafe(
+                lambda: [task.cancel() for task in list(self.requests.values())]
+            )
+        elif next_payload is not None:
+            self._start_feedback(next_payload)
+
+    async def _publish_cpu_feedback(self, payload: dict) -> None:
+        task = asyncio.current_task()
+        self.feedback_tasks.add(task)
+        try:
+            async def deliver(cluster_id: int, base: str):
+                body = dict(payload, cluster_id=cluster_id,
+                            service_id=self.epochs[cluster_id])
+                response = await self.client.post(
+                    base + CPU_FEEDBACK_PATH, json=body, timeout=10,
+                )
+                response.raise_for_status()
+                result = response.json()
+                if (result.get('accepted') is not True
+                        or result.get('sequence') != payload['sequence']):
+                    raise RuntimeError(
+                        f'serving_sim cluster {cluster_id} returned an invalid '
+                        'cpu feedback acknowledgement'
+                    )
+                return dict(cluster_id=cluster_id, active=result.get('active'),
+                            feedback_age_seconds=result.get('feedback_age_seconds'))
+            states = await asyncio.gather(*(
+                deliver(cluster_id, base)
+                for cluster_id, base in enumerate(self.bases)
+            ))
+            self.diagnostics.write(
+                'cpu_feedback_delivered', sequence=payload['sequence'],
+                sample_monotonic_s=payload['sample_monotonic_s'], clusters=states,
+            )
+        finally:
+            self.feedback_tasks.discard(task)
 
     def submit(self, *, session_id: str, request_id: str, trace_id: str, call_id: int,
                payload: dict, on_signal: Callable | None, timeout_s: float):
@@ -452,6 +599,8 @@ class ServingSimClient:
 
     async def _close(self):
         self.stopping = True
+        with self.feedback_lock:
+            self.feedback_pending = None
         tasks = list(self.requests.values())
         if hasattr(self, "signal_tasks"):
             tasks.extend(self.signal_tasks)
@@ -459,6 +608,7 @@ class ServingSimClient:
             tasks.append(self.signal_task)
         if hasattr(self, 'sample_task'):
             tasks.append(self.sample_task)
+        tasks.extend(self.feedback_tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

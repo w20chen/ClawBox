@@ -121,6 +121,13 @@ class ServingSimProcess:
             value = getattr(self.spec, name)
             if value is not None:
                 command += ['--' + name.replace('_', '-'), str(value)]
+        for name in (
+            'cpu_refill_mode', 'cpu_refill_feedback_interval_seconds',
+            'cpu_refill_enter_utilization', 'cpu_refill_exit_utilization',
+            'cpu_refill_enter_samples', 'cpu_refill_stale_seconds',
+            'cpu_refill_throttle_steps', 'cpu_refill_release_steps',
+        ):
+            command += ['--' + name.replace('_', '-'), str(getattr(self.spec, name))]
         return command
 
     def _entries(self) -> list[tuple[int, dict, object, dict | None, object | None]]:
@@ -231,6 +238,12 @@ class ServingSimProcess:
                             if info.get('decode_time') != expected_decode:
                                 raise RuntimeError(f'simulator cluster {index} decode timing differs '
                                                    'from requested configuration')
+                            actual_policy = (info.get('cpu_refill') or {}).get('config')
+                            if actual_policy != self.spec.cpu_refill_configuration():
+                                raise RuntimeError(
+                                    f'simulator cluster {index} cpu_refill policy differs '
+                                    'from requested configuration'
+                                )
                             if (info.get('clock', {}).get('k') != 1
                                     or info.get('cpu_affinity') != sorted(layout['cpu_affinity'])):
                                 raise RuntimeError(
