@@ -1216,6 +1216,7 @@ inference:
       tpot_ms: null
       cpu_refill_mode: off
       cpu_refill_feedback_interval_seconds: 1.0
+      cpu_refill_activation_floor_utilization: 0.0
       cpu_refill_enter_utilization: 0.90
       cpu_refill_exit_utilization: 0.95
       cpu_refill_enter_samples: 2
@@ -1246,8 +1247,11 @@ retraining. Keep the same explicit speed setting across compared arms.
 the default `off` path uses the native simulator scheduler unchanged. Once per
 configured feedback interval, ClawBox sends every cluster the same actual VM
 cgroup CPU sample and Tool activity/admission snapshot. Two consecutive samples
-below 90% CPU enter refill mode. CPU at or above 95%, ready Tool work, blocked
-Tool admission, or feedback older than three seconds restores native scheduling.
+between the configured activation floor (zero by default) and 90% CPU enter
+refill mode. CPU below the activation floor, at or above 95%, or feedback older
+than three seconds restores native scheduling. A nonzero floor keeps cold-start
+prefills native until the CPU/Tool pipeline has formed. Ready and resource-blocked
+Tool counts remain recorded evidence but do not globally veto measured CPU headroom.
 For an engine with both decode and prefill candidates, refill mode calls vLLM's
 native prefill-throttle option for three scheduling steps, then allows one native
 release step so prefills continue to progress. Pure-decode and prefill-only steps

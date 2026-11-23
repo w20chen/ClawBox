@@ -20,6 +20,8 @@ def configuration():
     ('shutdown_timeout_seconds', 0), ('nofile', 0),
     ('tpot_ms', 0), ('tpot_ms', float('inf')), ('tpot_ms', True),
     ('decode_time_scale', -1), ('decode_time_scale', float('nan')),
+    ('cpu_refill_activation_floor_utilization', -.01),
+    ('cpu_refill_activation_floor_utilization', .90),
     ('cpu_refill_enter_utilization', .96),
     ('cpu_refill_feedback_interval_seconds', 3.),
     ('cpu_refill_enter_samples', 0), ('cpu_refill_throttle_steps', 0)])
@@ -102,6 +104,7 @@ def test_cpu_refill_configuration_is_default_off_and_forwarded_to_every_cluster(
     config = configuration()
     config['serving_sim_launch'].update(
         cluster_count=2, cpu_refill_mode='decode-first',
+        cpu_refill_activation_floor_utilization=.40,
         cpu_refill_enter_utilization=.85, cpu_refill_exit_utilization=.93,
         cpu_refill_enter_samples=3, cpu_refill_stale_seconds=4.,
         cpu_refill_throttle_steps=4, cpu_refill_release_steps=2,

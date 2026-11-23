@@ -161,6 +161,9 @@ class ServingSimLaunchSpec(StrictFrozenModel):
     cpu_refill_feedback_interval_seconds: float = Field(
         default=1., gt=0, allow_inf_nan=False, strict=True,
     )
+    cpu_refill_activation_floor_utilization: float = Field(
+        default=0., ge=0, lt=1, allow_inf_nan=False, strict=True,
+    )
     cpu_refill_enter_utilization: float = Field(
         default=.90, gt=0, le=1, allow_inf_nan=False, strict=True,
     )
@@ -185,9 +188,12 @@ class ServingSimLaunchSpec(StrictFrozenModel):
         if (len(set(self.cpu_affinity)) != len(self.cpu_affinity)
                 or min(self.cpu_affinity) < 0 or len(self.cpu_affinity) != self.cores):
             raise ValueError('serving_sim_launch requires exactly cores distinct nonnegative CPU IDs')
-        if self.cpu_refill_enter_utilization >= self.cpu_refill_exit_utilization:
+        if not (self.cpu_refill_activation_floor_utilization
+                < self.cpu_refill_enter_utilization
+                < self.cpu_refill_exit_utilization):
             raise ValueError(
-                'cpu_refill requires enter utilization below exit utilization'
+                'cpu_refill requires activation floor below enter utilization '
+                'below exit utilization'
             )
         if self.cpu_refill_stale_seconds <= self.cpu_refill_feedback_interval_seconds:
             raise ValueError(
@@ -199,6 +205,7 @@ class ServingSimLaunchSpec(StrictFrozenModel):
         return {
             'mode': self.cpu_refill_mode,
             'feedback_interval_seconds': self.cpu_refill_feedback_interval_seconds,
+            'activation_floor_utilization': self.cpu_refill_activation_floor_utilization,
             'enter_utilization': self.cpu_refill_enter_utilization,
             'exit_utilization': self.cpu_refill_exit_utilization,
             'enter_samples': self.cpu_refill_enter_samples,

@@ -123,6 +123,7 @@ class ServingSimProcess:
                 command += ['--' + name.replace('_', '-'), str(value)]
         for name in (
             'cpu_refill_mode', 'cpu_refill_feedback_interval_seconds',
+            'cpu_refill_activation_floor_utilization',
             'cpu_refill_enter_utilization', 'cpu_refill_exit_utilization',
             'cpu_refill_enter_samples', 'cpu_refill_stale_seconds',
             'cpu_refill_throttle_steps', 'cpu_refill_release_steps',

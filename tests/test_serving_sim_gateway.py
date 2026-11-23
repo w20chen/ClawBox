@@ -32,6 +32,7 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
                             disconnected=Event(), finish=Event(), stop=Event(),
                             feedbacks=[], feedback_received=Event())
     default_policy = dict(mode='off', feedback_interval_seconds=1.,
+                          activation_floor_utilization=0.,
                           enter_utilization=.90, exit_utilization=.95,
                           enter_samples=2, stale_seconds=3.,
                           throttle_steps=3, release_steps=1)
@@ -397,6 +398,7 @@ def test_cpu_feedback_is_nonblocking_authenticated_and_background_errors_propaga
     client_factory, mode, fails,
 ):
     policy = dict(mode='decode-first', feedback_interval_seconds=1.,
+                  activation_floor_utilization=0.,
                   enter_utilization=.90, exit_utilization=.95,
                   enter_samples=2, stale_seconds=3.,
                   throttle_steps=3, release_steps=1)

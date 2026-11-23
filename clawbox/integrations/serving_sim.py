@@ -88,6 +88,7 @@ def main(argv=None):
     parser.add_argument('--cpu-refill-mode', choices=['off', 'decode-first'], default='off',
                         help='CPU-aware decode-first policy; default: off')
     parser.add_argument('--cpu-refill-feedback-interval-seconds', type=float, default=1.)
+    parser.add_argument('--cpu-refill-activation-floor-utilization', type=float, default=0.)
     parser.add_argument('--cpu-refill-enter-utilization', type=float, default=.90)
     parser.add_argument('--cpu-refill-exit-utilization', type=float, default=.95)
     parser.add_argument('--cpu-refill-enter-samples', type=int, default=2)
@@ -118,10 +119,12 @@ def main(argv=None):
                     raise ValueError(f'{name} must be positive and finite')
         if (not all(math.isfinite(value) for value in (
                 args.cpu_refill_feedback_interval_seconds,
+                args.cpu_refill_activation_floor_utilization,
                 args.cpu_refill_enter_utilization,
                 args.cpu_refill_exit_utilization,
                 args.cpu_refill_stale_seconds,
-            )) or not 0 < args.cpu_refill_enter_utilization
+            )) or not 0 <= args.cpu_refill_activation_floor_utilization
+                < args.cpu_refill_enter_utilization
                 < args.cpu_refill_exit_utilization <= 1
                 or not 0 < args.cpu_refill_feedback_interval_seconds
                 < args.cpu_refill_stale_seconds
@@ -192,6 +195,7 @@ def main(argv=None):
                              decode_time_scale=args.decode_time_scale, tpot_ms=args.tpot_ms,
                               cpu_refill_mode=args.cpu_refill_mode,
                               cpu_refill_feedback_interval_seconds=args.cpu_refill_feedback_interval_seconds,
+                              cpu_refill_activation_floor_utilization=args.cpu_refill_activation_floor_utilization,
                               cpu_refill_enter_utilization=args.cpu_refill_enter_utilization,
                               cpu_refill_exit_utilization=args.cpu_refill_exit_utilization,
                               cpu_refill_enter_samples=args.cpu_refill_enter_samples,
