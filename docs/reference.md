@@ -657,6 +657,14 @@ the Zstd helper on an idle standalone host. It preserves backups and restores
 the previous binaries if installation fails. Finish qualification after startup
 before launching a new run ID; changing these host binaries requires no guest
 image rebuild or predictor retraining.
+The installer writes both the service default Shim/runtime and the pinned
+template `component_versions` copy. It verifies that the generated Shim exposes
+restored-parent lineage support and that both installed copies are byte
+identical; a mismatch triggers rollback. WARM qualification applies the same
+check before starting a VM. Set `CLAWBOX_COMPONENT_SHIM_VERSION` only when the
+selected templates pin a version other than `v0.7.0-clawbox-standalone`.
+The minimal `--shim-only` path applies the same lineage marker and installed-byte
+checks, backs up the current versioned binary, and does not restart services.
 An already active Cubelet is kept running when its binary and drop-in settings
 are identical, so a Shim/runtime/helper update does not rebuild the TAP pool.
 

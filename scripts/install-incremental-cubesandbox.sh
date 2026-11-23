@@ -35,12 +35,13 @@ PY
     [shim]="$cube_source/CubeShim/target/release/containerd-shim-cube-rs"
     [runtime]="$cube_source/CubeShim/target/release/cube-runtime"
   )
+  component_version=${CLAWBOX_COMPONENT_SHIM_VERSION:-v0.7.0-clawbox-standalone}
   declare -A targets=(
     [cubelet]="/usr/local/services/cubetoolbox/Cubelet/bin/cubelet"
     [shim]="/usr/local/services/cubetoolbox/cube-shim/bin/containerd-shim-cube-rs"
     [runtime]="/usr/local/services/cubetoolbox/cube-shim/bin/cube-runtime"
-    [component-shim]="/data/cubelet/root/component_versions/cube-shim/v0.7.0-clawbox-standalone/bin/containerd-shim-cube-rs"
-    [component-runtime]="/data/cubelet/root/component_versions/cube-shim/v0.7.0-clawbox-standalone/bin/cube-runtime"
+    [component-shim]="/data/cubelet/root/component_versions/cube-shim/${component_version}/bin/containerd-shim-cube-rs"
+    [component-runtime]="/data/cubelet/root/component_versions/cube-shim/${component_version}/bin/cube-runtime"
     [codec]="/usr/local/bin/clawbox-zstd-page-snapshot"
   )
   builds[component-shim]=${builds[shim]}
@@ -48,6 +49,11 @@ PY
   for key in cubelet shim runtime component-shim component-runtime; do
     [[ -x ${builds[$key]} && -x ${targets[$key]} ]] || { echo "missing built/installed $key" >&2; exit 1; }
   done
+  grep -a -q 'memory.restore_lineage_load' "${builds[shim]}" &&
+    grep -a -q 'memory.lineage_parent_rejected' "${builds[shim]}" || {
+      echo 'built shim lacks cross-tier RAM lineage restore support' >&2
+      exit 1
+    }
   install -d -m 700 /data/clawbox-backend-backups
   backup=$(mktemp -d /data/clawbox-backend-backups/lifecycle-XXXXXXXX)
   bash "$project/scripts/build-zstd-page-snapshot.sh" "$backup/codec-new"
@@ -85,6 +91,22 @@ PY
     install -m 755 "${builds[$key]}" "${targets[$key]}.clawbox-new"
     mv -f "${targets[$key]}.clawbox-new" "${targets[$key]}"
   done
+  cmp -s "${targets[shim]}" "${targets[component-shim]}" || {
+    echo 'installed service and pinned template shims differ' >&2
+    false
+  }
+  cmp -s "${targets[runtime]}" "${targets[component-runtime]}" || {
+    echo 'installed service and pinned template runtimes differ' >&2
+    false
+  }
+  cmp -s "${builds[shim]}" "${targets[component-shim]}" || {
+    echo 'pinned template shim does not match the tested build' >&2
+    false
+  }
+  cmp -s "${builds[runtime]}" "${targets[component-runtime]}" || {
+    echo 'pinned template runtime does not match the tested build' >&2
+    false
+  }
   install -D -m 644 "$backup/proposed.conf" "$config"
   systemctl daemon-reload
   systemctl start cube-sandbox-cubelet.service
@@ -103,6 +125,11 @@ if [[ ${1:-} == --shim-only ]]; then
   [[ -x "$source_shim" && -x "$target_shim" && "$source_shim" != "$target_shim" && $(basename "$target_shim") == containerd-shim-cube-rs ]] || {
     echo 'supply distinct existing executable source and installed versioned Shim paths' >&2; exit 1;
   }
+  grep -a -q 'memory.restore_lineage_load' "$source_shim" &&
+    grep -a -q 'memory.lineage_parent_rejected' "$source_shim" || {
+      echo 'source shim lacks cross-tier RAM lineage restore support' >&2
+      exit 1
+    }
   install -d -m 700 /run/clawbox
   exec 9>/run/clawbox/base-cache.lock
   flock -n 9 || { echo 'experiment/cache maintenance is active; wait before installing' >&2; exit 1; }
@@ -123,6 +150,10 @@ PY
   cp -p "$target_shim" "$backup_dir/containerd-shim-cube-rs"
   install -m 755 "$source_shim" "$target_shim.clawbox-new"
   mv -f "$target_shim.clawbox-new" "$target_shim"
+  cmp -s "$source_shim" "$target_shim" || {
+    echo 'installed versioned Shim does not match the tested source Shim' >&2
+    exit 1
+  }
   sha256sum "$backup_dir/containerd-shim-cube-rs" "$target_shim"
   printf 'Installed Shim only; existing templates and other components preserved.\nBackup: %s\n' "$backup_dir/containerd-shim-cube-rs"
   printf 'Rollback on an idle, cache-disabled host: sudo bash scripts/install-incremental-cubesandbox.sh --shim-only %q %q\n' "$backup_dir/containerd-shim-cube-rs" "$target_shim"

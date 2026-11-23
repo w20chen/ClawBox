@@ -362,6 +362,13 @@ def doctor(profile: dict, *, warm: bool = False, current_images: bool = False) -
             checks.append((unit + " WARM root", lambda u=unit: service_setting(u, "CLAWBOX_WARM_SNAPSHOT_ROOT") == profile["warm_root"]))
         for key, value in (("CLAWBOX_KVM_DIRTY_TRACKING", "1"), ("CUBE_RESTORE_PRIVATE_COPY", "0")):
             checks.append((key, lambda k=key, v=value: service_setting("cube-sandbox-cubelet", k) == v))
+        from .component_identity import lifecycle_component_identity
+        def lifecycle_components_match() -> bool:
+            identity = lifecycle_component_identity()
+            if not identity["ok"]:
+                raise RuntimeError("; ".join(identity["errors"]))
+            return True
+        checks.append(("pinned and service lifecycle components match", lifecycle_components_match))
         checks.append(("WARM is tmpfs", lambda: command("findmnt", "-n", "-o", "FSTYPE", "-M", profile["warm_root"]) == "tmpfs"))
         checks.append(("WARM capacity", lambda: shutil.disk_usage(profile["warm_root"]).total
                        >= profile["warm_capacity_mib"] * 1024 * 1024))
