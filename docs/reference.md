@@ -895,6 +895,12 @@ Fields below are under baseline `execution` except the rows explicitly prefixed
 | `submission.poisson_arrival_window_seconds` | `null` | Positive explicit expected window; overrides the fraction |
 | `submission.session_arrival_offsets_seconds` | `null` | Explicit nondecreasing finite offsets, in seconds from arm start; one per offered session, with exactly one concurrency level. Overrides generated arrival times. Grouped rollouts of the same case must have identical offsets. Preserve each LS case's offset when removing BE for a no-BE reference. Changing offsets requires a new run ID; no host apply, image rebuild, or retraining. |
 | `control_timing_details` | `false` | Enable nested control spans, GC tracing, raw lifecycle dumps, duplicate payloads, and Runtime working-KB exports |
+| `runtime_trace_content_retention` | `failures` | `failures` keeps structured trace identities and measurements, failed/timeout Tool output, and content needed for replay completeness, but omits raw hook payloads, LLM messages/model bodies, and successful Tool output. `all` restores those bodies with the 64 MiB full-audit limits. Use a new run ID; no host apply, image rebuild, or retraining is required unless the packaged ClawTune source itself changed. |
+| `runtime_log_retention` | `failures` | On successful sessions, keep only whitelisted `host_kb_client_prediction` records in `sidecar-client-timing.jsonl`; omit full Agent stderr, sidecar, policy-SSH, gateway, and model-relay logs. Agent failure, replay invalidity, or any failed Tool call retains full Runtime logs. `all` retains them for every session. |
+| `retain_standalone_pmu_artifacts` | `false` | Do not write duplicate `pmu-profile-*.json` files. PMU profiles remain embedded in required cgroup-resource evidence. Set `true` only for compatibility or a directed PMU audit. |
+| `retain_tool_resource_timelines` | `false` | Omit per-poll Tool resource timelines after online observation/label construction. CPU and memory peaks, baseline/delta, PMU, sample count/quality, coverage, and execution identity remain. Set `true` only when raw points must be audited or labels must later be reconstructed from archived artifacts. |
+| `prediction_record_detail` | `compact` | `compact` retains prediction point values, source/fallback, reservation, actual/error/coverage, telemetry validity, identities, and hashes of the omitted full model structures. `all` retains repeated backend models and Runtime metadata. |
+| `memory_log_interval_seconds` | 10 | Interval for writing host resource/queue trend snapshots to the event stream. It does not change the 0.2-second internal sampler, peak calculation, admission/watermark control, or serving-simulator CPU feedback. |
 | `model_request_content_retention` | `failures` | `failures` keeps compact successful Model Gateway records and exact request/response content only for incomplete, errored, non-200, or undelivered requests. `all` retains exact content for every request for a full-audit run. The setting changes result retention only; use a new run ID. It requires no host apply, image rebuild, or retraining. |
 | `snapshot_page_profile` | `null` | Linux-only, root-only page-idle profiling for explicitly listed `case_ids`; keep disabled in throughput runs. `roles` selects Runtime and/or Tool, `interval_seconds` is the sampling-window width, and `max_windows_per_generation` is at most 65535. The metric is windows in which a present 4 KiB GPA page was referenced, not memory-instruction count. Exact per-page counts are compressed under `page-access/`; aggregate window records remain small. Requires `CONFIG_IDLE_PAGE_TRACKING=y`, readable `/proc/<pid>/pagemap`, incremental-COW lazy restore, and a new run ID; no image rebuild or retraining. |
 | `snapshot_page_profile.force_model_wait_checkpoints` | `false` | Profiling-only control that checkpoints the selected single-session case at real simulator-backed model waits through the ordinary pair lifecycle. `checkpoint_tiers` supplies the finite per-generation `warm`/`cold` sequence; after it is exhausted, only normal policy checkpoints remain. This changes snapshot timing and is not throughput evidence. |
@@ -918,9 +924,10 @@ value changes require a new run ID, with no host apply, image rebuild, or
 retraining. Host-live requires OpenClaw and an explicit validated seed directory
 in `evidence.prediction_artifact`. The host endpoint uses the existing configured
 policy listener and pair credentials; no guest scope-selection option exists.
-With `host-live`, default logging includes `host_kb_client_prediction` records in
-the collected Runtime `sidecar.log`. Durations use seconds and include the
-client request/response path; see [results](results.md) for filtering and scope.
+With `host-live`, default logging filters `host_kb_client_prediction` records
+into `openclaw/SESSION/sidecar-client-timing.jsonl`; full `sidecar.log` is kept
+only for failed sessions or `runtime_log_retention: all`. Durations use seconds
+and include the client request/response path; see [results](results.md) for scope.
 This launcher instrumentation needs a new run to collect data, with no host
 apply, image rebuild, or retraining.
 
@@ -1183,12 +1190,15 @@ matching qualification. These settings alone require no VM image rebuild, host
 apply or ClawTune retraining. A changed Runtime/Tool environment follows the
 existing image and qualification rules. Keep original traces and prior runs.
 
-`measurement.memory_sample_interval_seconds` defaults to 0.2,
+`measurement.memory_sample_interval_seconds` defaults to 0.2 and
+`execution.memory_log_interval_seconds` defaults to 10,
 `stabilization_seconds` to 1, and `observe_predictions` to `false`.
 The sampler targets this start-to-start interval and skips missed ticks instead
 of issuing catch-up bursts. Core memory readings remain on the sampler thread;
 rich queue, filesystem, CPU and policy reporting runs in a bounded latest-only
-worker so it cannot delay the next reading. C2 maintenance runs in its own
+worker so it cannot delay the next reading. Only one trend record per log
+interval is persisted; peak accounting and serving-simulator feedback continue
+at the sampler interval. C2 maintenance runs in its own
 serial loop at the same interval; B uses its independent
 `tool_call_cpu_poll_interval_seconds` (default 0.25 seconds). Resource records include observation times,
 report coalescing and cached-demand age; see [result interpretation](results.md).

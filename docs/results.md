@@ -55,7 +55,7 @@ pages; use PSS/USS when measuring physical process-family memory. Bridge
 include worker-process RSS, CPU time, and thread count; these include the rest of
 the worker and must not be described as isolated KB consumption. `seed_file_bytes`
 and `journal_bytes` describe serialized storage, not resident Python memory.
-Runtime `openclaw/SESSION/sidecar.log` contains compact
+Runtime `openclaw/SESSION/sidecar-client-timing.jsonl` contains compact
 `host_kb_client_prediction` JSON records at default logging. For successful host
 round trips, select `status: ok` and `remote_prediction: true`; `seconds` covers
 the Runtime predictor invocation, including request preparation, transport,
@@ -93,11 +93,17 @@ final-response receipt alone does not establish a validated successful task.
 `execution.control_timing_details` defaults to `false`. Normal runs retain:
 
 - Task traces, results, errors, execution IDs, and final validation.
-- Required Tool resource/PMU collection and periodic host memory samples.
+- Required Tool resource/PMU aggregates and 10-second host memory/queue trends;
+  internal high-frequency samples remain active but are not archived.
 - Compact callback timings, queue-wait totals, and lifecycle memory totals.
 - VM-create request and ownership-journal timing spans.
 - Compact successful Model Gateway records. Exact request/response content is
   retained for failed requests and separate replay-rejection evidence.
+- Structured Runtime trace identities and failed/timeout Tool output, without
+  successful LLM/Tool bodies or raw hook payloads.
+- `sidecar-client-timing.jsonl` with compact host-KB prediction latency. Full
+  Runtime logs are retained automatically for Agent failures, invalid replay,
+  or sessions with failed Tool calls.
 
 Set the field to `true` for a diagnostic run to add nested control spans,
 GC intervals, raw lifecycle cgroup dumps, duplicate model/prediction event
@@ -110,6 +116,18 @@ gateway always retains exact content in memory for replay matching and retry
 handling. Set the field to `all` only for a full conversation audit; this adds
 exact successful request and response bodies to the per-session gateway file
 and arm result without changing replay behavior or prediction.
+
+`execution.runtime_trace_content_retention` and
+`execution.runtime_log_retention` also default to `failures`; set either to
+`all` for a full successful-session audit. `execution.retain_standalone_pmu_artifacts`
+defaults to `false` because the same PMU profile remains embedded in
+cgroup-resource evidence. `execution.retain_tool_resource_timelines` also
+defaults to `false`, and `execution.prediction_record_detail` defaults to
+`compact`: raw per-poll timelines and repeated full prediction models/commands
+are replaced by aggregates, analysis-facing values, and payload hashes. These
+retention changes require a new run ID, not a
+host apply, image rebuild, or retraining. If the packaged ClawTune source itself
+changes, rebuild the corresponding Runtime package/template before the run.
 
 ## Tool preparation and admission
 

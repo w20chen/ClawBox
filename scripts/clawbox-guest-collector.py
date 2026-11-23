@@ -200,7 +200,9 @@ class CollectorService:
         execution_id = _safe_execution_id(request.get("execution_id"))
         profile = self._pmu.finish(execution_id)
         artifact_path = self._artifact_root / f"pmu-profile-{execution_id}.json"
-        written = write_pmu_profile(artifact_path, profile)
+        written = False
+        if os.environ.get("CLAWBOX_RETAIN_PMU_ARTIFACTS", "0") == "1":
+            written = write_pmu_profile(artifact_path, profile)
         self._pmu.take(execution_id)
         return {
             "ok": True,

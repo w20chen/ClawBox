@@ -761,7 +761,6 @@ func writeResourceArtifact(execID string, stats resourceStats, traceDir string) 
 		"memory_measurement":         stats.MemoryMeasurement,
 		"memory_environment_id":      stats.MemoryEnvironmentID,
 		"memory_eligible":            stats.MemoryEligible,
-		"memory_timeline":            stats.MemoryTimeline,
 		"memory_unavailable_reason":  nilIfEmpty(stats.MemoryUnavailableReason),
 		"disk_source":                stats.DiskSource,
 		"network_source":             stats.NetworkSource,
@@ -772,6 +771,12 @@ func writeResourceArtifact(execID string, stats resourceStats, traceDir string) 
 		"collector_errors":           stats.CollectorErrors,
 		"pmu":                        stats.PMUProfile,
 		"independence":               "independent cgroup/procfs resource accounting; not eBPF clause telemetry",
+	}
+	// The timeline has already been consumed to build the online-learning
+	// observation before this artifact is written. Normal runs retain only its
+	// aggregates; explicit audit runs can keep the raw per-poll points.
+	if os.Getenv("CLAWBOX_RETAIN_RESOURCE_TIMELINES") == "1" {
+		artifact["memory_timeline"] = stats.MemoryTimeline
 	}
 	payload, err := json.Marshal(artifact)
 	if err != nil {

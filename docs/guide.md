@@ -609,6 +609,34 @@ Keep `execution.control_timing_details: false` for normal throughput runs.
 Required traces, errors, resource measurements, and compact timings remain
 enabled; expensive diagnostic detail is opt-in.
 
+Normal Full experiments should also keep the content and Runtime-log defaults:
+
+```yaml
+execution:
+  runtime_trace_content_retention: failures
+  runtime_log_retention: failures
+  retain_standalone_pmu_artifacts: false
+  retain_tool_resource_timelines: false
+  prediction_record_detail: compact
+  memory_log_interval_seconds: 10
+```
+
+This retains structured span identities, scheduling/admission evidence,
+cgroup-resource evidence with embedded PMU data, replay-completeness fields,
+failed/timeout Tool output, 10-second host resource/queue trends, prediction
+values/errors/coverage/provenance, and compact host-KB client timing. It omits raw hook
+payloads, complete successful LLM and Tool bodies, duplicate standalone PMU
+JSON, per-poll Tool timelines, repeated full prediction models/commands, and
+full logs from successful Runtime sessions. The internal 0.2-second sampler
+still drives peaks, scheduling, watermarks, and simulator feedback. Agent failure, replay
+invalidity, or a failed Tool call retains the full Runtime logs automatically.
+For a directed full audit, set both retention fields to `all`,
+`retain_tool_resource_timelines: true`, and `prediction_record_detail: all`.
+Changing these
+settings requires a new run ID, but no host apply, image rebuild, or retraining;
+rebuild the Runtime package/template only when its packaged ClawTune source was
+changed.
+
 Keep `execution.model_request_content_retention: failures` for normal runs.
 The Model Gateway still uses complete requests and responses in memory, while
 successful result records retain only fingerprints, replay indices, timing,

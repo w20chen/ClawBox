@@ -64,7 +64,7 @@ from .policy import PolicyCoordinator, PolicyEventExecutor, PressureReclaimRejec
 from .congestion import locate_cgroup
 from .control_timing import monitor_gc, span, timed_lock, trace_callback, trace_scope, operation, timing_details, worker_cyclic_gc
 from .pressure import PressureControl
-from .prediction_records import PredictionRecordBuffer
+from .prediction_records import PredictionRecordBuffer, compact_prediction_records
 from .priority import PriorityDomain, tool_call_cpu_applies
 from .spec_types import RuntimeControl
 from .snapshot_pool import WarmCapacityError, WarmSnapshotPool
@@ -2670,11 +2670,23 @@ class ExperimentWorker:
                 cpu_unavailable_reason = str(exc)
         memory_sample_reporter = None
         if arm.resources.local_memory_cgroup:
+            last_memory_log_monotonic_s = float("-inf")
+
             def publish_memory_sample(payload: object) -> None:
+                nonlocal last_memory_log_monotonic_s
                 observation, memory_by_domain = payload
                 used = observation['local_used_bytes']
                 available = observation['host_available_bytes']
-                pool = snapshot_pool.usage_snapshot()
+                sample_monotonic_s = observation['observation_end_monotonic_s']
+                log_sample = (
+                    sample_monotonic_s - last_memory_log_monotonic_s
+                    >= arm.execution.memory_log_interval_seconds
+                )
+                # The sampler and peak accounting still run at the configured
+                # high frequency. If no consumer needs this particular point,
+                # avoid the extra snapshots and JSON construction entirely.
+                if not log_sample and self.serving_sim is None:
+                    return
                 queues = aggregate_admission_queue_snapshots(
                     domains, blocking=False,
                 )
@@ -2683,61 +2695,65 @@ class ExperimentWorker:
                     "measurement": "unavailable",
                     "reason": cpu_unavailable_reason,
                 }
-                warm_physical = None
-                if arm.resources.warm_memory_capacity_mib and arm.resources.warm_snapshot_root:
-                    stat = os.statvfs(arm.resources.warm_snapshot_root)
-                    warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
-                events.write({
-                    "event": "memory_sample", "local_used_bytes": used,
-                    "observation_start_monotonic_s": observation['observation_start_monotonic_s'],
-                    "observation_end_monotonic_s": observation['observation_end_monotonic_s'],
-                    "queue_activity_snapshot": activity,
-                    "admission_queue_snapshot": queues,
-                    "policy_event_executor": policy_events.metrics(),
-                    "cgroup_memory": cgroup_memory_evidence(Path(arm.resources.local_memory_cgroup)),
-                    "numa_residency": observation.get('numa_residency'),
-                    "combined_live_used_bytes": observation.get('combined_live_used_bytes', used),
-                    "host_available_bytes": available,
-                    "host_used_bytes": sampler.host_mem_total - available,
-                    "host_used_delta_bytes": (
-                        sampler.host_mem_total - available
-                        - sampler.host_baseline_used
-                    ),
-                    "shared_live_used_bytes": observation.get('shared_live_used_bytes', 0),
-                    "warm_allocated_bytes": warm_physical,
-                    "warm_reserved_bytes": pool["reserved_bytes"],
-                    "warm_committed_bytes": pool["committed_bytes"],
-                    "warm_unreserved_growth_bytes": pool[
-                        "unreserved_owned_growth_bytes"
-                    ],
-                    "warm_unreserved_growth_events": pool[
-                        "unreserved_owned_growth_events"
-                    ],
-                    "warm_external_allocated_bytes": pool["external_warm_bytes"],
-                    "shared_external_initial_live_bytes": pool["external_shared_live_bytes"],
-                    "shared_pool_external_occupied_bytes": pool["external_occupied_bytes"],
-                    "shared_borrow_reserved_bytes": pool["borrowed_bytes"],
-                    "compute_pressure": placement.sample(
-                        memory_by_domain=memory_by_domain, queue_by_domain=queues['per_domain'],
-                        blocking=False,
-                    ) if placement is not None else None,
-                    **({'peer_storage_sample': peer_store.storage_sample(),
-                        'peer_cpu': peer_cpu.sample()} if peer_enabled else {}),
-                    "host_knowledge_process": self.host_knowledge.process_sample() if self.host_knowledge else None,
-                    "cgroup_cpu": cpu,
-                    "cpu_qos_usage": (
-                        self._priority_domain.cpu_qos_usage_sampler.sample()
-                        if self._priority_domain is not None
-                        and self._priority_domain.cpu_qos_usage_sampler is not None
-                        else None
-                    ),
-                    "observation_age_seconds": max(0., time.monotonic()-observation['observation_start_monotonic_s']),
-                })
+                if log_sample:
+                    last_memory_log_monotonic_s = sample_monotonic_s
+                    pool = snapshot_pool.usage_snapshot()
+                    warm_physical = None
+                    if arm.resources.warm_memory_capacity_mib and arm.resources.warm_snapshot_root:
+                        stat = os.statvfs(arm.resources.warm_snapshot_root)
+                        warm_physical = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+                    events.write({
+                        "event": "memory_sample", "local_used_bytes": used,
+                        "observation_start_monotonic_s": observation['observation_start_monotonic_s'],
+                        "observation_end_monotonic_s": sample_monotonic_s,
+                        "sample_log_interval_seconds": arm.execution.memory_log_interval_seconds,
+                        "queue_activity_snapshot": activity,
+                        "admission_queue_snapshot": queues,
+                        "policy_event_executor": policy_events.metrics(),
+                        "cgroup_memory": cgroup_memory_evidence(Path(arm.resources.local_memory_cgroup)),
+                        "numa_residency": observation.get('numa_residency'),
+                        "combined_live_used_bytes": observation.get('combined_live_used_bytes', used),
+                        "host_available_bytes": available,
+                        "host_used_bytes": sampler.host_mem_total - available,
+                        "host_used_delta_bytes": (
+                            sampler.host_mem_total - available
+                            - sampler.host_baseline_used
+                        ),
+                        "shared_live_used_bytes": observation.get('shared_live_used_bytes', 0),
+                        "warm_allocated_bytes": warm_physical,
+                        "warm_reserved_bytes": pool["reserved_bytes"],
+                        "warm_committed_bytes": pool["committed_bytes"],
+                        "warm_unreserved_growth_bytes": pool[
+                            "unreserved_owned_growth_bytes"
+                        ],
+                        "warm_unreserved_growth_events": pool[
+                            "unreserved_owned_growth_events"
+                        ],
+                        "warm_external_allocated_bytes": pool["external_warm_bytes"],
+                        "shared_external_initial_live_bytes": pool["external_shared_live_bytes"],
+                        "shared_pool_external_occupied_bytes": pool["external_occupied_bytes"],
+                        "shared_borrow_reserved_bytes": pool["borrowed_bytes"],
+                        "compute_pressure": placement.sample(
+                            memory_by_domain=memory_by_domain, queue_by_domain=queues['per_domain'],
+                            blocking=False,
+                        ) if placement is not None else None,
+                        **({'peer_storage_sample': peer_store.storage_sample(),
+                            'peer_cpu': peer_cpu.sample()} if peer_enabled else {}),
+                        "host_knowledge_process": self.host_knowledge.process_sample() if self.host_knowledge else None,
+                        "cgroup_cpu": cpu,
+                        "cpu_qos_usage": (
+                            self._priority_domain.cpu_qos_usage_sampler.sample()
+                            if self._priority_domain is not None
+                            and self._priority_domain.cpu_qos_usage_sampler is not None
+                            else None
+                        ),
+                        "observation_age_seconds": max(0., time.monotonic()-observation['observation_start_monotonic_s']),
+                    })
                 if self.serving_sim is not None:
                     self.serving_sim.publish_cpu_feedback(
                         run_id=self.run_id, attempt_id=self.attempt_id,
                         arm_id=arm.arm_id,
-                        sample_monotonic_s=observation['observation_end_monotonic_s'],
+                        sample_monotonic_s=sample_monotonic_s,
                         cpu=cpu, activity=activity, admission=queues,
                     )
 
@@ -4609,7 +4625,17 @@ class ExperimentWorker:
             snapshot_ready=(snapshot_preparation.checkpoint_ready
                             if snapshot_preparation is not None else None),
         )
-        kb_env = {'CLAWBOX_RETAIN_CLAUSE_TELEMETRY': '1' if arm.execution.retain_clause_telemetry_artifacts else '0'}
+        kb_env = {
+            'CLAWBOX_RETAIN_CLAUSE_TELEMETRY': (
+                '1' if arm.execution.retain_clause_telemetry_artifacts else '0'
+            ),
+            'CLAWBOX_RETAIN_PMU_ARTIFACTS': (
+                '1' if arm.execution.retain_standalone_pmu_artifacts else '0'
+            ),
+            'CLAWBOX_RETAIN_RESOURCE_TIMELINES': (
+                '1' if arm.execution.retain_tool_resource_timelines else '0'
+            ),
+        }
         try:
             if arm.resources.prediction_mode == 'host-live':
                 self.host_knowledge.reserve(session_id, arm.case.repository or arm.case.case_id)
@@ -4622,6 +4648,8 @@ class ExperimentWorker:
                     'CLAWTUNE_HOST_KB_TIMEOUT_SECONDS': str(arm.execution.kb_http_timeout_seconds),
                     'CLAWBOX_KB_OBSERVATION_RETRIES': str(arm.execution.kb_observation_retries),
                     'CLAWBOX_RETAIN_CLAUSE_TELEMETRY': '1' if arm.execution.retain_clause_telemetry_artifacts else '0',
+                    'CLAWBOX_RETAIN_PMU_ARTIFACTS': '1' if arm.execution.retain_standalone_pmu_artifacts else '0',
+                    'CLAWBOX_RETAIN_RESOURCE_TIMELINES': '1' if arm.execution.retain_tool_resource_timelines else '0',
                 }
                 lifecycle.env_vars.update(kb_env)
                 runtime_lifecycle.env_vars.update(kb_env)
@@ -4865,6 +4893,7 @@ class ExperimentWorker:
             model_steps = 0
             tool_latencies: list[float] = []
             prediction_records: list[dict[str, Any]] = []
+            session_prediction_provenance: dict[str, Any] | None = None
             prediction_buffer = PredictionRecordBuffer()
             observed_by_execution: dict[str, Any] = {}
             trace_writer = ClawTuneTraceWriter(
@@ -5635,6 +5664,13 @@ class ExperimentWorker:
                                 "subagent_max_spawn_depth": arm.agent.subagent_max_spawn_depth,
                                 "kb_http_timeout_seconds": arm.execution.kb_http_timeout_seconds,
                                 "repository": arm.case.repository or arm.case.case_id,
+                                "runtime_trace_content_retention": (
+                                    arm.execution.runtime_trace_content_retention
+                                ),
+                                "runtime_log_retention": arm.execution.runtime_log_retention,
+                                "retain_tool_resource_timelines": (
+                                    arm.execution.retain_tool_resource_timelines
+                                ),
                             },
                             ssh=ssh_config,
                             policy_control=policy_session, runtime_executor=runtime_executor,
@@ -5719,6 +5755,14 @@ class ExperimentWorker:
                                     if execution_id in predicted_execution_ids
                                 },
                             )
+                            session_prediction_provenance = (
+                                prediction_provider.provenance(prediction_records)
+                                if prediction_provider is not None else None
+                            )
+                            if arm.execution.prediction_record_detail == "compact":
+                                prediction_records = compact_prediction_records(
+                                    prediction_records
+                                )
                     events.write({
                         "event": "native_tool_artifacts_collected",
                         "session_id": session_id,
@@ -5877,8 +5921,7 @@ class ExperimentWorker:
                     if gateway_session is not None else None
                 ),
                 "prediction_provenance": (
-                    prediction_provider.provenance(prediction_records)
-                    if prediction_provider is not None else None
+                    session_prediction_provenance
                 ),
                 **({"model_gateway_records": (
                         gateway_session.records() if gateway_session is not None else []),
@@ -5915,8 +5958,7 @@ class ExperimentWorker:
                     "tool_latencies": tool_latencies,
                     "prediction_records": prediction_records,
                     "prediction_provenance": (
-                        prediction_provider.provenance(prediction_records)
-                        if prediction_provider is not None else None
+                        session_prediction_provenance
                     ),
                     "model_gateway_records": (
                         gateway_session.records() if gateway_session is not None else []

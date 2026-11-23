@@ -4,6 +4,7 @@ from __future__ import annotations
 from .control_timing import span
 
 import base64
+import hashlib
 import io
 import json
 import os
@@ -29,6 +30,44 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TOOL_VM_TOOLS = ("exec", "process", "read", "write", "edit", "apply_patch")
 RUNTIME_LOCAL_TOOLS = ("web_search", "web_fetch", "memory_search", "memory_get")
 SUBAGENT_TOOLS = ("sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "subagents")
+
+
+def compact_policy_control_records(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove payloads duplicated by prediction and command evidence.
+
+    The exact command digest, prediction receipt, routing identity, admission,
+    completion, and timing remain available for native joins and later
+    analysis. A digest of the full prediction proves which runtime response
+    was used without archiving the repeated model internals twice per call.
+    """
+    compacted: list[dict[str, Any]] = []
+    for record in records:
+        archived = dict(record)
+        for section in ("request", "completion"):
+            value = archived.get(section)
+            if not isinstance(value, dict):
+                continue
+            item = dict(value)
+            command = item.pop("command", None)
+            if isinstance(command, str):
+                item["command_bytes"] = len(command.encode("utf-8"))
+            prediction = item.pop("prediction", None)
+            if isinstance(prediction, dict):
+                encoded = json.dumps(
+                    prediction, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+                item["prediction_sha256"] = hashlib.sha256(encoded).hexdigest()
+                for name in (
+                    "raw_command_sha256", "canonical_prediction_key",
+                    "prediction_source", "fallback_level", "kb_sha256",
+                ):
+                    if name in prediction:
+                        item[name] = prediction[name]
+            archived[section] = item
+        compacted.append(archived)
+    return compacted
 
 
 def replay_uses_background_execution(model_gateway: Any | None) -> bool:
@@ -416,6 +455,23 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     tool_timeout_seconds = int(configuration.get("command_timeout_seconds") or 300)
     if tool_timeout_seconds < 1:
         raise ValueError("command_timeout_seconds must be positive")
+    trace_content_retention = configuration.get(
+        "runtime_trace_content_retention", "failures",
+    )
+    if trace_content_retention not in {"failures", "all"}:
+        raise ValueError("runtime_trace_content_retention must be failures or all")
+    runtime_log_retention = configuration.get("runtime_log_retention", "failures")
+    if runtime_log_retention not in {"failures", "all"}:
+        raise ValueError("runtime_log_retention must be failures or all")
+    retain_resource_timelines = configuration.get(
+        "retain_tool_resource_timelines", False,
+    )
+    if not isinstance(retain_resource_timelines, bool):
+        raise ValueError("retain_tool_resource_timelines must be a boolean")
+    full_trace_content = trace_content_retention == "all"
+    trace_message_limit = 67_108_864 if full_trace_content else 131_072
+    trace_string_limit = 67_108_864 if full_trace_content else 16_384
+    trace_tool_output_limit = 67_108_864 if full_trace_content else 65_536
     startup_value = configuration.get("runtime_startup_timeout_seconds", 60)
     if (isinstance(startup_value, bool) or not isinstance(startup_value, int)
             or not 1 <= startup_value <= 3600):
@@ -540,7 +596,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
 
     def invoke(args: list[str], *, input_value: str | None = None,
                pid_file: str | None = None,
-               startup_stage: str | None = None) -> CommandResult:
+               startup_stage: str | None = None,
+               allow_failure: bool = False) -> CommandResult:
         if input_value is not None and pid_file is not None:
             raise ValueError("pid_file cannot be combined with stdin input")
         argv = " ".join(
@@ -566,7 +623,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                 startup_stage, started,
                 status="ok" if result.exit_code == 0 else "error",
             )
-        if result.exit_code:
+        if result.exit_code and not allow_failure:
             raise RuntimeError(f"OpenClaw Runtime VM command failed: {result.stderr[-2000:]}")
         return result
 
@@ -660,7 +717,11 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + "CLAWTUNE_TOOL_RESOURCE_MEMORY_MEASUREMENT=cgroup_v2_environment_union_v1 "
         + f"CLAWTUNE_REPO_KEY={shlex.quote(repository)} "
         + f"CLAWTUNE_TOOL_RESOURCE_REPO={shlex.quote(repository)} "
-        + "CLAWTUNE_TRACE_MAX_MESSAGES_BYTES=67108864 "
+        + f"CLAWTUNE_TRACE_INCLUDE_LLM_MESSAGES={'true' if full_trace_content else 'false'} "
+        + f"CLAWTUNE_TRACE_INCLUDE_MODEL_OUTPUTS={'true' if full_trace_content else 'false'} "
+        + f"CLAWTUNE_TRACE_INCLUDE_RESOURCE_TIMELINE={'true' if retain_resource_timelines else 'false'} "
+        + f"CLAWTUNE_TRACE_TOOL_OUTPUT_RETENTION={'all' if full_trace_content else 'failures'} "
+        + f"CLAWTUNE_TRACE_MAX_MESSAGES_BYTES={trace_message_limit} "
         + f"CLAWTUNE_LLM_UPSTREAM_BASE_URL={shlex.quote(sidecar_upstream_url)} "
         + f"CLAWTUNE_LLM_UPSTREAM_API_KEY=\"${{{upstream_key_env}}}\" "
         + f"CLAWTUNE_LLM_PROXY_EXPOSE_MODEL={shlex.quote(openclaw_model)} "
@@ -823,12 +884,18 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "instrumentTools": list(TOOL_VM_TOOLS),
             "enableCgroup": False, "enableAffinity": False, "enableNuma": False,
             "autoStartSidecar": False, "securityBoundaryAccepted": True,
-            "trace": {"schema_version": 6, "include_raw_events": True,
-                      "include_llm_messages": True, "include_tool_outputs": True,
+            "trace": {"schema_version": 6,
+                      "include_raw_events": full_trace_content,
+                      "include_llm_messages": full_trace_content,
+                      "include_model_outputs": full_trace_content,
+                      "include_tool_outputs": True,
+                      "tool_output_retention": (
+                          "all" if full_trace_content else "failures"
+                      ),
                       "redact_sensitive_data": False, "flush_span_start": True,
-                      "max_messages_bytes": 67108864,
-                      "max_string_bytes": 67108864,
-                      "max_tool_output_bytes": 67108864,
+                      "max_messages_bytes": trace_message_limit,
+                      "max_string_bytes": trace_string_limit,
+                      "max_tool_output_bytes": trace_tool_output_limit,
                       "trace_dir": trace_dir},
         }}}},
     }
@@ -896,7 +963,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     if resident_poll is None:
         if timeout_seconds is None:
             raise ValueError("unbounded agent execution requires detached Runtime polling")
-        result = invoke(agent_args, pid_file=agent_pid_file)
+        result = invoke(agent_args, pid_file=agent_pid_file, allow_failure=True)
         final_response_observed_unix_s = time.time()
         final_response_observed_monotonic_s = time.monotonic()
     else:
@@ -981,42 +1048,42 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             exit_code, stdout_result.stdout, stderr_result.stdout,
             max(0.0, time.monotonic() - agent_started),
         )
-        if result.exit_code:
-            # Preserve the complete Agent streams before the owning VM is
-            # destroyed.  Tail-only errors routinely hide the first fatal
-            # line behind verbose ClawTune prediction diagnostics.
-            failure_home = output_dir / "openclaw" / session_id
-            failure_home.mkdir(parents=True, exist_ok=True)
-            (failure_home / "agent.stdout.log").write_text(
-                result.stdout, encoding="utf-8",
+    if result.exit_code:
+        # Preserve complete Runtime diagnostics before the owning VM is
+        # destroyed. Tail-only errors routinely hide the first fatal line.
+        failure_home = output_dir / "openclaw" / session_id
+        failure_home.mkdir(parents=True, exist_ok=True)
+        (failure_home / "agent.stdout.log").write_text(result.stdout, encoding="utf-8")
+        (failure_home / "agent.stderr.log").write_text(result.stderr, encoding="utf-8")
+        failure_logs = {
+            "policy-ssh.jsonl": policy_audit_file,
+            "sidecar.log": home + "/logs/sidecar.log",
+        }
+        if checkpoint_relay:
+            failure_logs["model-relay.log"] = home + "/logs/model-relay.log"
+        if subagents:
+            failure_logs["gateway.log"] = home + "/logs/gateway.log"
+        for local_name, remote_path in failure_logs.items():
+            diagnostic = runtime_executor.execute(
+                prefix + f"cat {shlex.quote(remote_path)}", 30,
             )
-            (failure_home / "agent.stderr.log").write_text(
-                result.stderr, encoding="utf-8",
-            )
-            for local_name, remote_path in {
-                "policy-ssh.jsonl": policy_audit_file,
-                "sidecar.log": home + "/logs/sidecar.log",
-            }.items():
-                diagnostic = runtime_executor.execute(
-                    prefix + f"cat {shlex.quote(remote_path)}", 30,
+            if diagnostic.exit_code == 0:
+                (failure_home / local_name).write_text(
+                    diagnostic.stdout, encoding="utf-8",
                 )
-                if diagnostic.exit_code == 0:
-                    (failure_home / local_name).write_text(
-                        diagnostic.stdout, encoding="utf-8",
-                    )
-            (failure_home / "policy-control.json").write_text(
-                json.dumps(policy_control.records(), indent=2), encoding="utf-8",
-            )
-            excerpt = result.stderr[:2000]
-            if len(result.stderr) > 4000:
-                excerpt += "\n...[stderr middle omitted; full log preserved]...\n"
-            if len(result.stderr) > 2000:
-                excerpt += result.stderr[-2000:]
-            raise RuntimeError(
-                "OpenClaw Runtime VM command failed "
-                f"(exit {result.exit_code}; full log {failure_home / 'agent.stderr.log'}): "
-                + excerpt
-            )
+        (failure_home / "policy-control.json").write_text(
+            json.dumps(policy_control.records(), indent=2), encoding="utf-8",
+        )
+        excerpt = result.stderr[:2000]
+        if len(result.stderr) > 4000:
+            excerpt += "\n...[stderr middle omitted; full log preserved]...\n"
+        if len(result.stderr) > 2000:
+            excerpt += result.stderr[-2000:]
+        raise RuntimeError(
+            "OpenClaw Runtime VM command failed "
+            f"(exit {result.exit_code}; full log {failure_home / 'agent.stderr.log'}): "
+            + excerpt
+        )
     if subagents:
         initial_response = json.loads(result.stdout)
         if ('EMBEDDED FALLBACK:' in result.stderr
@@ -1106,15 +1173,31 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     tool_failures = (final_meta.get("toolSummary") or {}).get("failures")
     if isinstance(tool_failures, bool) or not isinstance(tool_failures, int):
         tool_failures = None
-    runtime_logs = {
-        "agent.stderr.log": agent_stderr_file,
-        "sidecar.log": home + "/logs/sidecar.log",
-        "policy-ssh.jsonl": policy_audit_file,
+    runtime_reported_failure = final_payload.get("status") in {
+        "error", "failed", "timeout", "cancelled",
     }
-    if subagents:
-        runtime_logs['gateway.log'] = home + '/logs/gateway.log'
-    if checkpoint_relay:
-        runtime_logs["model-relay.log"] = home + "/logs/model-relay.log"
+    retain_full_runtime_logs = (
+        runtime_log_retention == "all"
+        or replay_invalid
+        or runtime_reported_failure
+        or (tool_failures is not None and tool_failures > 0)
+    )
+    if retain_full_runtime_logs:
+        runtime_logs = {
+            "agent.stderr.log": agent_stderr_file,
+            "sidecar.log": home + "/logs/sidecar.log",
+            "policy-ssh.jsonl": policy_audit_file,
+        }
+        if subagents:
+            runtime_logs['gateway.log'] = home + '/logs/gateway.log'
+        if checkpoint_relay:
+            runtime_logs["model-relay.log"] = home + "/logs/model-relay.log"
+    else:
+        # The compact client-timing view is materialized while decoding; the
+        # complete successful sidecar log is never written to result storage.
+        runtime_logs = {
+            "sidecar-client-timing.jsonl": home + "/logs/sidecar.log",
+        }
     stop_helpers = (
         (f"if [ -s {shlex.quote(gateway_pid_file)} ]; then "
          f"kill -TERM $(cat {shlex.quote(gateway_pid_file)}) 2>/dev/null || true; fi; " if subagents else '')
@@ -1176,7 +1259,34 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                         )
                     content = source.read()
                     if remote_path in remote_logs:
-                        (host_home / remote_logs[remote_path]).write_bytes(content)
+                        local_name = remote_logs[remote_path]
+                        if local_name == "sidecar-client-timing.jsonl":
+                            fields = (
+                                "event", "event_id", "tool_call_id", "status",
+                                "remote_prediction", "error_type", "seconds",
+                            )
+                            compact_records = []
+                            for line in content.decode("utf-8", errors="replace").splitlines():
+                                try:
+                                    record = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue
+                                if (not isinstance(record, dict)
+                                        or record.get("event") != "host_kb_client_prediction"):
+                                    continue
+                                compact_records.append({
+                                    key: record[key] for key in fields if key in record
+                                })
+                            if compact_records:
+                                (host_home / local_name).write_text(
+                                    "".join(
+                                        json.dumps(item, separators=(",", ":")) + "\n"
+                                        for item in compact_records
+                                    ),
+                                    encoding="utf-8",
+                                )
+                        else:
+                            (host_home / local_name).write_bytes(content)
                         continue
                     if not remote_path.startswith(trace_prefix):
                         raise RuntimeError(
@@ -1210,6 +1320,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             - float(item["completion"]["execution_started_at"]))
         for item in agent_tool_completed
     ]
+    archived_control_records = compact_policy_control_records(control_records)
     return {"stdout": result.stdout, "stderr": result.stderr,
             "subagents_enabled": subagents,
             "final_response_observed_unix_s": final_response_observed_unix_s,
@@ -1220,8 +1331,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             "agent_pid_file": agent_pid_file,
             "checkpoint_model_relay": checkpoint_relay,
             "diagnostic_artifacts": diagnostic_artifacts,
+            "runtime_trace_content_retention": trace_content_retention,
+            "runtime_log_retention": runtime_log_retention,
+            "retained_full_runtime_logs": retain_full_runtime_logs,
             "finalization_stage_seconds": finalization_stages,
-            "runtime_traces": copied, "policy_control_records": control_records,
+            "runtime_traces": copied,
+            "policy_control_records": archived_control_records,
             "model_gateway_records": model_gateway.records() if model_gateway else [],
             "model_gateway_completeness": model_gateway.replay_completeness() if model_gateway else None,
             "agent_replay_invalid": replay_invalid,

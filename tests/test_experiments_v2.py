@@ -37,6 +37,13 @@ def test_explicit_null_disables_arm_deadline() -> None:
         ExecutionSpec(arm_timeout_seconds=None)
     assert ExecutionSpec().arm_timeout_seconds == 3600
     assert ExecutionSpec().arm_finalization_timeout_seconds == 300
+    assert ExecutionSpec().runtime_trace_content_retention == "failures"
+    assert ExecutionSpec().runtime_log_retention == "failures"
+    assert ExecutionSpec().retain_standalone_pmu_artifacts is False
+    assert ExecutionSpec().retain_tool_resource_timelines is False
+    assert ExecutionSpec().prediction_record_detail == "compact"
+    assert ExecutionSpec().memory_sample_interval_seconds == 0.2
+    assert ExecutionSpec().memory_log_interval_seconds == 10.0
     assert ExecutionSpec().model_request_content_retention == "failures"
     assert (
         ExecutionSpec(model_request_content_retention="all")
@@ -45,6 +52,26 @@ def test_explicit_null_disables_arm_deadline() -> None:
     )
     with pytest.raises(ValueError):
         ExecutionSpec(model_request_content_retention="successful")
+    full_audit = ExecutionSpec(
+        runtime_trace_content_retention="all",
+        runtime_log_retention="all",
+        retain_standalone_pmu_artifacts=True,
+        retain_tool_resource_timelines=True,
+        prediction_record_detail="all",
+    )
+    assert full_audit.runtime_trace_content_retention == "all"
+    assert full_audit.runtime_log_retention == "all"
+    assert full_audit.retain_standalone_pmu_artifacts is True
+    assert full_audit.retain_tool_resource_timelines is True
+    assert full_audit.prediction_record_detail == "all"
+    with pytest.raises(ValueError):
+        ExecutionSpec(runtime_trace_content_retention="successful")
+    with pytest.raises(ValueError):
+        ExecutionSpec(runtime_log_retention="none")
+    with pytest.raises(ValueError):
+        ExecutionSpec(prediction_record_detail="summary")
+    with pytest.raises(ValueError):
+        ExecutionSpec(memory_log_interval_seconds=0)
     with pytest.raises(ValueError):
         ExecutionSpec(arm_finalization_timeout_seconds=0)
 

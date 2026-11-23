@@ -88,6 +88,28 @@ func TestCollectorProcessTree(t *testing.T) {
 	if _, ok := artifact["independence"]; !ok {
 		t.Errorf("artifact missing independence statement: %s", raw)
 	}
+	if _, ok := artifact["memory_timeline"]; ok {
+		t.Errorf("compact artifact unexpectedly retained memory timeline: %s", raw)
+	}
+}
+
+func TestResourceArtifactTimelineRetentionIsExplicit(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAWBOX_RETAIN_RESOURCE_TIMELINES", "1")
+	stats := resourceStats{MemoryTimeline: [][2]float64{{1, 100}, {2, 150}}}
+	writeResourceArtifact("timeline-audit", stats, dir)
+	raw, err := os.ReadFile(filepath.Join(dir, "tool-resource", "cgroup-resource-timeline-audit.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifact map[string]any
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	timeline, ok := artifact["memory_timeline"].([]any)
+	if !ok || len(timeline) != 2 {
+		t.Fatalf("explicit audit did not retain timeline: %s", raw)
+	}
 }
 
 func TestGuestEnvironmentMemoryLabelAndOverlapGate(t *testing.T) {

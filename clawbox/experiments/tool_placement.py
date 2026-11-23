@@ -243,12 +243,12 @@ def run_four_replica_trial(*, client: Any, domain: Any, snapshot_id: str,
                   'host_reaped_monotonic_ns': ended, 'ssh_exit_code': child.returncode,
                   'transport_timed_out': timed_out}
         artifacts = {}
-        for name in (f'pmu-profile-{execution_id}.json', f'cgroup-resource-{execution_id}.json'):
-            raw = client.read_file(vm, '/var/lib/clawtune/artifacts/tool-resource/' + name)
-            (folder / name).write_text(raw, encoding='utf-8')
-            artifacts[name] = json.loads(raw)
-            if artifacts[name].get('execution_id') != execution_id:
-                raise RuntimeError(f'replica artifact identity mismatch: {name}')
+        name = f'cgroup-resource-{execution_id}.json'
+        raw = client.read_file(vm, '/var/lib/clawtune/artifacts/tool-resource/' + name)
+        (folder / name).write_text(raw, encoding='utf-8')
+        artifacts[name] = json.loads(raw)
+        if artifacts[name].get('execution_id') != execution_id:
+            raise RuntimeError(f'replica artifact identity mismatch: {name}')
         bridge_text = client.read_file(vm, '/var/lib/clawtune/artifacts/tool-bridge.jsonl')
         bridges = [json.loads(line) for line in bridge_text.splitlines() if line.strip()]
         exact = [b for b in bridges if b.get('execution_id') == execution_id]
@@ -256,7 +256,9 @@ def run_four_replica_trial(*, client: Any, domain: Any, snapshot_id: str,
             raise RuntimeError('replica bridge identity or command digest mismatch')
         _write_json(folder / 'bridge.json', exact[0])
         from clawtune_sidecar.monitoring.pmu import quality_gated_pmu_metrics
-        profile = artifacts[f'pmu-profile-{execution_id}.json']
+        profile = artifacts[f'cgroup-resource-{execution_id}.json'].get('pmu')
+        if not isinstance(profile, dict):
+            raise RuntimeError('replica cgroup artifact is missing embedded PMU evidence')
         if profile.get('execution_id') != execution_id:
             raise RuntimeError('replica PMU execution identity mismatch')
         metrics = quality_gated_pmu_metrics(profile)
@@ -294,16 +296,17 @@ def run_four_replica_trial(*, client: Any, domain: Any, snapshot_id: str,
             for channel in ('stdout', 'stderr'):
                 (folder/(channel+'.bin')).write_bytes(base64.b64decode(result.pop(channel+'_b64')))
             result.update(replica=folder.name, sandbox_id=client.sandbox_id(vm))
-            for name in ('pmu-profile', 'cgroup-resource'):
-                filename=f'{name}-{execution_id}.json'
-                raw=client.read_file(vm, '/var/lib/clawtune/artifacts/tool-resource/'+filename)
-                (folder/filename).write_text(raw, encoding='utf-8')
-                parsed=json.loads(raw)
-                if parsed.get('execution_id') != execution_id:
-                    raise RuntimeError('replica artifact execution identity mismatch')
-                if name=='pmu-profile':
-                    metrics=quality_gated_pmu_metrics(parsed)
-                    result.update(pmu_valid=bool(metrics['eligible'] and metrics.get('instructions')), pmu_metrics=metrics)
+            filename=f'cgroup-resource-{execution_id}.json'
+            raw=client.read_file(vm, '/var/lib/clawtune/artifacts/tool-resource/'+filename)
+            (folder/filename).write_text(raw, encoding='utf-8')
+            parsed=json.loads(raw)
+            if parsed.get('execution_id') != execution_id:
+                raise RuntimeError('replica artifact execution identity mismatch')
+            profile = parsed.get('pmu')
+            if not isinstance(profile, dict):
+                raise RuntimeError('replica cgroup artifact is missing embedded PMU evidence')
+            metrics=quality_gated_pmu_metrics(profile)
+            result.update(pmu_valid=bool(metrics['eligible'] and metrics.get('instructions')), pmu_metrics=metrics)
             lines=client.read_file(vm, '/var/lib/clawtune/artifacts/tool-bridge.jsonl').splitlines()
             exact=[r for line in lines if line.strip() for r in [json.loads(line)] if r.get('execution_id')==execution_id]
             if len(exact)!=1 or exact[0].get('command_sha256')!=command_sha256:

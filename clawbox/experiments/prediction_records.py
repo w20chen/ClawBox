@@ -1,7 +1,32 @@
 """Retain completed prediction evidence without a growing GC container graph."""
+import hashlib
 import json
 import zlib
 from threading import Lock
+
+
+_BULKY_PREDICTION_FIELDS = (
+    "models",
+    "call_prediction",
+    "session_runtime_metadata",
+)
+
+
+def compact_prediction_records(records):
+    """Retain analysis fields while replacing repeated model detail by digests."""
+    compacted = []
+    for record in records:
+        item = dict(record)
+        for name in _BULKY_PREDICTION_FIELDS:
+            value = item.pop(name, None)
+            if value is None:
+                continue
+            encoded = json.dumps(
+                value, sort_keys=True, separators=(",", ":"),
+            ).encode()
+            item[f"{name}_sha256"] = hashlib.sha256(encoded).hexdigest()
+        compacted.append(item)
+    return compacted
 
 
 class PredictionRecordBuffer:

@@ -1,4 +1,8 @@
-from clawbox.experiments.prediction_records import PredictionRecordBuffer
+from clawbox.experiments.prediction_records import (
+    PredictionRecordBuffer,
+    compact_prediction_records,
+)
+from clawbox.experiments.worker import summarize_tool_execution_observations
 
 
 def test_completed_evidence_is_encoded_and_materializes_in_admission_order():
@@ -32,3 +36,30 @@ def test_large_repeated_evidence_is_retained_compactly_without_truncation():
     records.complete('large', {'host_cgroup_execution_increment_bytes': None})
     assert len(records._rows[0]) < len(text) / 10
     assert records.records()[0]['evidence'] == text
+
+
+def test_archive_compaction_keeps_analysis_fields_and_digests_model_detail():
+    record = {
+        'execution_id': 'a',
+        'execution_scope': 'agent-tool',
+        'prediction_source': 'runtime_clawtune_immutable_kb',
+        'fallback_level': 'lattice',
+        'predicted_guest_memory_p90_mib': 12.0,
+        'actual_measured_memory_mib': 10.0,
+        'prediction_error_mib': 2.0,
+        'prediction_absolute_error_mib': 2.0,
+        'prediction_underestimate_mib': 0.0,
+        'prediction_covered_actual': True,
+        'telemetry_validity': 'valid',
+        'models': {'lattice': {'histogram': list(range(100))}},
+        'call_prediction': {'load': {'targets': {'memory': {'p90': 12}}}},
+        'session_runtime_metadata': {'prediction_receipt': 'receipt-a'},
+    }
+    compact = compact_prediction_records([record])
+    archived = compact[0]
+    for name in ('models', 'call_prediction', 'session_runtime_metadata'):
+        assert name not in archived
+        assert len(archived[f'{name}_sha256']) == 64
+    assert summarize_tool_execution_observations(compact) == (
+        summarize_tool_execution_observations([record])
+    )

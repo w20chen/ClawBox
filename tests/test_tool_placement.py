@@ -124,11 +124,12 @@ def test_trial_launches_four_together_and_keeps_raw_invalid_pmu(tmp_path, monkey
         def get_tcp_endpoint(self, vm, port):
             return CubeSandboxTcpEndpoint(vm, port, '127.0.0.1:12345')
         def read_file(self, vm, path):
-            if 'pmu-profile' in path:
-                return json.dumps(profile)
             if 'tool-bridge' in path:
                 return json.dumps({'execution_id': 'exec', 'command_sha256': 'a'*64, 'exit_code': 0}) + '\n'
-            return json.dumps({'execution_id': 'exec', 'memory_rss_peak_bytes': 123})
+            return json.dumps({
+                'execution_id': 'exec', 'memory_rss_peak_bytes': 123,
+                'pmu': profile,
+            })
         def kill_sandbox(self, vm):
             killed.append(vm)
     class Process:
@@ -159,4 +160,4 @@ def test_trial_launches_four_together_and_keeps_raw_invalid_pmu(tmp_path, monkey
     assert result['status'] == ('invalid' if multiplexed else 'measured')
     assert len(result['replicas']) == 4 and set(killed) == set(created)
     assert result['makespan_seconds'] >= result['host_launch_skew_seconds'] >= 0
-    assert len(list((tmp_path/'trial').glob('replica-*/pmu-profile-exec.json'))) == 4
+    assert len(list((tmp_path/'trial').glob('replica-*/cgroup-resource-exec.json'))) == 4

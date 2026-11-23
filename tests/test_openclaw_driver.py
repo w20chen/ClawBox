@@ -30,6 +30,7 @@ from clawbox.experiments.openclaw_driver import (
     run_openclaw,
     replay_uses_background_execution,
     split_native_ssh_target,
+    compact_policy_control_records,
 )
 from clawbox.replay.lifecycle import CommandResult
 from clawbox.experiments.runtime_model_relay import RUNTIME_MODEL_RELAY_SCRIPT
@@ -142,6 +143,41 @@ class PolicySession:
         return [{"request": {}, "admission": {}, "completion": {
             "execution_started_at": 10.0, "execution_completed_at": 10.25,
         }}]
+
+
+def test_policy_archive_omits_repeated_command_and_prediction_payloads() -> None:
+    prediction = {
+        "raw_command_sha256": "a" * 64,
+        "prediction_source": "runtime_clawtune_immutable_kb",
+        "call_prediction": {"contexts": ["large"] * 100},
+    }
+    request = {
+        "session_id": "session-a",
+        "execution_id": "exec-a",
+        "command_sha256": "a" * 64,
+        "command": "python -m pytest " * 100,
+        "prediction_receipt": "receipt-a",
+        "prediction": prediction,
+    }
+    records = compact_policy_control_records([{
+        "request": request,
+        "admission": {"decision": "ADMIT"},
+        "completion": {
+            **request,
+            "status": "COMPLETED",
+            "execution_started_at": 1.0,
+            "execution_completed_at": 2.0,
+        },
+        "timing": {"admission_service_seconds": 0.1},
+    }])
+    archived = records[0]
+    for section in ("request", "completion"):
+        assert "command" not in archived[section]
+        assert "prediction" not in archived[section]
+        assert archived[section]["command_bytes"] > 0
+        assert len(archived[section]["prediction_sha256"]) == 64
+        assert archived[section]["prediction_receipt"] == "receipt-a"
+    assert archived["completion"]["execution_completed_at"] == 2.0
 
 
 @pytest.mark.parametrize("auth_saved", [True, False])
@@ -298,7 +334,11 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
                         ("/state/clawtune/session-a/traces/native/trace.jsonl",
                          b'{"trace":true}\n'),
                         ("/state/openclaw/session-a/logs/sidecar.log",
-                         b"sidecar evidence\n"),
+                         b'not json\n'
+                         b'{"event":"host_kb_client_prediction","event_id":"e-1",'
+                         b'"tool_call_id":"t-1","status":"ok","seconds":0.25,'
+                         b'"large_detail":"omitted"}\n'
+                         b'{"event":"unrelated","payload":"omitted"}\n'),
                     ):
                         member = tarfile.TarInfo(name)
                         member.size = len(content)
@@ -352,7 +392,20 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
     assert clawtune["failOpen"] is False
     assert clawtune["trace"]["redact_sensitive_data"] is False
-    assert clawtune["trace"]["max_messages_bytes"] == 67108864
+    assert clawtune["trace"] | {"trace_dir": None} == {
+        "schema_version": 6,
+        "include_raw_events": False,
+        "include_llm_messages": False,
+        "include_model_outputs": False,
+        "include_tool_outputs": True,
+        "tool_output_retention": "failures",
+        "redact_sensitive_data": False,
+        "flush_span_start": True,
+        "max_messages_bytes": 131072,
+        "max_string_bytes": 16384,
+        "max_tool_output_bytes": 65536,
+        "trace_dir": None,
+    }
     assert clawtune["sandboxExecEnvelope"] is True
     assert clawtune["sandboxExecPredictionModel"] == "lattice"
     assert clawtune["instrumentTools"] == list(TOOL_VM_TOOLS)
@@ -378,6 +431,10 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWTUNE_TOOL_RESOURCE_EBPF_ENABLED=false" in "\n".join(commands)
     assert "CLAWTUNE_REPO_KEY=repo-a" in "\n".join(commands)
     assert "CLAWTUNE_TOOL_RESOURCE_REPO=repo-a" in "\n".join(commands)
+    assert "CLAWTUNE_TRACE_INCLUDE_LLM_MESSAGES=false" in "\n".join(commands)
+    assert "CLAWTUNE_TRACE_INCLUDE_MODEL_OUTPUTS=false" in "\n".join(commands)
+    assert "CLAWTUNE_TRACE_TOOL_OUTPUT_RETENTION=failures" in "\n".join(commands)
+    assert "CLAWTUNE_TRACE_MAX_MESSAGES_BYTES=131072" in "\n".join(commands)
     assert "timed-clawtune-sidecar.py" in "\n".join(commands)
     assert "sidecar-startup-timing.json" in "\n".join(commands)
     assert "CLAWTUNE_LLM_PROXY_EXPOSE_MODEL=test-model" in "\n".join(commands)
@@ -445,9 +502,87 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert len(startup_waits) == 1
     assert startup_begins[0] < startup_waits[0]
     assert startup_waits[0] == commands.index(agent_command)
-    assert (tmp_path / "openclaw/session-a/sidecar.log").read_text() == (
-        "sidecar evidence\n"
+    assert not (tmp_path / "openclaw/session-a/sidecar.log").exists()
+    assert not (tmp_path / "openclaw/session-a/agent.stderr.log").exists()
+    assert not (tmp_path / "openclaw/session-a/policy-ssh.jsonl").exists()
+    assert (tmp_path / "openclaw/session-a/sidecar-client-timing.jsonl").read_text() == (
+        '{"event":"host_kb_client_prediction","event_id":"e-1",'
+        '"tool_call_id":"t-1","status":"ok","seconds":0.25}\n'
     )
+    assert "CLAWTUNE_TRACE_INCLUDE_RESOURCE_TIMELINE=false" in "\n".join(commands)
+    assert result["retained_full_runtime_logs"] is False
+
+
+@pytest.mark.parametrize("runtime_log_retention,tool_failures", [
+    ("all", 0),
+    ("failures", 1),
+])
+def test_openclaw_full_audit_or_failure_retains_runtime_logs(
+    monkeypatch, tmp_path: Path, runtime_log_retention, tool_failures,
+) -> None:
+    commands: list[str] = []
+
+    class RuntimeExecutor:
+        def execute(self, command, _timeout):
+            commands.append(command)
+            if " agent " in command:
+                return CommandResult(
+                    0, json.dumps({
+                        "meta": {"toolSummary": {"failures": tool_failures}},
+                    }) + "\n", "", 0.1,
+                )
+            if "tar -cPzhf" in command:
+                stream = io.BytesIO()
+                with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+                    for name, content in (
+                        ("/state/openclaw/session-a/logs/agent.stderr", b"agent detail\n"),
+                        ("/state/openclaw/session-a/logs/sidecar.log", b"sidecar detail\n"),
+                        ("/state/openclaw/session-a/logs/policy-ssh.jsonl", b"policy detail\n"),
+                    ):
+                        member = tarfile.TarInfo(name)
+                        member.size = len(content)
+                        archive.addfile(member, io.BytesIO(content))
+                return CommandResult(
+                    0, base64.b64encode(stream.getvalue()).decode(), "", 0.01,
+                )
+            return CommandResult(0, "", "", 0.01)
+
+    monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
+    result = run_openclaw(
+        prompt="test", session_id="session-a",
+        configuration={
+            "base_url": "http://model.test/v1", "model": "test-model",
+            "runtime_trace_content_retention": "all",
+            "runtime_log_retention": runtime_log_retention,
+            "retain_tool_resource_timelines": True,
+        },
+        ssh=NativeSSHConfig(
+            target="executor@192.0.2.20:2222",
+            identity_private_key="PRIVATE KEY\n",
+            host_public_key="ssh-ed25519 AAAATEST",
+            sandbox_id="tool-a", host_key_alias="clawbox-tool-tool-a",
+        ),
+        policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
+        output_dir=tmp_path, timeout_seconds=60,
+    )
+
+    patch_command = next(command for command in commands if "set -eu; umask 077" in command)
+    encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
+    trace = json.loads(base64.b64decode(encoded))["plugins"]["entries"]["clawtune"]["config"]["trace"]
+    assert trace["include_raw_events"] is True
+    assert trace["include_llm_messages"] is True
+    assert trace["include_model_outputs"] is True
+    assert trace["tool_output_retention"] == "all"
+    assert trace["max_messages_bytes"] == 67108864
+    joined = "\n".join(commands)
+    assert "CLAWTUNE_TRACE_INCLUDE_LLM_MESSAGES=true" in joined
+    assert "CLAWTUNE_TRACE_INCLUDE_MODEL_OUTPUTS=true" in joined
+    assert "CLAWTUNE_TRACE_INCLUDE_RESOURCE_TIMELINE=true" in joined
+    assert "CLAWTUNE_TRACE_TOOL_OUTPUT_RETENTION=all" in joined
+    assert (tmp_path / "openclaw/session-a/agent.stderr.log").read_text() == "agent detail\n"
+    assert (tmp_path / "openclaw/session-a/sidecar.log").read_text() == "sidecar detail\n"
+    assert (tmp_path / "openclaw/session-a/policy-ssh.jsonl").read_text() == "policy detail\n"
+    assert result["retained_full_runtime_logs"] is True
 
 
 @pytest.mark.parametrize("timeout_seconds", [60, None])

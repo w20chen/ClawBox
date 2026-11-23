@@ -568,6 +568,22 @@ class ExecutionSpec(StrictFrozenModel):
     kb_processes: int = Field(default=4, ge=1, le=64)
     kb_queue_capacity: int = Field(default=1024, ge=1)
     control_timing_details: bool = False
+    # Normal experiments retain structured trace identities and failed
+    # payloads, but omit successful conversation/tool content. ``all`` is an
+    # explicit full-audit mode.
+    runtime_trace_content_retention: Literal["failures", "all"] = "failures"
+    # Successful sessions normally retain only compact sidecar client timing.
+    # Full Runtime stderr/relay/policy logs remain mandatory on failures.
+    runtime_log_retention: Literal["failures", "all"] = "failures"
+    # PMU data is embedded in cgroup-resource artifacts. The standalone copy
+    # is compatibility/diagnostic evidence and is disabled by default.
+    retain_standalone_pmu_artifacts: bool = False
+    # Keep per-poll resource samples in memory long enough to calculate
+    # labels, peaks, and quality, but omit them from normal result artifacts.
+    retain_tool_resource_timelines: bool = False
+    # Normal results retain analysis-facing prediction values and provenance,
+    # not the repeated full backend models used during admission.
+    prediction_record_detail: Literal["compact", "all"] = "compact"
     # The live gateway always retains request/response content in memory while
     # it is needed for replay identity and retries. Normal result artifacts
     # retain full content only for failed requests; ``all`` is an explicit
@@ -653,6 +669,9 @@ class ExecutionSpec(StrictFrozenModel):
         default=1.0, ge=1.0, le=100.0, allow_inf_nan=False,
     )
     memory_sample_interval_seconds: float = Field(default=0.2, gt=0)
+    # Independent of the internal sampler above. This controls only the
+    # resource trend snapshots written to events.jsonl.
+    memory_log_interval_seconds: float = Field(default=10.0, gt=0)
     stabilization_seconds: float = Field(default=1.0, ge=0)
     arrival_schedule: ArrivalSchedule = ArrivalSchedule.POISSON
     normal_arrival_std_seconds: float = Field(default=60., gt=0, allow_inf_nan=False)

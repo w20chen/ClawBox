@@ -214,10 +214,14 @@ class BoundaryStudy:
             if hashlib.sha256(stdin).hexdigest() != capture['stdin_sha256']:
                 raise ValueError('captured stdin digest mismatch')
             write(directory/'invocation.json', capture)
-            for name in ('pmu-profile', 'cgroup-resource'):
-                filename = f'{name}-{request["execution_id"]}.json'
-                raw = self.client.read_file(self.tool_vm(), '/var/lib/clawtune/artifacts/tool-resource/'+filename)
-                (directory/('parent-'+filename)).write_text(raw, encoding='utf-8')
+            filename = f'cgroup-resource-{request["execution_id"]}.json'
+            raw = self.client.read_file(
+                self.tool_vm(), '/var/lib/clawtune/artifacts/tool-resource/' + filename,
+            )
+            parent_resource = json.loads(raw)
+            if not isinstance(parent_resource.get('pmu'), dict):
+                raise ValueError('parent cgroup artifact is missing embedded PMU evidence')
+            (directory/('parent-'+filename)).write_text(raw, encoding='utf-8')
             def verify(vm):
                 actual = probe(self.client, vm)
                 if actual != witness:
