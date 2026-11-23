@@ -2287,6 +2287,39 @@ def test_warm_overflow_spills_authoritative_lru_to_cold() -> None:
     assert spill["tier_from"] == "warm" and spill["tier_to"] == "cold"
 
 
+def test_cold_ready_callback_runs_after_lifecycle_lock_is_released() -> None:
+    _Sandbox.items = {}
+    client = CubeSandboxClient(sandbox_class=_Sandbox)
+    pool = WarmSnapshotPool(1024, clock=lambda: 1.0)
+    lifecycles = [
+        CubeSandboxLifecycle(
+            client, template="tpl", node_name="node-a",
+            ownership=Ownership(
+                "run", "attempt", "task", "experiment", f"session-{index}", "policy",
+            ),
+            warm_snapshot_root="/warm", cold_snapshot_root="/cold",
+            snapshot_pool=pool, snapshot_reservation_bytes=1024,
+            snapshot_mechanism="full-copy",
+        )
+        for index in (1, 2)
+    ]
+    observed = []
+
+    def cold_ready(generation):
+        acquired = lifecycles[0]._lock.acquire(blocking=False)
+        observed.append((generation, acquired))
+        if acquired:
+            lifecycles[0]._lock.release()
+
+    lifecycles[0].set_snapshot_cold_ready(cold_ready)
+    for lifecycle in lifecycles:
+        lifecycle.start()
+        lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
+    assert observed == [(1, True)]
+    for lifecycle in lifecycles:
+        lifecycle.close()
+
+
 @pytest.mark.parametrize("operation", ["restore", "close"])
 def test_lifecycle_consumption_waits_for_selected_spill(operation: str) -> None:
     _Sandbox.items = {}
@@ -3131,6 +3164,7 @@ def _cold_next_use_lifecycle(tmp_path, monkeypatch, *, capacity=100, compressed=
         snapshot_compression="zstd-page" if compressed else "none",
         snapshot_compression_binary="/bin/true",
         next_use_residency=True,
+        restore_promotion="if_fit",
     )
     key = SnapshotKey(lifecycle.ownership.session_id, lifecycle.role, 1)
     lifecycle.sandbox_id = "sandbox-promote"
@@ -3150,6 +3184,29 @@ def _cold_next_use_lifecycle(tmp_path, monkeypatch, *, capacity=100, compressed=
         "transferred_bytes": 60,
     })
     return lifecycle, client, pool, key
+
+
+def test_next_use_can_restore_cold_without_relocation(tmp_path, monkeypatch):
+    lifecycle, client, pool, key = _cold_next_use_lifecycle(tmp_path, monkeypatch)
+    lifecycle.restore_promotion = "off"
+    client.relocate_snapshot = lambda *a, **kw: pytest.fail("promotion is disabled")
+    client.connect_sandbox = lambda *a, **kw: SimpleNamespace(state="running")
+    lifecycle.restore()
+    assert lifecycle._snapshot_tier is SnapshotTier.COLD
+    with pytest.raises(KeyError):
+        pool.manifest(key)
+
+
+def test_promotion_does_not_require_next_use_ranking(tmp_path, monkeypatch):
+    lifecycle, client, pool, key = _cold_next_use_lifecycle(tmp_path, monkeypatch)
+    lifecycle.next_use_residency = False
+    calls = []
+    client.relocate_snapshot = lambda *a, **kw: (calls.append(kw) or {
+        "tier": kw["tier"], "generation": kw["generation"],
+        "memory_snapshot_path": kw["memory_snapshot_path"]})
+    lifecycle._promote_cold_snapshot_if_fit()
+    assert len(calls) == 1
+    assert lifecycle._snapshot_tier is SnapshotTier.WARM
 
 
 def test_next_use_cold_restore_promotes_whole_snapshot_before_connect(tmp_path, monkeypatch):

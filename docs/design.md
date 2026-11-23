@@ -124,6 +124,20 @@ It works with either wait or GPU reclaim and either scope. Selected events reque
 Runtime then Tool restoration through existing memory admission, skipping resident VMs. Tool bridge readiness is checked, but command prediction, growth
 admission and SSH identity checks still occur at the actual command boundary.
 
+Snapshot data preparation is separate from restoring a running VM. The optional
+state-driven mode latches accepted GPU phase boundaries per Runtime/Tool and
+rechecks after the pair checkpoint fence is released. Demand and model completion
+invalidate the pending preparation. Authoritative lineage resolution always
+picks the current page version, while Linux retains ownership of the resulting
+file cache. Expanded-file allowances and concurrent read budgets limit
+speculative work, not permanent cache residency.
+
+`restore.promotion` independently selects whole-lineage relocation before
+restore (`off` by default, or non-evicting `if_fit`). Next-use controls WARM
+admission/eviction only. The preparation hypothesis is that decompression and
+necessary reads can overlap actual model waiting; it does not assume every
+SSD-backed access misses page cache or every WARM snapshot restores faster.
+
 | Location | Contents |
 | --- | --- |
 | Compute-node memory | Running VM pages on the assigned NUMA node |

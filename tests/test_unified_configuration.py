@@ -208,6 +208,34 @@ def test_page_preparation_allows_uncompressed_wait_tool_snapshots(compression):
     assert spec.policies[0].consumes_gpu_signals
 
 
+def test_snapshot_checkpoint_gate_is_independent_of_page_preparation():
+    b, w = documents()
+    b['inference']['backend'] = 'serving_sim'
+    b['mechanisms']['idle_reclaim'].update(policy='gpu', scope='agent_and_tool')
+    b['execution']['snapshot_checkpoint_gate'] = {
+        'case_ids': [w['tasks']['cases'][0]['case_id']],
+        'checkpoint_tiers': ['cold'],
+    }
+    control = compile_pair(b, w)
+    assert control.execution.snapshot_checkpoint_gate.checkpoint_tiers == ('cold',)
+    assert control.execution.snapshot_page_management is None
+    b['execution']['snapshot_page_management'] = {'prefetch_budget_mib': 128}
+    treatment = compile_pair(b, w)
+    assert treatment.execution.snapshot_checkpoint_gate == control.execution.snapshot_checkpoint_gate
+    assert treatment.execution.snapshot_page_management is not None
+
+
+@pytest.mark.parametrize('residency', ['lru', 'next-use'])
+def test_restore_promotion_is_explicit_and_independent_of_residency(residency):
+    b, w = documents()
+    b['inference']['backend'] = 'serving_sim'
+    b['mechanisms']['idle_reclaim'].update(policy='wait')
+    b['mechanisms']['checkpoint'].update(storage='tiered', residency=residency)
+    assert compile_pair(b, w).policies[0].snapshot_restore_promotion == 'off'
+    b['mechanisms']['restore']['promotion'] = 'if_fit'
+    assert compile_pair(b, w).policies[0].snapshot_restore_promotion == 'if_fit'
+
+
 def test_context_first_borrow_only_does_not_require_action_costs():
     b, w = documents()
     b['mechanisms']['shared_memory']['borrow'] = 'pressure'

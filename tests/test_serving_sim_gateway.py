@@ -625,6 +625,7 @@ def worker_prewarm_environment(*, reclaim="gpu_aware_pressure", runtime_snapshot
         prepare_restored_tool=lambda **kwargs: tool_ready.append(kwargs), tool_ready=tool_ready,
         events=SimpleNamespace(write=events.append), policy_events=executor,
         page_prefetch=None,
+        snapshot_preparation=None, page_profile_selected=False,
         arm_cancel=None,
         pause_for_model_wait=lambda _event: None)
     source = Path(__file__).resolve().parents[1] / "clawbox/experiments/worker.py"

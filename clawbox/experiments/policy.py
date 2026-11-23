@@ -55,6 +55,7 @@ class SessionState:
     migration_in_progress: bool = False
     shared_runtime: bool = False
     snapshot_next_use_revision: int = 0
+    snapshot_ready: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,11 +300,13 @@ class PolicyCoordinator:
         self, session_id: str, lifecycle: Pausable, *,
         before_pair_pause: Callable[[], None] | None = None,
         before_pause: Callable[[], None] | None = None,
+        snapshot_ready: Callable[[], None] | None = None,
     ) -> None:
         with self._condition:
             self._sessions[session_id].runtime_lifecycle = lifecycle
             self._sessions[session_id].pair_before_pause = before_pair_pause
             self._sessions[session_id].runtime_before_pause = before_pause
+            self._sessions[session_id].snapshot_ready = snapshot_ready
 
     def begin_model_wait(self, session_id: str, wait_id: str) -> None:
         now = time.monotonic()
@@ -1815,6 +1818,7 @@ class PolicyCoordinator:
                        and victim.runtime_lifecycle.resident else None)
         capacity_skipped = False
         reservations_ready = False
+        paused = 0
         try:
             with checkpoint_reservations((victim.lifecycle, runtime), tier) as tier:
                 reservations_ready = True
@@ -1853,6 +1857,8 @@ class PolicyCoordinator:
                 self.release_victim(victim)
                 if capacity_skipped:
                     victim.eviction_eligible = not victim.tool_active and not victim.response_ready
+            if paused and victim.snapshot_ready is not None:
+                victim.snapshot_ready()
 
     def materialize(self, session_id: str, amount_mib: int,
                     operation: Callable[[], float], timeout_s: float) -> tuple[float, float]:

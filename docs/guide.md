@@ -679,6 +679,54 @@ selection, either scope and compressed/uncompressed snapshots are supported.
 No image rebuild or host apply is required.
 Leave the block absent for the baseline and normal experiments.
 
+For preparation that survives a GPU event arriving before checkpoint completion,
+use the following block in a copy of the same baseline. Keep the workload and
+host budgets fixed, then use the resolve/validate/launch sequence below with a
+new run ID. Full-VM prewarm remains a separate choice.
+
+```yaml
+mechanisms:
+  restore:
+    prewarm_events: []
+    promotion: 'off'
+execution:
+  snapshot_page_management:
+    mode: state_driven
+    runtime_trigger_event: prefill_start
+    tool_trigger_event: first_token
+    candidate_source: shared_lineage
+    prefetch_budget_mib: 1024
+    expansion_budget_mib: 1024
+    per_vm_prefetch_mib: 32
+    max_inflight_mib: 128
+    io_workers: 2
+```
+
+The state-driven mode prepares data while the VM remains paused. It remembers
+accepted phase boundaries until the actual model wait ends and rechecks when
+the checkpoint commits. Runtime and Tool use separate boundaries; choose
+`tool_trigger_event: disabled` for a Runtime-only preparation arm. Selected
+`prewarm_events` still cancel preparation and request full VM restoration.
+`promotion: off` avoids whole-lineage copying on demand; `if_fit` explicitly
+reproduces the earlier next-use promotion behavior and also works with LRU.
+
+`expansion_budget_mib` limits outstanding prepared expansion allowances; read
+budgets do not pin or bound Linux's total page cache. Compare demand-only and
+state-driven arms with the same physical memory/CPU budget and normal cache
+behavior. Check preparation completion/cancellation, response-delivery wait,
+first Tool completion and throughput. Application prefetch bytes alone do not
+prove SSD I/O savings. These changes require a new run ID, but no host apply,
+guest rebuild or ClawTune retraining.
+
+For a source-of-benefit experiment that must not depend on incidental memory
+pressure, set `execution.snapshot_checkpoint_gate` identically in a demand arm
+and a preparation arm. Select the same `case_ids` and finite `checkpoint_tiers`;
+leave `snapshot_page_management` null only in the demand arm. Run counterbalanced
+AB/BA order, use `snapshot-storage reset-cache --apply` before every arm, and
+compare matching COLD generations. This gate intentionally changes when selected
+sessions checkpoint, so it isolates preparation/decompression from the demand
+path but is not production-throughput evidence.
+
 ## 5. Validate, launch, and inspect
 
 In commands below, `experiment.yaml` is the output of `resolve`. Alternatively
@@ -1250,8 +1298,8 @@ cgroup CPU sample and Tool activity/admission snapshot. Two consecutive samples
 between the configured activation floor (zero by default) and 90% CPU enter
 refill mode. CPU below the activation floor, at or above 95%, or feedback older
 than three seconds restores native scheduling. A nonzero floor keeps cold-start
-prefills native until the CPU/Tool pipeline has formed. Ready and resource-blocked
-Tool counts remain recorded evidence but do not globally veto measured CPU headroom.
+prefills native until the CPU/Tool pipeline has formed. Ready and resource-blocked Tool
+counts remain recorded evidence but do not globally veto measured CPU headroom.
 For an engine with both decode and prefill candidates, refill mode calls vLLM's
 native prefill-throttle option for three scheduling steps, then allows one native
 release step so prefills continue to progress. Pure-decode and prefill-only steps

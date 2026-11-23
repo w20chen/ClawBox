@@ -466,12 +466,33 @@ class SnapshotPageProfileSpec(StrictFrozenModel):
         return self
 
 
-class SnapshotPageManagementSpec(StrictFrozenModel):
-    """GPU-triggered preparation of task-independent shared lineage pages."""
+class SnapshotCheckpointGateSpec(StrictFrozenModel):
+    """Evaluation-only COLD checkpoints at real model-wait boundaries.
 
-    mode: Literal["gpu_event"] = "gpu_event"
+    This keeps checkpoint/restore populations identical between a demand arm
+    and a speculative-preparation arm.  It is deliberately separate from page
+    profiling and from the production pressure policy.
+    """
+
+    case_ids: tuple[str, ...] = Field(min_length=1)
+    checkpoint_tiers: tuple[Literal["warm", "cold"], ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_values(self):
+        if len(set(self.case_ids)) != len(self.case_ids):
+            raise ValueError("snapshot_checkpoint_gate.case_ids must be unique")
+        return self
+
+
+class SnapshotPageManagementSpec(StrictFrozenModel):
+    """Bounded snapshot preparation of authoritative shared-lineage ranges."""
+
+    mode: Literal["gpu_event", "state_driven"] = "gpu_event"
     candidate_source: Literal["shared_lineage"] = "shared_lineage"
     trigger_event: Literal["queued", "prefill_start"] = "prefill_start"
+    runtime_trigger_event: Literal["queued", "prefill_start", "first_token", "think_end"] = "prefill_start"
+    tool_trigger_event: Literal["queued", "prefill_start", "first_token", "think_end", "disabled"] = "first_token"
+    expansion_budget_mib: int = Field(default=1024, ge=1)
     prefetch_budget_mib: int = Field(ge=1)
     per_vm_prefetch_mib: int = Field(default=32, ge=1)
     max_inflight_mib: int = Field(default=128, ge=1)
@@ -610,6 +631,7 @@ class ExecutionSpec(StrictFrozenModel):
         default=0.001, gt=0, le=0.1, allow_inf_nan=False)
     worker_cyclic_gc_enabled: bool = False
     snapshot_page_profile: SnapshotPageProfileSpec | None = None
+    snapshot_checkpoint_gate: SnapshotCheckpointGateSpec | None = None
     snapshot_page_management: SnapshotPageManagementSpec | None = None
     snapshot_branching: SnapshotBranchingSpec | None = None
     tool_placement: ToolPlacementStudySpec | None = None
@@ -938,6 +960,7 @@ class PolicySpec(StrictFrozenModel):
     template_aware_placement: bool = False
     snapshot_aware_residency: bool = False
     snapshot_next_use_residency: bool = False
+    snapshot_restore_promotion: Literal["off", "if_fit"] = "off"
     memory_protection: bool = False
     cpu_release_boost: bool = False
     idle_release_ranking: bool = False
@@ -1002,6 +1025,8 @@ class PolicySpec(StrictFrozenModel):
             )
         if self.gpu_prewarm_events and self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
             raise ValueError('GPU prewarm requires snapshot pause')
+        if self.snapshot_restore_promotion != "off" and self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
+            raise ValueError("restore.promotion requires snapshot pause")
         return self
 
 
@@ -1178,6 +1203,29 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError(
                     "forced snapshot page profiling requires agent_and_tool snapshot pause"
                 )
+        checkpoint_gate = self.execution.snapshot_checkpoint_gate
+        if checkpoint_gate is not None:
+            case_ids = {case.case_id for case in cases}
+            missing = set(checkpoint_gate.case_ids) - case_ids
+            if missing:
+                raise ValueError(
+                    "snapshot_checkpoint_gate.case_ids are absent from the workload: "
+                    + ", ".join(sorted(missing))
+                )
+            if self.agent.driver is not AgentDriver.OPENCLAW:
+                raise ValueError("snapshot_checkpoint_gate requires agent.driver=openclaw")
+            if self.inference.backend is not InferenceBackend.SERVING_SIM:
+                raise ValueError("snapshot_checkpoint_gate requires inference.backend=serving_sim")
+            if self.resources.snapshot_mechanism != "incremental-cow":
+                raise ValueError("snapshot_checkpoint_gate requires incremental-cow snapshots")
+            if any(
+                policy.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE
+                or not policy.runtime_snapshot
+                for policy in self.policies
+            ):
+                raise ValueError(
+                    "snapshot_checkpoint_gate requires agent_and_tool snapshot pause"
+                )
         page_management = self.execution.snapshot_page_management
         if page_management is not None:
             if page_profile is not None:
@@ -1199,6 +1247,12 @@ class ExperimentSpec(StrictFrozenModel):
                 raise ValueError(
                     "snapshot_page_management requires snapshot pause"
                 )
+        if any(policy.snapshot_restore_promotion == "if_fit" for policy in self.policies):
+            if (self.resources.snapshot_storage != "tiered"
+                    or not self.resources.warm_memory_capacity_mib
+                    or not self.resources.warm_snapshot_root
+                    or not self.resources.cold_snapshot_root):
+                raise ValueError("restore.promotion=if_fit requires tiered storage, WARM capacity and both snapshot roots")
         if self.workload.session_assignment is SessionAssignment.UNIQUE:
             required = max(self.execution.concurrency_levels)
             if len(cases) < required:

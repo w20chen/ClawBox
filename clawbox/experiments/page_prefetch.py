@@ -1,4 +1,4 @@
-"""Task-independent, GPU-triggered preparation of shared snapshot pages.
+"""GPU phase and checkpoint driven preparation of shared snapshot pages.
 
 Candidates come only from the current immutable RAM lineage. A short batch
 collects COLD snapshots that are about to be restored, resolves each GPA to its
@@ -11,6 +11,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from threading import Condition, Event, Lock
@@ -218,6 +219,122 @@ def select_shared_ranges(
     }
 
 
+class SnapshotPreparationSession:
+    """Latch accepted phase boundaries until checkpoint commit or demand.
+
+    No lifecycle operation runs here. Submissions are nonblocking, and the
+    lifecycle rechecks generation/state under its snapshot lock in the worker.
+    """
+
+    def __init__(self, controller, *, session_id, case_id, runtime, tool):
+        self.controller = controller
+        self.session_id, self.case_id = session_id, case_id
+        self.lifecycles = {"runtime": runtime, "tool": tool}
+        self._lock = Lock()
+        self._waits: dict[str, dict[str, Any]] = {}
+        self._closed = False
+        for role, lifecycle in self.lifecycles.items():
+            setter = getattr(lifecycle, "set_snapshot_cold_ready", None)
+            if setter is not None:
+                setter(lambda generation, role=role: self.cold_ready(role, generation))
+
+    def begin(self, request_id: str) -> None:
+        with self._lock:
+            if not self._closed:
+                self._waits.setdefault(request_id, {"signals": {}, "blocked": set(), "submitted": set()})
+
+    def observe(self, request_id: str, signal: Mapping[str, Any]) -> None:
+        spec = self.controller.spec
+        age = signal.get("signal_age_seconds", 0.0)
+        if type(age) not in (int, float) or not 0 <= age <= spec.signal_max_age_seconds:
+            return
+        with self._lock:
+            wait = self._waits.get(request_id)
+            if wait is None:
+                return
+            for role in self.lifecycles:
+                trigger = (spec.trigger_event if spec.mode == "gpu_event"
+                           else getattr(spec, f"{role}_trigger_event"))
+                if signal.get("event") == trigger and role not in wait["blocked"]:
+                    wait["signals"][role] = dict(signal)
+                    self._submit_locked(request_id, wait, role, "gpu_event")
+
+    def checkpoint_ready(self) -> None:
+        if self.controller.spec.mode != "state_driven":
+            return
+        with self._lock:
+            for request_id, wait in self._waits.items():
+                for role in wait["signals"]:
+                    self._submit_locked(request_id, wait, role, "checkpoint_committed")
+
+    def cold_ready(self, role: str, generation: int) -> None:
+        """Retry a latched state boundary when spill publishes the COLD path."""
+        if self.controller.spec.mode != "state_driven":
+            return
+        with self._lock:
+            if self._closed:
+                return
+            for request_id, wait in self._waits.items():
+                if role in wait["signals"] and role not in wait["blocked"]:
+                    self._submit_locked(
+                        request_id, wait, role, "cold_snapshot_ready",
+                        generation=generation,
+                    )
+
+    def _submit_locked(self, request_id, wait, role, reason, generation=None):
+        vm = self.lifecycles[role]
+        current = (
+            getattr(vm, "preparation_cold_generation", None)
+            if self.controller.spec.mode == "state_driven"
+            else vm.preparation_generation
+        )
+        if generation is not None and current != generation:
+            return
+        generation = current
+        if generation is None or role in wait["blocked"] or (role, generation) in wait["submitted"]:
+            return
+        signal = dict(wait["signals"][role])
+        # A latched boundary is not an ETA. It remains valid until this actual
+        # model wait ends, even if committing the checkpoint took several seconds.
+        signal.update(signal_age_seconds=0.0, preparation_reason=reason,
+                      expected_generation=generation)
+        if self.controller.submit(vm, session_id=self.session_id, case_id=self.case_id,
+                                  role=role, request_id=request_id, signal=signal):
+            wait["submitted"].add((role, generation))
+
+    def cancel(self, request_id: str, role: str | None = None) -> None:
+        with self._lock:
+            wait = self._waits.get(request_id)
+            for name, vm in self.lifecycles.items():
+                if role is None or role == name:
+                    if wait is not None:
+                        wait["blocked"].add(name)
+                    self.controller.cancel(vm, request_id)
+
+    def finish(self, request_id: str) -> None:
+        self.cancel(request_id)
+        with self._lock:
+            self._waits.pop(request_id, None)
+
+    def tool_demand(self) -> None:
+        with self._lock:
+            for request_id, wait in self._waits.items():
+                wait["blocked"].add("tool")
+                self.controller.cancel(self.lifecycles["tool"], request_id)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            for request_id in self._waits:
+                for vm in self.lifecycles.values():
+                    self.controller.cancel(vm, request_id)
+            self._waits.clear()
+        for vm in self.lifecycles.values():
+            setter = getattr(vm, "set_snapshot_cold_ready", None)
+            if setter is not None:
+                setter(None)
+
+
 class SnapshotPagePrefetchController:
     """Arm-wide bounded executor for shared-lineage page preparation."""
 
@@ -232,6 +349,7 @@ class SnapshotPagePrefetchController:
         self._pending: dict[tuple[int, str], tuple[Event, Future[Any] | None]] = {}
         self._reserved_bytes = 0
         self._inflight_bytes = 0
+        self._expansions: dict[tuple[int, str], int] = {}
         self._closed = False
         self._closed_event = Event()
         self._error: BaseException | None = None
@@ -248,7 +366,7 @@ class SnapshotPagePrefetchController:
         request_id: str, signal: Mapping[str, Any],
     ) -> bool:
         age = signal.get("signal_age_seconds", 0.0)
-        if not isinstance(age, (int, float)) or age < 0 or age > self.spec.signal_max_age_seconds:
+        if type(age) not in (int, float) or not math.isfinite(age) or not 0 <= age <= self.spec.signal_max_age_seconds:
             return False
         key = (id(lifecycle), request_id)
         cancel = Event()
@@ -264,6 +382,8 @@ class SnapshotPagePrefetchController:
                     "signal_sequence": signal.get("signal_sequence"),
                     "signal_age_seconds": float(age), "queued_unix_s": time.time(),
                     "queued_monotonic_s": time.monotonic(),
+                    "preparation_reason": signal.get("preparation_reason", "gpu_event"),
+                    "expected_generation": signal.get("expected_generation"),
                 },
             )
             self._pending[key] = (cancel, future)
@@ -273,11 +393,25 @@ class SnapshotPagePrefetchController:
         with self._lock:
             pending = self._pending.get((id(lifecycle), request_id))
             if pending is None:
+                self._expansions.pop((id(lifecycle), request_id), None)
                 return False
             pending[0].set()
         with self._batch_ready:
             self._batch_ready.notify_all()
         return True
+
+    def reserve_expansion(self, lifecycle: Any, request_id: str, amount: int) -> bool:
+        """Conservative expanded-file allowance held until demand or wait end.
+
+        This does not pin or cap Linux page cache. Admission never waits while
+        holding a snapshot lock: insufficient allowance skips speculative work.
+        """
+        key = (id(lifecycle), request_id)
+        with self._lock:
+            if sum(self._expansions.values()) + amount > self.spec.expansion_budget_mib * MIB:
+                return False
+            self._expansions[key] = amount
+            return True
 
     def _reserve_working_set(self, amount: int, cancel: Event) -> bool:
         with self._budget:
@@ -349,6 +483,8 @@ class SnapshotPagePrefetchController:
             finally:
                 with self._lock:
                     self._pending.pop(key, None)
+                    if cancel.is_set() or event.get("status") in {"error", "skipped"}:
+                        self._expansions.pop(key, None)
 
     def _join_batch(
         self, ranges: tuple[FileRange, ...], metrics: dict[str, int], cancel: Event,
@@ -445,8 +581,11 @@ class SnapshotPagePrefetchController:
                 stop = item.offset + item.length
                 completed = 0
                 while position < stop and not self._closed:
+                    if not any(not members_by_token[token].cancel.is_set() for token in current):
+                        break
                     amount = min(MIB, stop - position)
-                    if not self._throttle(amount) or not self._reserve_io(amount):
+                    cancelled = lambda: all(members_by_token[token].cancel.is_set() for token in current)
+                    if not self._throttle(amount, cancelled=cancelled) or not self._reserve_io(amount):
                         break
                     try:
                         data = _pread(fd, amount, position)
@@ -490,14 +629,18 @@ class SnapshotPagePrefetchController:
             batch.done = True
             self._batch_ready.notify_all()
 
-    def _throttle(self, amount: int) -> bool:
+    def _throttle(self, amount: int, *, cancelled: Callable[[], bool] = lambda: False) -> bool:
         rate = self.spec.prefetch_bandwidth_mib_s * MIB
         with self._rate_lock:
             now = time.monotonic()
             start = max(now, self._next_io_time)
             self._next_io_time = start + amount / rate
-            delay = start - now
-        return not delay or not self._closed_event.wait(delay)
+        while not self._closed_event.is_set() and not cancelled():
+            delay = start - time.monotonic()
+            if delay <= 0:
+                return True
+            self._closed_event.wait(min(delay, 0.05))
+        return False
 
     def check(self) -> None:
         with self._lock:
@@ -511,6 +654,7 @@ class SnapshotPagePrefetchController:
                 "candidate_source": self.spec.candidate_source,
                 "pending": len(self._pending), "reserved_bytes": self._reserved_bytes,
                 "inflight_bytes": self._inflight_bytes,
+                "prepared_expansion_bytes": sum(self._expansions.values()),
                 "failed": self._error is not None,
             }
 
@@ -518,6 +662,7 @@ class SnapshotPagePrefetchController:
         with self._budget:
             self._closed = True
             self._closed_event.set()
+            self._expansions.clear()
             if cancel:
                 for event, _future in self._pending.values():
                     event.set()

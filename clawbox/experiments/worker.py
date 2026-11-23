@@ -3533,6 +3533,7 @@ class ExperimentWorker:
                 ),
                 "snapshot_aware_residency": arm.policy.snapshot_aware_residency,
                 "snapshot_next_use_residency": arm.policy.snapshot_next_use_residency,
+                "snapshot_restore_promotion": arm.policy.snapshot_restore_promotion,
                 "snapshot_pool": snapshot_pool.snapshot(),
                 "tool_execution_observations": tool_execution_observations,
                 **observation_summary,
@@ -3678,6 +3679,11 @@ class ExperimentWorker:
         page_profile_selected = (
             page_profile_spec is not None
             and arm.case.case_id in page_profile_spec.case_ids
+        )
+        checkpoint_gate_spec = arm.execution.snapshot_checkpoint_gate
+        checkpoint_gate_selected = (
+            checkpoint_gate_spec is not None
+            and arm.case.case_id in checkpoint_gate_spec.case_ids
         )
         page_profile_root = self.output_root / "page-access" / session_id
 
@@ -3844,6 +3850,7 @@ class ExperimentWorker:
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
             next_use_residency=arm.policy.snapshot_next_use_residency,
+            restore_promotion=arm.policy.snapshot_restore_promotion,
             default_snapshot_tier=arm.resources.default_snapshot_tier,
             snapshot_reservation_bytes=(arm.runtime.memory_mib + 256) * 1024 * 1024,
             numa_borrower=numa_borrower,
@@ -3905,6 +3912,7 @@ class ExperimentWorker:
             cold_snapshot_root=arm.resources.cold_snapshot_root,
             snapshot_pool=snapshot_pool,
             next_use_residency=arm.policy.snapshot_next_use_residency,
+            restore_promotion=arm.policy.snapshot_restore_promotion,
             default_snapshot_tier=arm.resources.default_snapshot_tier,
             snapshot_reservation_bytes=(arm.sandbox.memory_mib + 256) * 1024 * 1024,
             numa_borrower=numa_borrower,
@@ -4146,6 +4154,14 @@ class ExperimentWorker:
             runtime_lifecycle._session_binding = session_binding
             lifecycle._session_binding = session_binding
 
+        snapshot_preparation = None
+        if page_prefetch is not None:
+            from .page_prefetch import SnapshotPreparationSession
+            snapshot_preparation = SnapshotPreparationSession(
+                page_prefetch, session_id=session_id, case_id=arm.case.case_id,
+                runtime=runtime_lifecycle, tool=lifecycle,
+            )
+
         if arm.agent.driver is AgentDriver.OPENCLAW:
             if self.model_gateway is None:
                 raise RuntimeError("managed ModelGateway is not active")
@@ -4162,6 +4178,41 @@ class ExperimentWorker:
                 if arm_cancel is not None and arm_cancel.is_set():
                     return
                 try:
+                    if checkpoint_gate_selected:
+                        generations = {
+                            lifecycle._generation, runtime_lifecycle._generation,
+                        }
+                        if len(generations) != 1:
+                            events.write({
+                                "event": "snapshot_checkpoint_gate",
+                                "session_id": session_id,
+                                "case_id": arm.case.case_id,
+                                "request_id": event.get("request_id"),
+                                "generations": sorted(generations),
+                                "performed": False,
+                                "reason": "pair_checkpoint_in_progress",
+                            })
+                            return
+                        generation = generations.pop()
+                        if generation < len(checkpoint_gate_spec.checkpoint_tiers):
+                            tier = SnapshotTier(
+                                checkpoint_gate_spec.checkpoint_tiers[generation]
+                            )
+                            performed = coordinator.evict_one_for_watermark(
+                                tier=tier,
+                                reason="snapshot_checkpoint_gate",
+                                profile_session_id=session_id,
+                            )
+                            events.write({
+                                "event": "snapshot_checkpoint_gate",
+                                "session_id": session_id,
+                                "case_id": arm.case.case_id,
+                                "request_id": event.get("request_id"),
+                                "generation": generation + 1,
+                                "tier": tier.value,
+                                "performed": performed,
+                            })
+                            return
                     if (page_profile_selected
                             and page_profile_spec.force_model_wait_checkpoints):
                         generations = {
@@ -4297,6 +4348,8 @@ class ExperimentWorker:
                         return
                     wait_states.setdefault(request_id, {}).update(request_id=request_id,
                                       request_started_at=event.get("request_started_at"))
+                    if snapshot_preparation is not None:
+                        snapshot_preparation.begin(request_id)
                     if arm.policy.eviction in {EvictionPolicy.WAIT_AWARE_PRESSURE, EvictionPolicy.GPU_AWARE_PRESSURE}:
                         coordinator.begin_model_wait(session_id, request_id)
                 events.write({
@@ -4319,12 +4372,11 @@ class ExperimentWorker:
                 request_id = str(event["request_id"])
                 trigger = str(event["event"])
                 operation = f"gpu_{trigger}"
-                if page_prefetch is not None:
+                if snapshot_preparation is not None:
                     # Demand restore has priority over speculative reads.  A
                     # preparation already in decompression remains useful;
                     # range reads stop at their next bounded chunk.
-                    page_prefetch.cancel(runtime_lifecycle, request_id)
-                    page_prefetch.cancel(lifecycle, request_id)
+                    snapshot_preparation.cancel(request_id)
                 # Do not hold wait_lock while an already-claimed checkpoint finishes.
                 if not coordinator.wait_for_gpu_prewarm(session_id, request_id):
                     return
@@ -4394,26 +4446,8 @@ class ExperimentWorker:
                     events.write({"event": "gpu_policy_observation", "session_id": session_id,
                                   "request_id": event["request_id"], "signal": event["event"],
                                   "signal_sequence": event.get("signal_sequence"), "decision": decision})
-                page_management = (
-                    arm.execution.snapshot_page_management
-                    if page_prefetch is not None else None
-                )
-                if (page_prefetch is not None and page_management is not None
-                        and decision.get("accepted")
-                        and event.get("event") == page_management.trigger_event):
-                    request_id = str(event["request_id"])
-                    for vm, role in (
-                        (runtime_lifecycle, "runtime"), (lifecycle, "tool"),
-                    ):
-                        if not vm.resident:
-                            page_prefetch.submit(
-                                vm,
-                                session_id=session_id,
-                                case_id=arm.case.case_id,
-                                role=role,
-                                request_id=request_id,
-                                signal=event,
-                            )
+                if snapshot_preparation is not None and decision.get("accepted"):
+                    snapshot_preparation.observe(str(event["request_id"]), event)
                 if decision.get("should_prewarm"):
                     policy_events.submit_coalesced((session_id, "gpu_prewarm", str(event["request_id"])), prewarm_pair_from_gpu, event)
                 elif decision.get("should_recheck_pressure"):
@@ -4423,6 +4457,8 @@ class ExperimentWorker:
                                             event: dict[str, Any]) -> dict[str, Any]:
                 request_id = str(event.get("request_id"))
                 progress_event('model_end', request_id)
+                if snapshot_preparation is not None:
+                    snapshot_preparation.finish(request_id)
                 # Publish generation before waiting for lifecycle serialization.
                 # A queued eager-pause callback must not start checkpointing a
                 # Runtime after its model response already exists.
@@ -4570,6 +4606,8 @@ class ExperimentWorker:
                 before_runtime_idle_pause
                 if gateway_session is not None else None
             ),
+            snapshot_ready=(snapshot_preparation.checkpoint_ready
+                            if snapshot_preparation is not None else None),
         )
         kb_env = {'CLAWBOX_RETAIN_CLAUSE_TELEMETRY': '1' if arm.execution.retain_clause_telemetry_artifacts else '0'}
         try:
@@ -4998,6 +5036,8 @@ class ExperimentWorker:
                                 "dependency_install_gate": True,
                             })
                             raise
+                    if snapshot_preparation is not None:
+                        snapshot_preparation.tool_demand()
                     with wait_lock:
                         control_marks["lifecycle_lock"] = time.monotonic()
                         try:
@@ -5909,6 +5949,8 @@ class ExperimentWorker:
                      "timeline": timeline}
         finally:
             session_error = sys.exception()
+            if snapshot_preparation is not None:
+                snapshot_preparation.close()
             cleanup_errors: list[str] = []
             discard_failed_gateway_session = False
             discard_failed_policy_session = False

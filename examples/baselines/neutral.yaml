@@ -20,7 +20,7 @@ mechanisms:
   runtime: {memory_protection: false, cpu_release_boost: false, proactive_memory_reclaim: false}
   placement: {policy: round_robin, template_affinity: false, tool_call_cpu_policy: c0}
   idle_reclaim: {policy: 'off', scope: tool}
-  restore: {prewarm_events: []}
+  restore: {prewarm_events: [], promotion: 'off'}
   shared_memory: {borrow: 'off'}
   checkpoint: {mechanism: incremental-cow, storage: disk, residency: lru}
   deployment: {mode: managed}

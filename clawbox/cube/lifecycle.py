@@ -99,6 +99,7 @@ class CubeSandboxLifecycle:
                  warm_restore_seconds_per_gib: float | None = None,
                  cold_restore_seconds_per_gib: float | None = None,
                  next_use_residency: bool = False,
+                 restore_promotion: str = "off",
                  snapshot_page_profiler: Any = None,
                  snapshot_page_event: Callable[[Mapping[str, Any]], None] | None = None) -> None:
         if snapshot_storage not in {"tiered", "warm-only"}:
@@ -144,6 +145,9 @@ class CubeSandboxLifecycle:
         self.warm_restore_seconds_per_gib = warm_restore_seconds_per_gib
         self.cold_restore_seconds_per_gib = cold_restore_seconds_per_gib
         self.next_use_residency = next_use_residency
+        if restore_promotion not in {"off", "if_fit"}:
+            raise ValueError("invalid snapshot restore promotion")
+        self.restore_promotion = restore_promotion
         self._snapshot_next_use_monotonic_s: float | None = None
         self._snapshot_next_use_revision = 0
         self._snapshot_next_use_lock = Lock()
@@ -165,6 +169,14 @@ class CubeSandboxLifecycle:
         self._restore_fault_sampler = None
         self.snapshot_page_profiler = snapshot_page_profiler
         self.snapshot_page_event = snapshot_page_event
+        self._snapshot_cold_ready: Callable[[int], None] | None = None
+
+    def set_snapshot_cold_ready(
+        self, callback: Callable[[int], None] | None,
+    ) -> None:
+        """Publish COLD availability without doing speculative I/O inline."""
+        with self._lock:
+            self._snapshot_cold_ready = callback
 
     def set_snapshot_next_use(self, deadline: float | None, revision: int = 0) -> None:
         """Publish the current queued.est_wait_s-derived absolute deadline."""
@@ -239,6 +251,21 @@ class CubeSandboxLifecycle:
         # waiting for a slow cpuset rebind/RPC here stalls unrelated sessions.
         # Lifecycle operations still acquire _lock and recheck their state.
         return self._state is SandboxState.RUNNING
+
+    @property
+    def preparation_generation(self) -> int | None:
+        """Nonblocking hint; preparation rechecks under the snapshot lock."""
+        return self._generation if self._state is SandboxState.SWAPPED else None
+
+    @property
+    def preparation_cold_generation(self) -> int | None:
+        """Return the paused generation only after its COLD path is authoritative."""
+        return (
+            self._generation
+            if self._state is SandboxState.SWAPPED
+            and self._snapshot_tier is SnapshotTier.COLD
+            else None
+        )
 
     @property
     def tier(self) -> SnapshotTier:
@@ -1132,6 +1159,8 @@ class CubeSandboxLifecycle:
         return reservation
 
     def _spill_to_cold(self, manifest: SnapshotManifest) -> None:
+        cold_ready = None
+        cold_generation = None
         with self._lock:
             if (self._state is not SandboxState.SWAPPED or self.sandbox is None or
                     self._snapshot_key != manifest.key or self._tier is not SnapshotTier.WARM):
@@ -1221,6 +1250,8 @@ class CubeSandboxLifecycle:
                     snapshot_path=destination,
                     snapshot_metrics=spill_snapshot_metrics,
                 )
+                cold_ready = self._snapshot_cold_ready
+                cold_generation = manifest.key.generation
             except Exception as exc:
                 self._record(
                     "spill", before, before, started_wall, started_mono,
@@ -1232,6 +1263,11 @@ class CubeSandboxLifecycle:
                     snapshot_path=destination,
                 )
                 raise
+        # The callback only submits bounded background work.  Invoke it after
+        # releasing the lifecycle lock so restore and cleanup never wait for
+        # the session/controller lock.
+        if cold_ready is not None and cold_generation is not None:
+            cold_ready(cold_generation)
 
     pause_and_evict = checkpoint_and_evict
 
@@ -1295,7 +1331,7 @@ class CubeSandboxLifecycle:
         self, *, controller: Any, cancel: Any,
         context: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Expand a COLD snapshot and read its profiled hot ranges before restore.
+        """Expand a COLD snapshot and read selected ranges before restore.
 
         This method never changes the lifecycle state or native lineage.  The
         normal restore path takes the same snapshot lock and therefore either
@@ -1309,6 +1345,9 @@ class CubeSandboxLifecycle:
                     "status": "skipped",
                     "reason": f"lifecycle_{self._state.value}",
                 }
+            expected = context.get("expected_generation")
+            if expected is not None and expected != self._generation:
+                return {"status": "skipped", "reason": "snapshot_generation_changed"}
             if self._snapshot_tier is not SnapshotTier.COLD:
                 # WARM expansion consumes accounted tmpfs capacity.  The P1
                 # experiment targets the dominant COLD path and leaves WARM
@@ -1334,6 +1373,22 @@ class CubeSandboxLifecycle:
                 }
             decompression = None
             decompression_wall_started = time.monotonic()
+            if self.snapshot_compression == "zstd-page":
+                from .snapshot_compression import compression_manifest
+                manifest = compression_manifest(snapshot)
+                if manifest.exists():
+                    import json
+                    compressed = json.loads(manifest.read_text(encoding="utf-8"))
+                    metrics = compressed.get("metrics")
+                    expansion_bytes = (
+                        metrics.get("decompression_allocated_bytes")
+                        if isinstance(metrics, dict) else None
+                    )
+                    if type(expansion_bytes) is not int or expansion_bytes < 0:
+                        raise ValueError(f"missing decompression_allocated_bytes in {manifest}")
+                    if not controller.reserve_expansion(self, context["request_id"], expansion_bytes):
+                        return {"status": "skipped", "reason": "expansion_budget",
+                                "expansion_requested_bytes": expansion_bytes}
             decompression_cpu_started = time.thread_time()
             if self.snapshot_compression == "zstd-page":
                 from .snapshot_compression import decompress_snapshot
@@ -1383,7 +1438,7 @@ class CubeSandboxLifecycle:
         different WARM snapshot. The ordinary restore path runs afterward and
         pins/retains the newly committed WARM generation.
         """
-        if not self.next_use_residency:
+        if self.restore_promotion != "if_fit":
             return
         with self._lock:
             if (

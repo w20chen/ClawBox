@@ -358,7 +358,7 @@ validation checks their dependencies.
 | `idle_reclaim` | `policy: off` (`off`, `wait`, `gpu`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024`; `gpu_reclaim_min_remaining_seconds: 1.0`; `gpu_signal_max_age_seconds: 5.0`. GPU policy requires `serving_sim`; scope is independent; see the inference options below. |
 | `shared_memory` | `borrow: off` (`off`, `hard`, `pressure`); `borrow_cooldown_seconds: 5`; `return_cooldown_seconds: 5`; `shared_memory_resident_headroom_mib: null` |
 | `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`, `next-use`); transfer limits below |
-| `restore` | `prewarm_events: []`; explicitly select `think_end`, `first_token`, or both. Requires snapshot reclaim and serving_sim; independent of victim selection and scope. |
+| `restore` | `prewarm_events: []`; explicitly select `think_end`, `first_token`, or both. Requires snapshot reclaim and serving_sim; independent of victim selection and scope. `promotion: off` (`off`, `if_fit`) independently controls whole-lineage COLD-to-WARM relocation before restore. |
 | `deployment` | `mode: managed` (`managed`, `os-default`); `resident_capacity_accounting: false`; `lifecycle_reservation_scale: 1.0` |
 | `coordination` | `action_selection: context-first` |
 
@@ -400,10 +400,14 @@ relocated latest-deadline first until their actual reclaimable allocated bytes
 cover the deficit. Equal, earlier, or missing victim deadlines are never
 guessed; if eligible bytes are insufficient, the candidate is written directly
 to COLD. Physical-safety and restore-expansion spills bypass this comparison.
-On COLD restore, the pool makes a no-spill reservation for the complete VM
-snapshot upper bound. Success relocates the complete lineage to WARM before
-Cube connects the VM; failure leaves the mixed/COLD lineage unchanged. This
-policy requires matching Cube relocation support and qualification. Changing it
+Restore promotion is independent of next-use ranking and defaults to `off`.
+With `mechanisms.restore.promotion: if_fit`, the pool makes a no-spill reservation
+for the complete VM snapshot upper bound. Success relocates the complete lineage
+to WARM before Cube connects the VM; failure leaves the mixed/COLD lineage
+unchanged. `if_fit` requires snapshot pause, tiered storage, WARM capacity, both
+roots and qualified native relocation. To reproduce the former next-use restore
+behavior, explicitly select `if_fit`; frozen historical results are not changed.
+Changing either setting
 requires a new run ID, but no retraining or guest-image rebuild; host apply is
 needed only when storage paths/capacity or installed native components change.
 
@@ -894,8 +898,16 @@ Fields below are under baseline `execution` except the rows explicitly prefixed
 | `model_request_content_retention` | `failures` | `failures` keeps compact successful Model Gateway records and exact request/response content only for incomplete, errored, non-200, or undelivered requests. `all` retains exact content for every request for a full-audit run. The setting changes result retention only; use a new run ID. It requires no host apply, image rebuild, or retraining. |
 | `snapshot_page_profile` | `null` | Linux-only, root-only page-idle profiling for explicitly listed `case_ids`; keep disabled in throughput runs. `roles` selects Runtime and/or Tool, `interval_seconds` is the sampling-window width, and `max_windows_per_generation` is at most 65535. The metric is windows in which a present 4 KiB GPA page was referenced, not memory-instruction count. Exact per-page counts are compressed under `page-access/`; aggregate window records remain small. Requires `CONFIG_IDLE_PAGE_TRACKING=y`, readable `/proc/<pid>/pagemap`, incremental-COW lazy restore, and a new run ID; no image rebuild or retraining. |
 | `snapshot_page_profile.force_model_wait_checkpoints` | `false` | Profiling-only control that checkpoints the selected single-session case at real simulator-backed model waits through the ordinary pair lifecycle. `checkpoint_tiers` supplies the finite per-generation `warm`/`cold` sequence; after it is exhausted, only normal policy checkpoints remain. This changes snapshot timing and is not throughput evidence. |
-| `snapshot_page_management` | `null` | Optional task-independent mechanism for bounded COLD snapshot preparation triggered by an accepted GPU event. `mode` supports `gpu_event`; `candidate_source` supports `shared_lineage`; `trigger_event` is `queued` or `prefill_start`. Candidate selection uses only authoritative incremental lineage and concurrent physical-range sharing, never case identities or a trained hotset. Requires serving_sim, snapshot pause and tiered/COLD incremental-COW storage. Wait/GPU reclaim, either scope, and compressed/uncompressed storage are supported. A new run ID is required; no image rebuild or host apply. |
+| `snapshot_checkpoint_gate` | `null` | Evaluation-only matched-mechanism gate. `case_ids` selects workload cases and `checkpoint_tiers` supplies one finite WARM/COLD destination per generation. At each selected case's real model-wait boundary, both Runtime and Tool are checkpointed through the ordinary pair lifecycle. Use the identical value in control and preparation arms so checkpoint/restore populations match; this intentionally changes workload timing and proves only the isolated source of benefit, not production-policy throughput. Requires `serving_sim`, `agent_and_tool` snapshot pause, incremental-CoW, and a new run ID. |
+| `snapshot_page_management` | `null` | Optional COLD snapshot preparation. `mode: gpu_event` preserves event-only submission using `trigger_event` (`queued`, `prefill_start`, default `prefill_start`). `mode: state_driven` latches accepted role boundaries and rechecks after checkpoint commit; each role/request/generation submits at most once. Requires serving_sim, snapshot pause and tiered/COLD incremental-COW storage. Wait/GPU reclaim, either scope, and compressed/uncompressed storage are supported. A new run ID is required; no image rebuild or host apply. |
+| `snapshot_page_management.runtime_trigger_event`, `.tool_trigger_event` | `prefill_start`, `first_token` | Used only in `state_driven` mode. Both accept `queued`, `prefill_start`, `first_token`, `think_end`; Tool also accepts `disabled`. These are actual phase boundaries, not response ETAs. A boundary remains latched while its model wait is active. Model completion, selected full-VM prewarm and session cleanup cancel preparation; Tool admission also cancels Tool preparation. |
+| `snapshot_page_management.candidate_source` | `shared_lineage` | Ranks authoritative incremental-lineage ranges by shared waiters per byte. Overwritten ancestor pages are excluded. |
+| `snapshot_page_management.expansion_budget_mib` | 1024 | Arm-wide allowance for newly prepared expanded files, using compressed-manifest `decompression_allocated_bytes`, held until demand/cancellation or model-wait end. Insufficient allowance skips preparation without waiting under the snapshot lock. This is separate from bounded prefetch reads and is not a hard Linux page-cache residency limit. Whole-layer decompression remains non-preemptible; no page-selective decompression is implemented. |
 | `snapshot_page_management.prefetch_budget_mib` | required | Arm-wide concurrent preparation budget and upper bound for `max_inflight_mib`. `per_vm_prefetch_mib` defaults to 32 MiB; `max_inflight_mib` to 128 MiB; `io_workers` to 2; `candidate_chunk_kib` to 128 KiB; `batch_window_milliseconds` to 25 ms; `prefetch_bandwidth_mib_s` to 256 MiB/s; `max_ranges_per_vm` to 512; and `signal_max_age_seconds` to 5 seconds. The worker emits one aggregate record per VM/request with batch waiters, authoritative/stale-version bytes, selected/covered bytes, leader-only physical read bytes, expansion time, cancellation, and errors. |
+
+Prefetch `physical_read_bytes` counts deduplicated application reads, including
+page-cache hits; it does not measure SSD block-device traffic. Linux owns cache
+replacement. Include cache charges in the same total memory budget across arms.
 
 Creation retry uses backoff and releases lifecycle slots while waiting. Ambiguous
 HTTP failures use ownership reconciliation rather than blindly creating another

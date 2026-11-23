@@ -85,6 +85,7 @@ Checkpoint = subset('Checkpoint', ResourcesSpec, RESOURCE_FIELDS['checkpoint'],
 
 class Restore(StrictFrozenModel):
     prewarm_events: tuple[Literal['think_end', 'first_token'], ...] = ()
+    promotion: Literal['off', 'if_fit'] = 'off'
 
 
 class Deployment(StrictFrozenModel):
@@ -297,6 +298,7 @@ def lower_arm(design, name, m):
              template_aware_placement=pl['template_affinity'],
              snapshot_aware_residency=snapshots and ck['residency'] == 'value',
              snapshot_next_use_residency=snapshots and ck['residency'] == 'next-use',
+             snapshot_restore_promotion=m['restore']['promotion'],
              mechanisms=m, resource_overrides=r,
              execution_overrides={key: x[key] for key in (*PLACEMENT_FIELDS, 'placement_policy')})
     return p, r, x
@@ -376,6 +378,8 @@ def design_overview(spec):
             requirements.append('snapshot/restore qualification; actual outstanding model requests')
         if p.template_aware_placement:
             requirements.append('physical template-base sharing qualification')
+        if p.snapshot_restore_promotion == 'if_fit':
+            requirements.append('qualified cross-tier snapshot relocation for restore promotion')
         if p.snapshot_next_use_residency:
             requirements.append(
                 'serving_sim queued.est_wait_s feed; online GPU signals; idle reclaim; '

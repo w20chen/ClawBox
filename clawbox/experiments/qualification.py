@@ -1204,7 +1204,16 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         "qualification_case_limit",
         _DEFAULT_QUALIFICATION_CASE_LIMIT,
     )
-    cases = _qualification_cases(source_cases, limit=case_limit)
+    checkpoint_gate = spec.execution.snapshot_checkpoint_gate
+    qualification_source_cases = source_cases
+    if checkpoint_gate is not None:
+        gate_case_ids = set(checkpoint_gate.case_ids)
+        # A matched checkpoint gate must be exercised by qualification, while
+        # the derived smoke spec may contain only its bounded case sample.
+        qualification_source_cases = tuple(
+            case for case in source_cases if case.case_id in gate_case_ids
+        )
+    cases = _qualification_cases(qualification_source_cases, limit=case_limit)
     level = (
         concurrency
         if concurrency is not None
@@ -1257,6 +1266,14 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         "session_arrival_offsets_seconds": None,
         "stagger_interval_seconds": 0.0,
     }
+    if checkpoint_gate is not None:
+        selected_case_ids = {case.case_id for case in cases}
+        execution_updates["snapshot_checkpoint_gate"] = checkpoint_gate.model_copy(update={
+            "case_ids": tuple(
+                case_id for case_id in checkpoint_gate.case_ids
+                if case_id in selected_case_ids
+            ),
+        })
     if spec.workload.session_assignment.value == 'grouped':
         execution_updates['concurrency_levels'] = (len(cases),)
     if spec.execution.tool_placement is not None:
