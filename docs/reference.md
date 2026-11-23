@@ -642,7 +642,9 @@ The native update needs a release rebuild/install and a new run ID, but no guest
 image rebuild, predictor retraining, or kernel change.
 For a tested Shim-only change, `sudo bash scripts/install-incremental-cubesandbox.sh
 --shim-only BUILT_SHIM INSTALLED_SHIM` atomically replaces the versioned binary
-identified by the plan, preserves a backup and prints the rollback command.
+identified by the plan, preserves a backup and prints a `--rollback-shim`
+command. The explicit rollback mode restores the exact saved bytes without
+requiring the legacy Shim to expose the newer lineage capability markers.
 It refuses live VMs or an active cache and does not restart unrelated services.
 Remove the active cache with `experiment base-cache cleanup` followed by
 `experiment base-cache cleanup --apply` before installation, then repeat

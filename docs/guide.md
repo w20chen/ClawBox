@@ -100,6 +100,9 @@ bash scripts/clawbox --sudo experiment base-cache status --verify-bytes
 Preparation copies each unique SSD base once to NUMA-bound, non-swapping tmpfs,
 verifies its bytes and activates a fixed cache. Repeat prepare reuses an identical
 cache. Keep the host idle during prepare/cleanup; do not launch VMs concurrently.
+The Shim-only installer prints an exact `--rollback-shim` command. Use that mode
+to restore a saved legacy binary; `--shim-only` intentionally rejects inputs
+without the new lineage capability markers.
 `init` reads the native XFS catalogs and does not change templates. For manually
 reviewed paths, `examples/base-template-cache.yaml` shows the same plan format.
 In the experiment YAML set `environment.resources.base_template_cache: required`

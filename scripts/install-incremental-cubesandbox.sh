@@ -150,13 +150,53 @@ PY
   cp -p "$target_shim" "$backup_dir/containerd-shim-cube-rs"
   install -m 755 "$source_shim" "$target_shim.clawbox-new"
   mv -f "$target_shim.clawbox-new" "$target_shim"
-  cmp -s "$source_shim" "$target_shim" || {
+  if ! cmp -s "$source_shim" "$target_shim"; then
+    install -m 755 "$backup_dir/containerd-shim-cube-rs" "$target_shim.clawbox-restore"
+    mv -f "$target_shim.clawbox-restore" "$target_shim"
     echo 'installed versioned Shim does not match the tested source Shim' >&2
     exit 1
-  }
+  fi
   sha256sum "$backup_dir/containerd-shim-cube-rs" "$target_shim"
   printf 'Installed Shim only; existing templates and other components preserved.\nBackup: %s\n' "$backup_dir/containerd-shim-cube-rs"
-  printf 'Rollback on an idle, cache-disabled host: sudo bash scripts/install-incremental-cubesandbox.sh --shim-only %q %q\n' "$backup_dir/containerd-shim-cube-rs" "$target_shim"
+  printf 'Rollback on an idle, cache-disabled host: sudo bash scripts/install-incremental-cubesandbox.sh --rollback-shim %q %q\n' "$backup_dir/containerd-shim-cube-rs" "$target_shim"
+  exit 0
+fi
+if [[ ${1:-} == --rollback-shim ]]; then
+  (( $# == 3 )) || { echo 'usage: sudo bash scripts/install-incremental-cubesandbox.sh --rollback-shim SAVED_SHIM INSTALLED_SHIM' >&2; exit 64; }
+  (( EUID == 0 )) || { echo 'run as root' >&2; exit 1; }
+  source_shim=$(realpath "$2")
+  target_shim=$(realpath "$3")
+  [[ -x "$source_shim" && -x "$target_shim" && "$source_shim" != "$target_shim" && $(basename "$target_shim") == containerd-shim-cube-rs ]] || {
+    echo 'supply distinct existing executable saved and installed versioned Shim paths' >&2; exit 1;
+  }
+  install -d -m 700 /run/clawbox
+  exec 9>/run/clawbox/base-cache.lock
+  flock -n 9 || { echo 'experiment/cache maintenance is active; wait before rolling back' >&2; exit 1; }
+  [[ ! -e /run/clawbox/base-cache.json ]] || { echo 'run experiment base-cache cleanup before restoring the Shim' >&2; exit 1; }
+  python3 - <<'PY'
+from pathlib import Path
+for entry in Path('/proc').iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        name = Path((entry/'cmdline').read_bytes().split(b'\0')[0].decode()).name
+        if name in {'containerd-shim-cube-rs', 'cloud-hypervisor', 'cube-hypervisor'}:
+            raise SystemExit('live VM process ' + entry.name + '; finish/destroy VMs before rollback')
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+PY
+  backup_dir=$(mktemp -d /var/tmp/clawbox-shim-rollback.XXXXXXXX)
+  cp -p "$target_shim" "$backup_dir/containerd-shim-cube-rs"
+  install -m 755 "$source_shim" "$target_shim.clawbox-rollback"
+  mv -f "$target_shim.clawbox-rollback" "$target_shim"
+  if ! cmp -s "$source_shim" "$target_shim"; then
+    install -m 755 "$backup_dir/containerd-shim-cube-rs" "$target_shim.clawbox-restore"
+    mv -f "$target_shim.clawbox-restore" "$target_shim"
+    echo 'restored versioned Shim does not match the saved Shim' >&2
+    exit 1
+  fi
+  sha256sum "$target_shim" "$backup_dir/containerd-shim-cube-rs"
+  printf 'Restored saved Shim. Templates and other components were not changed.\nPre-rollback binary: %s\n' "$backup_dir/containerd-shim-cube-rs"
   exit 0
 fi
 if (( $# != 4 )); then

@@ -501,6 +501,11 @@ base-cache preparation, and real VM qualification in the walkthrough before
 launching a new run ID. Qualification includes a direct COLD checkpoint after
 WARM checkpoint/restore cycles.
 
+If the replacement must be reverted, use the exact `--rollback-shim` command
+printed by the installer while the VM pool and base cache are idle. That mode
+restores the saved Shim bytes explicitly; do not feed a legacy saved Shim back
+through `--shim-only`, which correctly requires lineage-capable input.
+
 To undo the complete update, clean the experiment VMs and active base cache,
 then use the peer backup captured before the Shim replacement:
 
