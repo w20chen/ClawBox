@@ -2056,14 +2056,13 @@ class CubeSandboxLifecycle:
                     if self.numa_borrower is not None:
                         self.numa_borrower.release_destroyed(self.sandbox_id)
                 # A staged Tool may be bound locally while Master still owns its
-                # source paused handle. After kill succeeds, release our private
-                # shared-RAM aliases as well as the retired source names.
+                # source paused handle. After kill succeeds, every path tracked
+                # in _warm_paths is now ClawBox-owned dead state. Cube does not
+                # remove caller-supplied snapshot paths when a restored sandbox
+                # is killed, so release both ordinary paths and peer aliases
+                # before verifying and crediting WARM capacity.
                 if self.warm_snapshot_root:
-                    alias_root = Path(self.warm_snapshot_root).resolve() / ".peer-replicas"
-                    self._peer_retired_warm_paths.update(
-                        path for path in self._warm_paths
-                        if Path(path).resolve().is_relative_to(alias_root)
-                    )
+                    self._peer_retired_warm_paths.update(self._warm_paths)
                 self._release_peer_retired_warm_paths()
                 # Cube only knows its native snapshot files.  Compressed page
                 # containers are owned by ClawBox and must be removed before

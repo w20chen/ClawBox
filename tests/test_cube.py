@@ -1435,8 +1435,9 @@ def test_checkpoint_does_not_reconcile_server_timeout_as_completed_pause(tmp_pat
         lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
     assert lifecycle.state.value == "unknown"
     assert pool.reserved_bytes == 8192
-    with pytest.raises(Exception, match="snapshot files remain"):
-        lifecycle.close()
+    lifecycle.close()
+    assert not any(path.is_file() for path in (tmp_path / "warm").rglob("*"))
+    assert pool.reserved_bytes == pool.committed_bytes == 0
 
 
 def test_checkpoint_slot_timeout_aborts_unstarted_warm_reservation(tmp_path) -> None:
@@ -1654,7 +1655,7 @@ def test_failed_warm_manifest_retains_inflight_capacity_until_destroy():
     assert pool.reserved_bytes == pool.committed_bytes == 0
 
 
-def test_failed_warm_cleanup_keeps_capacity_until_files_are_removed(tmp_path):
+def test_destroy_removes_uncommitted_warm_files_before_releasing_capacity(tmp_path):
     _Sandbox.items = {}
     client = CubeSandboxClient(sandbox_class=_Sandbox)
     pool = WarmSnapshotPool(2048)
@@ -1673,12 +1674,9 @@ def test_failed_warm_cleanup_keeps_capacity_until_files_are_removed(tmp_path):
     client.pause_sandbox = lost_manifest
     with pytest.raises(RuntimeError, match='manifest lost'):
         lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
-    with pytest.raises(Exception, match='snapshot files remain'):
-        lifecycle.close()
-    assert pool.reserved_bytes == 1024
-    assert not _Sandbox.items
-    written[0].unlink()
     lifecycle.close()
+    assert not written[0].exists()
+    assert not _Sandbox.items
     assert pool.reserved_bytes == pool.committed_bytes == 0
 
 
