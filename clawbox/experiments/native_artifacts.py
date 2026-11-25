@@ -248,6 +248,31 @@ def _jsonl(raw: bytes, label: str) -> list[dict[str, Any]]:
     return records
 
 
+def _runtime_request_failure(record: dict[str, Any]) -> tuple[str, str] | None:
+    """Return an explicit pre-execution Runtime failure and its message."""
+    result = (record.get("output") or {}).get("result") or {}
+    details = result.get("details") or {}
+    message = str(details.get("error") or "") or "\n".join(
+        str(item.get("text") or "") for item in result.get("content", [])
+        if isinstance(item, dict)
+    )
+    execution = record.get("execution") or {}
+    # A payload or Tool cgroup proves the request crossed the execution
+    # boundary. Such failures must remain in the exact-ID join.
+    if execution.get("payload_pid") or execution.get("cgroup_path"):
+        return None
+    if ("command was not executed" in message
+            and details.get("failureKind") == "runtime-error"):
+        return "command_not_executed", message
+    if (details.get("status") in ("error", "failed")
+            and "exec preflight:" in message):
+        return "exec_preflight_refused", message
+    if (details.get("status") in ("error", "failed")
+            and re.search(r"(?:ssh exited with code|Error code:) 125\b", message)):
+        return "ssh_transport_failed", message
+    return None
+
+
 def runtime_request_failures(paths: list[str], *, runtime_id: str) -> list[dict[str, Any]]:
     """Retain explicit Runtime refusals and transport failures before the join.
 
@@ -275,21 +300,10 @@ def runtime_request_failures(paths: list[str], *, runtime_id: str) -> list[dict[
             if (record.get("record_type") != "span_end" or record.get("kind") != "tool"
                     or record_runtime_id not in (None, runtime_id)):
                 continue
-            result = (record.get("output") or {}).get("result") or {}
-            details = result.get("details") or {}
-            message = str(details.get("error") or "") or "\n".join(
-                str(item.get("text") or "") for item in result.get("content", [])
-                if isinstance(item, dict)
-            )
-            if "command was not executed" in message and details.get("failureKind") == "runtime-error":
-                reason = "command_not_executed"
-            elif details.get("status") in ("error", "failed") and "exec preflight:" in message:
-                reason = "exec_preflight_refused"
-            elif (details.get("status") in ("error", "failed")
-                    and re.search(r"(?:ssh exited with code|Error code:) 125\b", message)):
-                reason = "ssh_transport_failed"
-            else:
+            failure = _runtime_request_failure(record)
+            if failure is None:
                 continue
+            reason, message = failure
             key = (record.get("session_id"), record.get("trace_id"),
                    record.get("span_id"), record.get("name"), reason, message)
             if key in seen:
@@ -320,6 +334,15 @@ def _runtime_spans(
     strict join check.
     """
     spans: list[dict[str, Any]] = []
+    rejected_span_keys: set[tuple[str, str, str, str]] = set()
+
+    def logical_span_key(record: dict[str, Any]) -> tuple[str, str, str, str]:
+        execution = record.get("execution") or {}
+        return tuple(str(value or "") for value in (
+            record.get("trace_id"), record.get("span_id"),
+            record.get("session_id"), execution.get("execution_id"),
+        ))
+
     for rendered_path in paths:
         path = Path(rendered_path)
         if "tool-resource" in path.parts or path.suffix != ".jsonl":
@@ -368,28 +391,22 @@ def _runtime_spans(
                 explicit_id = envelope_id
             if not explicit_id:
                 continue
-            # OpenClaw/ClawTune can assign an execution envelope before the
-            # SSH sandbox backend rejects the call locally (for example, an
-            # unavailable literal workdir). No policy admission or Tool-side
-            # artifact can exist when its own result says the command was not
-            # executed, so it is evidence of a rejected Tool request rather
-            # than a native execution to join.
-            result = (record.get("output") or {}).get("result") or {}
-            details = result.get("details") or {}
-            content = result.get("content") or []
-            rejected_before_execution = (
-                details.get("failureKind") == "runtime-error"
-                and details.get("status") == "failed"
-                and details.get("exitCode") is None
-                and any(
-                    isinstance(item, dict)
-                    and "command was not executed" in str(item.get("text") or "")
-                    for item in content
-                )
-            )
-            if rejected_before_execution:
+            # The direct writer can mirror a sidecar-normalized rejection as
+            # a superficially successful span. Remember the logical identity
+            # and remove every mirror after all trace files have been read.
+            # Otherwise the successful-looking fallback becomes an invented
+            # native execution with no policy or Tool-side artifact.
+            if _runtime_request_failure(record) is not None:
+                key = logical_span_key(record)
+                if all(key):
+                    rejected_span_keys.add(key)
                 continue
             spans.append(record)
+    if rejected_span_keys:
+        spans = [
+            record for record in spans
+            if logical_span_key(record) not in rejected_span_keys
+        ]
     by_execution: dict[str, list[dict[str, Any]]] = {}
     for span in spans:
         execution_id = str(span["execution"]["execution_id"])

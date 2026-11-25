@@ -482,6 +482,70 @@ def test_runtime_spans_excludes_tool_request_rejected_before_execution(
     assert len(_runtime_spans([str(path)])) == 1
 
 
+@pytest.mark.parametrize("details,content", [
+    (
+        {"failureKind": "runtime-error", "status": "failed", "exitCode": None},
+        'workdir "/workspace" is unavailable: command was not executed.',
+    ),
+    (
+        {"status": "error", "error": "exec preflight: unsupported invocation"},
+        "",
+    ),
+    (
+        {"status": "error", "error": "ssh exited with code 125"},
+        "",
+    ),
+])
+def test_runtime_spans_removes_successful_fallback_mirror_of_rejection(
+    tmp_path: Path, details: dict[str, object], content: str,
+) -> None:
+    identity = {
+        "record_type": "span_end", "kind": "tool", "name": "exec",
+        "trace_id": "trace-a", "span_id": "call-a", "session_id": "session-a",
+        "execution": {"execution_id": "exec-rejected", "mode": "launcher"},
+    }
+    fallback = {
+        **identity, "status": {"code": "ok"},
+        "output": {"exit_code": 0, "result": None},
+    }
+    normalized = {
+        **identity, "status": {"code": "error"},
+        "output": {"exit_code": None, "result": {
+            "details": details,
+            "content": [{"type": "text", "text": content}],
+        }},
+    }
+    fallback_path = tmp_path / "fallback.jsonl"
+    normalized_path = tmp_path / "normalized.jsonl"
+    fallback_path.write_text(json.dumps(fallback) + "\n", encoding="utf-8")
+    normalized_path.write_text(json.dumps(normalized) + "\n", encoding="utf-8")
+
+    assert _runtime_spans([
+        str(fallback_path), str(normalized_path),
+    ]) == []
+    assert _runtime_spans([
+        str(normalized_path), str(fallback_path),
+    ]) == []
+
+
+def test_runtime_spans_keeps_failure_after_execution_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.jsonl"
+    path.write_text(json.dumps({
+        "record_type": "span_end", "kind": "tool", "name": "exec",
+        "trace_id": "trace-a", "span_id": "call-a", "session_id": "session-a",
+        "status": {"code": "error"},
+        "output": {"result": {
+            "details": {"status": "error", "error": "ssh exited with code 125"},
+        }},
+        "execution": {
+            "execution_id": "exec-started", "payload_pid": 123,
+            "cgroup_path": "/sys/fs/cgroup/tool",
+        },
+    }) + "\n", encoding="utf-8")
+
+    assert len(_runtime_spans([str(path)])) == 1
+
+
 def test_runtime_spans_recovers_base64_clawtune_envelope_identity(
     tmp_path: Path,
 ) -> None:
