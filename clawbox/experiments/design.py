@@ -84,7 +84,8 @@ Checkpoint = subset('Checkpoint', ResourcesSpec, RESOURCE_FIELDS['checkpoint'],
 
 
 class Restore(StrictFrozenModel):
-    prewarm_events: tuple[Literal['think_end', 'first_token'], ...] = ()
+    prewarm: Literal['off', 'eta'] = 'off'
+    prewarm_lead_seconds: float = Field(default=2., gt=0, allow_inf_nan=False)
     promotion: Literal['off', 'if_fit'] = 'off'
 
 
@@ -191,8 +192,8 @@ def lower_arm(design, name, m):
     snapshots = idle['policy'] != 'off'
     coordination = m['coordination']
     os_deployment = m['deployment']['mode'] == 'os-default'
-    if m['restore']['prewarm_events'] and not snapshots:
-        raise ValueError(f'{name}: prewarm_events requires idle reclaim; resident VMs need no restore')
+    if m['restore']['prewarm'] == 'eta' and not snapshots:
+        raise ValueError(f'{name}: ETA prewarm requires idle reclaim; resident VMs need no restore')
     if pl['cpu_qos_group_idle'] and pl['cpu_qos_policy'] == 'off':
         raise ValueError(f'{name}: cpu_qos_group_idle requires idle or idle_core CPU QoS')
     if pl['cpu_qos_policy'] != 'off' and (
@@ -293,7 +294,8 @@ def lower_arm(design, name, m):
              restore='reactive' if snapshots else 'none',
              gpu_reclaim_min_remaining_seconds=idle['gpu_reclaim_min_remaining_seconds'],
              gpu_signal_max_age_seconds=idle['gpu_signal_max_age_seconds'],
-             gpu_prewarm_events=m['restore']['prewarm_events'],
+             gpu_prewarm=m['restore']['prewarm'],
+             gpu_prewarm_lead_seconds=m['restore']['prewarm_lead_seconds'],
              gpu_signals=design.execution.snapshot_page_management is not None,
              template_aware_placement=pl['template_affinity'],
              snapshot_aware_residency=snapshots and ck['residency'] == 'value',
@@ -382,11 +384,11 @@ def design_overview(spec):
             requirements.append('qualified cross-tier snapshot relocation for restore promotion')
         if p.snapshot_next_use_residency:
             requirements.append(
-                'serving_sim queued.est_wait_s feed; online GPU signals; idle reclaim; '
+                'serving_sim response_forecast feed with expiry; online GPU signals; idle reclaim; '
                 'qualified cross-tier snapshot relocation'
             )
             warnings.append(
-                'next-use uses the queue/prefill estimate, not full model-response completion time.'
+                'next-use uses expiring native-response ETA with recorded current-call output length; excludes HTTP and VM restore.'
             )
         costs = resolved.resources.snapshot_residency_costs
         if p.snapshot_aware_residency and costs and costs.cold_restore_seconds_per_gib <= costs.warm_restore_seconds_per_gib:

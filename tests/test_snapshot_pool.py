@@ -143,7 +143,7 @@ def commit_next_use(
     pool.commit(
         key(index), path=f"/warm/{index}", logical_bytes=size,
         allocated_bytes=size, transferred_bytes=size,
-        next_use_monotonic_s=deadline,
+        next_use_monotonic_s=deadline, next_use_expires_at=float('inf'),
         spiller=(spilled.append if spilled is not None else None),
     )
 
@@ -154,11 +154,26 @@ def test_next_use_admission_evicts_strictly_later_snapshots_latest_first():
     commit_next_use(pool, 1, 40, 20, spilled)
     commit_next_use(pool, 2, 40, 50, spilled)
     pool.reserve_for_admission(
-        key(3), 50, timeout_s=.01, next_use_monotonic_s=10,
+        key(3), 50, timeout_s=.01, next_use_monotonic_s=10, next_use_expires_at=float('inf'),
     )
     assert [item.key for item in spilled] == [key(2)]
     assert pool.reserved_bytes == 50
     assert pool.snapshot()["residency_policy"] == "next_use"
+
+
+def test_expired_forecast_cannot_rank_candidate_or_victim():
+    from clawbox.experiments.snapshot_pool import WarmAdmissionRejected
+    pool = WarmSnapshotPool(100, next_use_aware=True)
+    commit_next_use(pool, 1, 100, 500, [])
+    pool.update_next_use(key(1), 500, revision=1, expires_at=0.)
+    with pytest.raises(WarmAdmissionRejected):
+        pool.reserve_for_admission(key(2), 1, timeout_s=.01,
+                                   next_use_monotonic_s=10,
+                                   next_use_expires_at=float('inf'))
+    pool.update_next_use(key(1), 500, revision=2, expires_at=float('inf'))
+    with pytest.raises(WarmAdmissionRejected):
+        pool.reserve_for_admission(key(2), 1, timeout_s=.01,
+                                   next_use_monotonic_s=10, next_use_expires_at=0.)
 
 
 @pytest.mark.parametrize("victim,candidate", [(10, 10), (9, 10), (None, 10)])
@@ -167,7 +182,7 @@ def test_next_use_admission_rejects_equal_earlier_or_unknown_victim(victim, cand
     commit_next_use(pool, 1, 100, victim, [])
     with pytest.raises(WarmAdmissionRejected):
         pool.reserve_for_admission(
-            key(2), 1, timeout_s=.01, next_use_monotonic_s=candidate,
+            key(2), 1, timeout_s=.01, next_use_monotonic_s=candidate, next_use_expires_at=float('inf'),
         )
     assert pool.manifest(key(1)).pinned == 0
 
@@ -183,12 +198,12 @@ def test_next_use_admission_requires_enough_actual_reclaimable_bytes():
         pool.commit(
             key(index), path=f"/warm/{index}", logical_bytes=50,
             allocated_bytes=50, transferred_bytes=50,
-            next_use_monotonic_s=deadline, spiller=spilled.append,
+            next_use_monotonic_s=deadline, next_use_expires_at=float('inf'), spiller=spilled.append,
             owned_layer_identities=(shared,),
             owned_layer_files={shared: ("/warm/shared", 50)},
         )
     pool.reserve_for_admission(
-        key(3), 80, timeout_s=.01, next_use_monotonic_s=10,
+        key(3), 80, timeout_s=.01, next_use_monotonic_s=10, next_use_expires_at=float('inf'),
     )
     assert [item.key for item in spilled] == [key(1), key(2)]
 
@@ -198,7 +213,7 @@ def test_next_use_fit_needs_no_estimate_and_revision_updates_are_ordered():
     pool.reserve_for_admission(key(1), 50, timeout_s=.01)
     pool.commit(
         key(1), path="/warm/1", logical_bytes=50, allocated_bytes=50,
-        transferred_bytes=50, next_use_monotonic_s=20, next_use_revision=2,
+        transferred_bytes=50, next_use_monotonic_s=20, next_use_expires_at=float('inf'), next_use_revision=2,
     )
     pool.update_next_use(key(1), 99, revision=1)
     assert pool.manifest(key(1)).next_use_monotonic_s == 20
@@ -231,10 +246,10 @@ def test_slow_spill_does_not_hold_admission_lock():
     pool.reserve(key(1), 100)
     pool.commit(
         key(1), path="/warm/1", logical_bytes=100, allocated_bytes=100,
-        transferred_bytes=100, next_use_monotonic_s=20, spiller=spill,
+        transferred_bytes=100, next_use_monotonic_s=20, next_use_expires_at=float('inf'), spiller=spill,
     )
     pool.reserve_for_admission(
-        key(2), 100, timeout_s=.01, next_use_monotonic_s=10,
+        key(2), 100, timeout_s=.01, next_use_monotonic_s=10, next_use_expires_at=float('inf'),
     )
     assert checked.is_set()
 

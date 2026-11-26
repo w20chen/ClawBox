@@ -266,8 +266,9 @@ Future WARM/tiered baselines use `mechanisms.checkpoint.residency: next-use`;
 keep `lru` and `value` only for explicit comparison arms. Set storage
 `tiered`, and idle reclaim `wait` or `gpu`; use `inference.backend: serving_sim`.
 Both Tool-only and pair scope are supported. Prewarming is separately selected by
-`mechanisms.restore.prewarm_events: [think_end]`, `[first_token]`, or both; the
-default `[]` leaves restore reactive. Native snapshot, WARM budget and measured
+`mechanisms.restore.prewarm: eta` with `prewarm_lead_seconds: 2.0`;
+the default `off` leaves restore reactive. The lead is an explicit restore-time
+budget including margin, not an automatically measured restore cost. Native snapshot, WARM budget and measured
 snapshot support prerequisites still apply; no borrow/checkpoint cost model is
 used. See [option relationships](option-relations.md).
 
@@ -715,7 +716,8 @@ new run ID. Full-VM prewarm remains a separate choice.
 ```yaml
 mechanisms:
   restore:
-    prewarm_events: []
+    prewarm: 'off'
+    prewarm_lead_seconds: 2.0
     promotion: 'off'
 execution:
   snapshot_page_management:
@@ -734,7 +736,8 @@ The state-driven mode prepares data while the VM remains paused. It remembers
 accepted phase boundaries until the actual model wait ends and rechecks when
 the checkpoint commits. Runtime and Tool use separate boundaries; choose
 `tool_trigger_event: disabled` for a Runtime-only preparation arm. Selected
-`prewarm_events` still cancel preparation and request full VM restoration.
+`prewarm: eta` cancels preparation when a fresh response forecast enters the
+configured restore lead time and full VM restoration starts.
 `promotion: off` avoids whole-lineage copying on demand; `if_fit` explicitly
 reproduces the earlier next-use promotion behavior and also works with LRU.
 
@@ -1500,26 +1503,50 @@ GPU reports. This changes reporting only, with no host apply, image rebuild or
 retraining. Keep both GPU output and the CPU run directory. The CPU records actual
 Tool work, VM lifecycle and transport observations; the simulator records its
 predicted GPU timeline. Inspect wall-clock delivery lag before interpreting a
-large-concurrency result. When a call has no recorded reasoning-token count, the
-native simulator emits no `think_end`. With
-`mechanisms.restore.prewarm_events: [first_token]`, every observed answer-worker `first_token`
-starts the same one-shot, capacity-checked prewarm. This does not read the CPU
-trace, treat missing counts as zero, or claim that decode is complete. Because
-the simulator emits `first_token` before `think_start`/`think_end`, set
-`mechanisms.restore.prewarm_events: [think_end]` when prewarm should wait for a
-recorded reasoning boundary (and remain reactive on calls without one). Use `[]`
-to disable prewarm entirely. Only an online `think_end` marked `source: trace`
-is accepted as a reasoning boundary; other sources are logged but ignored.
+large-concurrency result.
 
-With pair reclaim and the corresponding prewarm event enabled, `think_end` or
-`first_token` starts pre-restoring both VMs: Runtime first
-(including its model connection), then Tool and its telemetry bridge. Restoration
-may wait for memory admission or an in-progress checkpoint. Tool-only reclaim
-prewarms only Tool. Both scopes support wait-based or GPU-aware reclaim. Prewarm
-overlaps with the remaining model generation; it does not execute a Tool command early. Already
-resident VMs need no restore. With both prewarm signals unavailable or disabled,
-Runtime restores for the full response and Tool restores when its actual command
-reaches admission.
+For traces without reasoning counts (including the 502-trace workload), use:
+```yaml
+mechanisms:
+  idle_reclaim: {policy: gpu, scope: agent_and_tool}
+  checkpoint: {mechanism: incremental-cow, storage: tiered, residency: next-use}
+  restore: {prewarm: eta, prewarm_lead_seconds: 2.0, promotion: 'off'}
+execution:
+  snapshot_page_management:
+    mode: state_driven
+    runtime_trigger_event: prefill_start
+    tool_trigger_event: first_token
+```
+Merge these fields into the existing baseline; keep its qualified environment,
+WARM capacity and page-preparation budgets. Replace the removed `prewarm_events`
+field. Validate the baseline/workload, qualify at small concurrency, then launch
+with a new run ID using the commands above and the current ClawBox adapter.
+
+The sequence is queue → prefill admission → first output token → decoding →
+complete response. Prefill admission prepares Runtime snapshot pages; the first
+token prepares Tool pages. Neither starts full VM restore. GPU-side
+`response_forecast` combines the **recorded current call's total output length**
+with observed token progress and rolling generation speed. This is a trace-length
+oracle experiment, not a predictor of unknown live-model output length. No future
+call or recorded LLM duration is consulted. The ETA targets native complete-response
+readiness, including the simulator's return delay, excluding HTTP delivery and CPU
+restore. It is not an ETA for the next Tool command.
+
+Fresh response ETA drives all three decisions: GPU reclaim chooses the idle
+pair with the longest remaining time above the threshold; next-use ranks snapshot
+residency; ETA prewarm starts Runtime then Tool when remaining time is at most
+the configured lead. Ordinary memory admission and Tool bridge readiness still
+apply. A deferred Tool prewarm retries on subsequent fresh forecasts. Actual
+response delivery always waits for Runtime readiness; Tool commands retain their
+normal admission path.
+
+Queue ETA is available only with both a usable native queue/prefill estimate and
+a recent engine generation rate. Prefill admission invalidates it until output
+progress establishes a rate. KV waits, preemption, recomputation and expired
+observations invalidate ETA; pending restores recheck it before starting.
+Already-started restores finish. Missing reasoning counts need no special fallback.
+Short calls may finish before a usable forecast; their actual response restores
+Runtime and their actual command restores Tool.
 
 See the [inference and GPU policy options](reference.md) for defaults and which
 changes require a new run, qualification, image build or retraining.

@@ -87,6 +87,9 @@ def main(argv=None):
                        help='positive finite target milliseconds per output token; non-physical, excludes decode-time-scale')
     parser.add_argument('--cpu-refill-mode', choices=['off', 'decode-first'], default='off',
                         help='CPU-aware decode-first policy; default: off')
+    parser.add_argument('--forecast-interval-seconds', type=float, default=.5)
+    parser.add_argument('--forecast-window-seconds', type=float, default=5.)
+    parser.add_argument('--forecast-validity-seconds', type=float, default=2.)
     parser.add_argument('--cpu-refill-feedback-interval-seconds', type=float, default=1.)
     parser.add_argument('--cpu-refill-activation-floor-utilization', type=float, default=0.)
     parser.add_argument('--cpu-refill-enter-utilization', type=float, default=.90)
@@ -132,6 +135,10 @@ def main(argv=None):
                        args.cpu_refill_release_steps) < 1):
             raise ValueError('invalid cpu_refill hysteresis, interval or cadence')
         require_host()
+        if (not all(math.isfinite(v) and v > 0 for v in (args.forecast_interval_seconds,
+                args.forecast_window_seconds, args.forecast_validity_seconds))
+                or args.forecast_interval_seconds >= args.forecast_validity_seconds):
+            raise ValueError('forecast requires positive window and 0 < interval < validity')
         import resource
         if args.nofile < 1 or not math.isfinite(args.diagnostic_interval_seconds) or args.diagnostic_interval_seconds <= 0:
             raise ValueError('nofile and diagnostic interval must be positive and finite')
@@ -191,6 +198,9 @@ def main(argv=None):
             app = create_app(args.out.resolve(), args.topology, args.trace_catalog.resolve(),
                              persistence=args.persistence,
                              diagnostic_interval_seconds=args.diagnostic_interval_seconds,
+                             forecast_interval_seconds=args.forecast_interval_seconds,
+                             forecast_window_seconds=args.forecast_window_seconds,
+                             forecast_validity_seconds=args.forecast_validity_seconds,
                              v0=args.v0, k=args.k, tokenizer_dir=args.tokenizer_dir,
                              decode_time_scale=args.decode_time_scale, tpot_ms=args.tpot_ms,
                               cpu_refill_mode=args.cpu_refill_mode,

@@ -154,7 +154,7 @@ def app():
     feed = sd.attach_routes(result, ['key'])
     result.state.feed = feed
     result.state.service = NS(feed=feed, cfg={'topology': {'cards': []}},
-        running=True, driver=NS(done=lambda: False), registry=NS(requests={}),
+        clawbox_forecast={}, running=True, driver=NS(done=lambda: False), registry=NS(requests={}),
         refs=NS(traces={'trace': ()}), clock=NS(v0=0., k=1.), epoch0=100., trace_prompts=None,
         cpu_refill=NS(stats=lambda: {'config': {'mode': 'off'}}))
     return attach_management(result, input_digest='catalog')

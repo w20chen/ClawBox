@@ -175,25 +175,25 @@ def test_gpu_signal_consumers_are_independent_of_reclaim_choice(reclaim, scope):
     b['inference']['backend'] = 'serving_sim'
     b['mechanisms']['idle_reclaim'].update(policy=reclaim, scope=scope)
     b['mechanisms']['checkpoint'].update(storage='tiered', residency='next-use')
-    b['mechanisms']['restore']['prewarm_events'] = ['think_end']
+    b['mechanisms']['restore']['prewarm'] = 'eta'
     spec = compile_pair(b, w)
     assert spec.policies[0].snapshot_next_use_residency
     assert spec.policies[0].consumes_gpu_signals
     assert spec.policies[0].runtime_snapshot == (scope == 'agent_and_tool')
 
 
-@pytest.mark.parametrize('events,expected', [([], False), (['think_end'], True), (['first_token'], False)])
+@pytest.mark.parametrize('events,expected', [('off', False), ('eta', True)])
 def test_prewarm_can_be_independently_disabled_with_wait_reclaim(events, expected):
     from test_gpu_policy import Lifecycle
     b, w = documents()
     b['inference']['backend'] = 'serving_sim'
     b['mechanisms']['idle_reclaim'].update(policy='wait', scope='tool')
-    b['mechanisms']['restore']['prewarm_events'] = events
+    b['mechanisms']['restore']['prewarm'] = events
     policy = compile_pair(b, w).policies[0]
     c = PolicyCoordinator(policy, budget_mib=32, emergency_free_mib=0, operation_headroom_mib=0)
     c.register('s', Lifecycle())
     c.begin_model_wait('s', 'r')
-    result = c.observe_gpu_signal('s', 'r', dict(event='think_end', role='A', source='trace'))
+    result = c.observe_gpu_signal('s', 'r', __import__('test_gpu_policy').forecast())
     assert result['should_prewarm'] is expected
 
 
@@ -275,11 +275,11 @@ def test_actual_worker_prewarm_callbacks_obey_independent_choices(reclaim, pair_
     from test_serving_sim_gateway import worker_prewarm_environment
     env, restored, events, executor = worker_prewarm_environment(
         reclaim=reclaim, runtime_snapshot=pair_scope,
-        prewarm_events=('think_end',) if enabled else ())
+        prewarm='eta' if enabled else 'off')
     env['runtime_lifecycle'].resident = not pair_scope
     try:
         env['on_model_signal']({'session_id': 'session', 'request_id': 'request',
-            'event': 'think_end', 'role': 'A', 'source': 'trace', 't': 2.})
+            **__import__('test_gpu_policy').forecast(), 't': 2.})
     finally:
         executor.close()
     executor.check()

@@ -118,9 +118,11 @@ bytes. This is a single-host NUMA experiment, not a simulated cross-host fabric.
 Checkpointing does not interrupt active Tool commands. During an outstanding
 model request, idle reclaim can checkpoint the Tool VM or both VMs. A pending
 replay response is held until Runtime is restored; Tool can remain checkpointed
-until its next command. Explicit `mechanisms.restore.prewarm_events` selects
-`think_end`, `first_token`, or both; the default empty list keeps restore reactive.
-It works with either wait or GPU reclaim and either scope. Selected events request
+until its next command. Explicit `mechanisms.restore.prewarm: eta` uses a fresh
+response forecast within `prewarm_lead_seconds`; default `off` keeps restore reactive.
+The forecast combines the recorded current output length with online token speed,
+so this experiment uses an explicit length oracle. It works with either wait or
+GPU reclaim and either scope. A valid ETA within the lead requests
 Runtime then Tool restoration through existing memory admission, skipping resident VMs. Tool bridge readiness is checked, but command prediction, growth
 admission and SSH identity checks still occur at the actual command boundary.
 

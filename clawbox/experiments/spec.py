@@ -148,6 +148,9 @@ class ServingSimLaunchSpec(StrictFrozenModel):
     topology: str = Field(min_length=1)
     decode_time_scale: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     tpot_ms: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    forecast_interval_seconds: float = Field(default=.5, gt=0, allow_inf_nan=False)
+    forecast_window_seconds: float = Field(default=5., gt=0, allow_inf_nan=False)
+    forecast_validity_seconds: float = Field(default=2., gt=0, allow_inf_nan=False)
     cluster_count: int = Field(default=1, ge=1)
     routing: Literal['sticky_balanced_by_case'] = 'sticky_balanced_by_case'
     persistence: Literal['native', 'final'] = 'final'
@@ -179,6 +182,8 @@ class ServingSimLaunchSpec(StrictFrozenModel):
 
     @model_validator(mode='after')
     def launch_contract(self):
+        if self.forecast_interval_seconds >= self.forecast_validity_seconds:
+            raise ValueError('forecast interval must be below forecast validity')
         if self.decode_time_scale is not None and self.tpot_ms is not None:
             raise ValueError('decode_time_scale and tpot_ms are mutually exclusive')
         for name in ('sim_root', 'venv', 'trace_catalog', 'tokenizer_dir', 'cache_dir', 'hf_hub_cache'):
@@ -229,7 +234,7 @@ class InferenceSpec(StrictFrozenModel):
         forbidden = {"model_wait_prediction_seconds", "model_wait_prediction_source",
                      "oracle_model_wait_seconds", "oracle_model_wait_source"}
         if forbidden.intersection(self.configuration):
-            raise ValueError("LLM-duration prediction/oracle policy is unsupported; remove model-wait prediction settings and use actual wait events")
+            raise ValueError("CPU-side LLM-duration prediction settings are unsupported; use serving_sim response forecasts through GPU coordination")
         if 'serving_sim_launch' in self.configuration:
             if self.backend is not InferenceBackend.SERVING_SIM:
                 raise ValueError('serving_sim_launch requires the serving_sim backend')
@@ -490,8 +495,8 @@ class SnapshotPageManagementSpec(StrictFrozenModel):
     mode: Literal["gpu_event", "state_driven"] = "gpu_event"
     candidate_source: Literal["shared_lineage"] = "shared_lineage"
     trigger_event: Literal["queued", "prefill_start"] = "prefill_start"
-    runtime_trigger_event: Literal["queued", "prefill_start", "first_token", "think_end"] = "prefill_start"
-    tool_trigger_event: Literal["queued", "prefill_start", "first_token", "think_end", "disabled"] = "first_token"
+    runtime_trigger_event: Literal["queued", "prefill_start", "first_token"] = "prefill_start"
+    tool_trigger_event: Literal["queued", "prefill_start", "first_token", "disabled"] = "first_token"
     expansion_budget_mib: int = Field(default=1024, ge=1)
     prefetch_budget_mib: int = Field(ge=1)
     per_vm_prefetch_mib: int = Field(default=32, ge=1)
@@ -986,12 +991,13 @@ class PolicySpec(StrictFrozenModel):
     runtime_snapshot: bool = True
     gpu_reclaim_min_remaining_seconds: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     gpu_signal_max_age_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
-    gpu_prewarm_events: tuple[Literal['think_end', 'first_token'], ...] = ()
+    gpu_prewarm: Literal['off', 'eta'] = 'off'
+    gpu_prewarm_lead_seconds: float = Field(default=2., gt=0, allow_inf_nan=False)
     gpu_signals: bool = False
 
     @property
     def consumes_gpu_signals(self) -> bool:
-        return (self.gpu_signals or bool(self.gpu_prewarm_events)
+        return (self.gpu_signals or self.gpu_prewarm == 'eta'
                 or self.eviction is EvictionPolicy.GPU_AWARE_PRESSURE
                 or self.snapshot_next_use_residency)
     resource_overrides: dict[str, Any] = Field(default_factory=dict)
@@ -1007,7 +1013,7 @@ class PolicySpec(StrictFrozenModel):
     @model_validator(mode="after")
     def valid_tuple(self) -> "PolicySpec":
         if self.idle_release_ranking or self.runtime_control.coordinates_release:
-            raise ValueError("LLM-duration prediction is not implemented; use wait_aware_pressure with reactive restore, without idle_release_ranking or release-cost runtime control")
+            raise ValueError("CPU-side model-wait runtime prediction is unsupported; use GPU response forecasts or wait_aware_pressure, without idle_release_ranking or release-cost runtime control")
         if self.deployment == "os-default" and (
             self.admission is not AdmissionPolicy.OFF
             or self.runtime_control not in {RuntimeControl.OFF, RuntimeControl.NO_CONTROL}
@@ -1042,7 +1048,7 @@ class PolicySpec(StrictFrozenModel):
             raise ValueError(
                 "snapshot_next_use_residency requires snapshot pause"
             )
-        if self.gpu_prewarm_events and self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
+        if self.gpu_prewarm == 'eta' and self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
             raise ValueError('GPU prewarm requires snapshot pause')
         if self.snapshot_restore_promotion != "off" and self.reclamation is not ReclamationPolicy.SNAPSHOT_PAUSE:
             raise ValueError("restore.promotion requires snapshot pause")

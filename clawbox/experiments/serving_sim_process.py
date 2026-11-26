@@ -122,6 +122,7 @@ class ServingSimProcess:
             if value is not None:
                 command += ['--' + name.replace('_', '-'), str(value)]
         for name in (
+            'forecast_interval_seconds', 'forecast_window_seconds', 'forecast_validity_seconds',
             'cpu_refill_mode', 'cpu_refill_feedback_interval_seconds',
             'cpu_refill_activation_floor_utilization',
             'cpu_refill_enter_utilization', 'cpu_refill_exit_utilization',

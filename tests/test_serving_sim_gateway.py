@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from trace_fixtures import llm_spans, write_spans
+from test_gpu_policy import forecast
 
 from clawbox.experiments.model_gateway import SessionGatewayState, ManagedModelGateway
 from clawbox.experiments.policy import PolicyCoordinator, PolicyEventExecutor
@@ -56,7 +57,8 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
         def do_GET(self):
             if self.path == "/v1/clawbox/simulator/info":
                 body = json.dumps({"ready": True, "clock": {"k": 1},
-                    "adapter_protocol": 2,
+                    "adapter_protocol": 3,
+                    "response_forecast": dict(protocol=1, interval_seconds=.5, window_seconds=5., validity_seconds=2., target="native_response_ready", output_length_source="recorded_current_call"),
                     "prompt_source": "actual",
                     "traces": {"trace": {"model_calls": 1,
                         "missing_reasoning_calls": int(state.mode == "no_reasoning")}},
@@ -115,7 +117,7 @@ def simulator(mode="success", *, clock_offset_s=0., info_override=None):
                            session_id=body["session_id"], replay=body["replay"], t=1.)
             if state.mode == "wrong_binding":
                 binding["replay"] = {"trace_id": "different", "call_id": 0}
-            self.wfile.write(('event: clawbox\ndata: ' + json.dumps(dict(protocol=2,
+            self.wfile.write(('event: clawbox\ndata: ' + json.dumps(dict(protocol=3,
                 session_id=body['session_id'], request_id=body['request_id'],
                 replay=body['replay'], process_sessions={})) + '\n\n').encode())
             self.emit({**binding, "choices": [{"index": 0,
@@ -225,6 +227,18 @@ def test_service_must_explicitly_confirm_no_previous_requests(client_factory, co
 def test_service_must_use_actual_agent_prompts(client_factory, source):
     with simulator(info_override={'prompt_source': source}) as server:
         with pytest.raises(ValueError, match='actual Agent prompts'):
+            with client_factory(server):
+                pass
+        assert not server.posts
+
+
+@pytest.mark.parametrize('override,reason', [
+    ({'adapter_protocol': 2}, 'protocol 3'),
+    ({'response_forecast': {}}, 'forecast configuration differs'),
+])
+def test_forecast_contract_is_checked_before_submission(client_factory, override, reason):
+    with simulator(info_override=override) as server:
+        with pytest.raises(ValueError, match=reason):
             with client_factory(server):
                 pass
         assert not server.posts
@@ -584,11 +598,11 @@ def test_cancel_between_gateway_production_and_client_registration_never_submits
 
 
 def worker_prewarm_environment(*, reclaim="gpu_aware_pressure", runtime_snapshot=True,
-                               prewarm_events=("think_end", "first_token")):
+                               prewarm="eta"):
     """Run the actual nested worker callbacks with a stub native VM boundary."""
     policy = PolicySpec(name="gpu", admission="predicted", reclamation="snapshot_pause",
                         eviction=reclaim, restore="reactive", runtime_snapshot=runtime_snapshot,
-                        gpu_prewarm_events=prewarm_events)
+                        gpu_prewarm=prewarm)
     coordinator = PolicyCoordinator(policy, budget_mib=32, emergency_free_mib=0,
                                     operation_headroom_mib=0)
     runtime, tool = SimpleNamespace(resident=False), SimpleNamespace(resident=False)
@@ -639,11 +653,10 @@ def worker_prewarm_environment(*, reclaim="gpu_aware_pressure", runtime_snapshot
 
 
 @pytest.mark.parametrize("signal_event,runtime_resident,tool_resident,expected", [
-    ("think_end", False, False, ["runtime", "tool"]),
-    ("think_end", True, False, ["tool"]),
-    ("think_end", False, True, ["runtime"]),
-    ("think_end", True, True, []),
-    ("first_token", False, False, ["runtime", "tool"]),
+    ("response_forecast", False, False, ["runtime", "tool"]),
+    ("response_forecast", True, False, ["tool"]),
+    ("response_forecast", False, True, ["runtime"]),
+    ("response_forecast", True, True, []),
 ])
 def test_worker_gpu_boundary_prewarms_both_vms(signal_event, runtime_resident, tool_resident, expected):
     env, restored, events, executor = worker_prewarm_environment()
@@ -651,7 +664,7 @@ def test_worker_gpu_boundary_prewarms_both_vms(signal_event, runtime_resident, t
     env["lifecycle"].resident = tool_resident
     try:
         signal = {"session_id": "session", "request_id": "request",
-                  "event": signal_event, "role": "A", "source": "trace", "t": 2.}
+                  "event": signal_event, "role": "A", **forecast(), "t": 2.}
         env["on_model_signal"](signal)
         env["on_model_signal"](signal)  # duplicate delivery must not repeat either restore
     finally:
@@ -685,8 +698,8 @@ def test_worker_tool_prewarm_readiness_failure_is_not_reported_ready():
 
     env["prepare_restored_tool"] = fail_readiness
     try:
-        env["on_model_signal"]({"session_id": "session", "request_id": "request",
-                               "event": "think_end", "role": "D", "source": "trace", "t": 2.})
+        env["on_model_signal"]({**forecast(), "session_id": "session", "request_id": "request",
+                               "role": "D", "t": 2.})
     finally:
         executor.close()
     with pytest.raises(RuntimeError, match="coalesced policy event failed") as failure:
@@ -707,8 +720,8 @@ def test_worker_gpu_prewarm_defers_tool_when_restore_admission_is_blocked():
     }
     try:
         env["on_model_signal"]({"session_id": "session", "request_id": "request",
-                                "event": "first_token", "role": "A",
-                                "source": "simulator", "t": 2.})
+                                "event": "response_forecast", "role": "A",
+                                **forecast(), "t": 2.})
     finally:
         executor.close()
     executor.check()
@@ -727,7 +740,7 @@ def test_worker_queued_prewarm_yields_to_an_already_generated_response():
     env["wait_lock"].acquire()
     try:
         env["on_model_signal"]({"session_id": "session", "request_id": "request",
-                               "event": "think_end", "role": "D", "source": "trace", "t": 2.})
+                               "event": "response_forecast", "role": "D", **forecast(), "t": 2.})
         # This is the completion callback's ordering: publish generation before
         # waiting for the lifecycle lock so queued prewarm does not duplicate it.
         with env["generated_model_requests_lock"]:
@@ -739,3 +752,42 @@ def test_worker_queued_prewarm_yields_to_an_already_generated_response():
     executor.check()
     assert not restored
     assert not any(event["event"] == "gpu_pair_prewarm_ready" for event in events)
+
+
+def test_worker_stale_prewarm_preserves_page_preparation():
+    env, restored, events, executor = worker_prewarm_environment()
+    cancelled = []
+    env['snapshot_preparation'] = SimpleNamespace(
+        cancel=cancelled.append, observe=lambda *args: None)
+    event = dict(forecast(), session_id='session', request_id='request', t=2.)
+    env['wait_lock'].acquire()
+    try:
+        env['on_model_signal'](event)
+        env['on_model_signal'](dict(event, remaining_s=None, phase='blocked'))
+    finally:
+        env['wait_lock'].release()
+        executor.close()
+    executor.check()
+    assert not restored and not cancelled
+
+
+def test_worker_deferred_tool_prewarm_retries_on_fresh_eta():
+    env, restored, events, executor = worker_prewarm_environment()
+    blocked, deferred = [True], Event()
+    env['coordinator'].restore_queue_observation = lambda *_: {'blocked': blocked[0]}
+    def write(event):
+        events.append(event)
+        if event['event'] == 'gpu_tool_prewarm_deferred':
+            deferred.set()
+    env['events'].write = write
+    event = dict(forecast(), session_id='session', request_id='request', t=2.)
+    try:
+        env['on_model_signal'](event)
+        assert deferred.wait(1)
+        blocked[0] = False
+        env['on_model_signal'](event)
+    finally:
+        executor.close()
+    executor.check()
+    assert restored == ['runtime', 'tool']
+    assert sum(e['event'] == 'gpu_pair_prewarm_ready' for e in events) == 1

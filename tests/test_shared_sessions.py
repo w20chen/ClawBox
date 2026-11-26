@@ -27,18 +27,18 @@ def test_parallel_model_requests_keep_independent_gpu_state_and_tombstones():
     c = coordinator(snapshot_next_use_residency=True)
     waiting(c, rid='parent')
     c.begin_model_wait('session', 'child')
-    assert signal(c, rid='parent', est_wait_s=20, signal_sequence=1)['accepted']
-    assert signal(c, rid='child', est_wait_s=5, signal_sequence=1)['accepted']
+    assert signal(c, rid='parent', remaining_s=20, signal_sequence=1)['accepted']
+    assert signal(c, rid='child', remaining_s=5, signal_sequence=1)['accepted']
     state = c._sessions['session']
     assert set(state.model_waits) == {'parent', 'child'}
     assert state.shared_runtime
-    assert c._pair_prefill_remaining(state, __import__('time').monotonic()) == pytest.approx(5, abs=.1)
-    assert signal(c, rid='parent', event='think_end', signal_sequence=2)['should_prewarm']
+    assert c._pair_response_remaining(state, __import__('time').monotonic()) == pytest.approx(5, abs=.1)
+    assert signal(c, rid='parent', remaining_s=1., signal_sequence=2)['should_prewarm']
     assert c.wait_for_gpu_prewarm('session', 'parent')
     assert not c.wait_for_gpu_prewarm('session', 'child')
     c.complete_model_wait('session', 'parent')
-    assert signal(c, rid='child', est_wait_s=7, signal_sequence=2)['accepted']
-    assert not signal(c, rid='parent', event='think_end', signal_sequence=3)['accepted']
+    assert signal(c, rid='child', remaining_s=7, signal_sequence=2)['accepted']
+    assert not signal(c, rid='parent', remaining_s=1., signal_sequence=3)['accepted']
     c.begin_model_wait('session', 'parent')
     assert set(state.model_waits) == {'child'}
     c.complete_model_wait('session', 'child')
@@ -60,7 +60,7 @@ def test_shared_runtime_stays_resident_while_idle_tool_can_reclaim():
     c.register_runtime('pair', runtime)
     c.begin_model_wait('pair', 'request')
     c.protect_shared_runtime('pair')
-    signal(c, sid='pair', est_wait_s=20)
+    signal(c, sid='pair', remaining_s=20)
     c.set_tool_active('pair', True)
     assert not c.evict_one_for_watermark()
     c.set_tool_active('pair', False)

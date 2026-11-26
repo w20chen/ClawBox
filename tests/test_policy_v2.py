@@ -1063,6 +1063,6 @@ def test_admission_uses_configured_selector_instead_of_direct_checkpoint():
 
 @pytest.mark.parametrize("runtime", ["pressure_lifecycle", "adaptive_joint"])
 def test_llm_prediction_dependent_runtime_modes_are_rejected(runtime):
-    with pytest.raises(ValueError, match="LLM-duration prediction is not implemented"):
+    with pytest.raises(ValueError, match="CPU-side model-wait runtime prediction is unsupported"):
         PolicySpec(name="invalid", admission="off", reclamation="snapshot_pause",
                    eviction="wait_aware_pressure", restore="reactive", runtime_control=runtime)

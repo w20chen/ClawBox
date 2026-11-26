@@ -18,7 +18,7 @@ from clawbox.experiments.serving_sim_diagnostics import Diagnostics, exception_r
 
 INFO_PATH = "/v1/clawbox/simulator/info"
 EVENTS_PATH = "/request-signals/clawbox/events"
-ADAPTER_PROTOCOL = 2
+ADAPTER_PROTOCOL = 3
 OUTCOMES_PATH = '/v1/clawbox/simulator/tool-outcomes'
 CPU_FEEDBACK_PATH = '/v1/clawbox/simulator/cpu-feedback'
 
@@ -251,6 +251,7 @@ def attach_management(app, *, input_digest: str):
                       decode_time={key: service.cfg[key] for key in ('decode_time_scale', 'tpot_ms')
                                    if service.cfg.get(key) is not None},
                       cpu_refill=service.cpu_refill.stats(),
+                      response_forecast=service.clawbox_forecast,
                       non_physical=service.cfg.get('validity', {}).get('non_physical', {}),
                       signals=dict(**service.feed.head(), service_events_path=EVENTS_PATH),
                       cpu_affinity=sorted(os.sched_getaffinity(0)),
@@ -295,10 +296,14 @@ def attach_management(app, *, input_digest: str):
 
 
 def create_app(out: Path, topology, trace_catalog: Path, *, persistence='native',
-               diagnostic_interval_seconds=1., **options):
+               diagnostic_interval_seconds=1., forecast_interval_seconds=.5,
+               forecast_window_seconds=5., forecast_validity_seconds=2., **options):
     from serving_sim.joined.joined import create_app as upstream_app
     digest = catalog_digest(trace_catalog)
     app = upstream_app(out, topology, trace_catalog, prompt_source='actual', **options)
+    from .response_forecast import attach_response_forecasts
+    attach_response_forecasts(app, interval=forecast_interval_seconds,
+                              window=forecast_window_seconds, validity=forecast_validity_seconds)
     attach_persistence(app, out, persistence)
     attach_diagnostics(app, out, diagnostic_interval_seconds)
     return attach_management(attach_chat_adapter(app), input_digest=digest)

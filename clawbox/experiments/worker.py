@@ -4184,7 +4184,7 @@ class ExperimentWorker:
             # Native OpenClaw can keep its long-lived Agent process in a VM
             # snapshot.  During a model wait, snapshot both VMs for a
             # snapshot_pause policy; Runtime is restored before the gateway
-            # response is released. GPU think_end can prewarm both VMs before
+            # response is released. A fresh response ETA can prewarm both VMs before
             # that response; otherwise Tool resumes at its next SSH admission.
             runtime_snapshot_enabled = (
                 arm.policy.reclamation is ReclamationPolicy.SNAPSHOT_PAUSE
@@ -4388,11 +4388,6 @@ class ExperimentWorker:
                 request_id = str(event["request_id"])
                 trigger = str(event["event"])
                 operation = f"gpu_{trigger}"
-                if snapshot_preparation is not None:
-                    # Demand restore has priority over speculative reads.  A
-                    # preparation already in decompression remains useful;
-                    # range reads stop at their next bounded chunk.
-                    snapshot_preparation.cancel(request_id)
                 # Do not hold wait_lock while an already-claimed checkpoint finishes.
                 if not coordinator.wait_for_gpu_prewarm(session_id, request_id):
                     return
@@ -4404,6 +4399,11 @@ class ExperimentWorker:
                                 or request_id in generated_model_requests
                                 or request_id in completed_model_requests):
                             return
+                    if not coordinator.wait_for_gpu_prewarm(session_id, request_id, claim=True):
+                        return
+                    if snapshot_preparation is not None:
+                        # Cancel reads only after a fresh ETA commits restoration.
+                        snapshot_preparation.cancel(request_id)
                     events.write({"event": "gpu_pair_prewarm_started", "session_id": session_id,
                                   "request_id": request_id, "source": event.get("source"),
                                   "trigger": trigger, "gpu_virtual_time": event.get("t")})
@@ -4441,6 +4441,7 @@ class ExperimentWorker:
                         _record_time_span(timeline, "model.tool_prewarm", started, finished,
                                           role="tool", operation=operation,
                                           execution_id=request_id)
+                    coordinator.complete_gpu_prewarm(session_id, request_id)
                     events.write({"event": "gpu_pair_prewarm_ready", "session_id": session_id,
                                   "request_id": request_id, "source": event.get("source"),
                                   "trigger": trigger, "gpu_virtual_time": event.get("t")})
@@ -4490,7 +4491,7 @@ class ExperimentWorker:
                 # A paused Runtime cannot receive the pending HTTP response.
                 # Restore it synchronously in the gateway producer before the
                 # response becomes visible to OpenClaw. A Tool not already
-                # prewarmed by think_end resumes on the next SSH invocation.
+                # prewarmed by response ETA resumes on the next SSH invocation.
                 with wait_lock:
                     if page_prefetch is not None:
                         page_prefetch.cancel(runtime_lifecycle, request_id)

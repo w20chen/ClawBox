@@ -1150,7 +1150,7 @@ def test_failed_restored_bridge_readiness_does_not_reserve_growth():
 def test_llm_duration_settings_are_rejected_even_for_resident_arms(field, value):
     raw = raw_spec()
     raw['inference']['configuration'][field] = value
-    with pytest.raises(ValueError, match='prediction/oracle policy is unsupported'):
+    with pytest.raises(ValueError, match='CPU-side LLM-duration prediction settings are unsupported'):
         ExperimentSpec.model_validate(raw)
 
 

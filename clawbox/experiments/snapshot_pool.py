@@ -51,6 +51,7 @@ class SnapshotManifest:
     expected_reuse_probability: float | None = None
     retention_value_seconds: float = 0.0
     next_use_monotonic_s: float | None = None
+    next_use_expires_at: float | None = None
     next_use_revision: int = 0
     compressed_allocated_bytes: int = 0
     raw_allocated_bytes: int = 0
@@ -427,6 +428,7 @@ class WarmSnapshotPool:
                expected_reuse_probability: float | None = None,
                retention_value_seconds: float = 0.0,
                next_use_monotonic_s: float | None = None,
+               next_use_expires_at: float | None = None,
                next_use_revision: int = 0,
                compressed_allocated_bytes: int = 0,
                raw_allocated_bytes: int | None = None,
@@ -486,6 +488,7 @@ class WarmSnapshotPool:
                 expected_reuse_probability=expected_reuse_probability,
                 retention_value_seconds=retention_value_seconds,
                 next_use_monotonic_s=next_use_monotonic_s,
+                next_use_expires_at=next_use_expires_at,
                 next_use_revision=next_use_revision,
                 compressed_allocated_bytes=compressed_allocated_bytes,
                 raw_allocated_bytes=raw_allocated_bytes,
@@ -669,7 +672,8 @@ class WarmSnapshotPool:
     def reserve_for_admission(self, key: SnapshotKey, upper_bound_bytes: int,
                               *, timeout_s: float = 120,
                               retention_value_seconds: float = 0.0,
-                              next_use_monotonic_s: float | None = None) -> None:
+                              next_use_monotonic_s: float | None = None,
+                              next_use_expires_at: float | None = None) -> None:
         """Spill eligible state, then atomically reserve against other writers.
 
         Slow relocation intentionally runs without the admission lock. The
@@ -687,6 +691,7 @@ class WarmSnapshotPool:
                     upper_bound_bytes, exclude={key},
                     candidate_retention_value_seconds=retention_value_seconds,
                     candidate_next_use_monotonic_s=next_use_monotonic_s,
+                    candidate_next_use_expires_at=next_use_expires_at,
                 )
                 with self._admission_lock:
                     self.reserve(key, upper_bound_bytes)
@@ -720,6 +725,7 @@ class WarmSnapshotPool:
                             exclude: set[SnapshotKey] | None = None,
                             candidate_retention_value_seconds: float = 0.0,
                             candidate_next_use_monotonic_s: float | None = None,
+                            candidate_next_use_expires_at: float | None = None,
                             enforce_admission_policy: bool = True,
                             ) -> tuple[SnapshotManifest, ...]:
         """Relocate and retire the deterministic pinned LRU prefix."""
@@ -727,6 +733,7 @@ class WarmSnapshotPool:
             required_bytes, exclude=exclude,
             candidate_retention_value_seconds=candidate_retention_value_seconds,
             candidate_next_use_monotonic_s=candidate_next_use_monotonic_s,
+            candidate_next_use_expires_at=candidate_next_use_expires_at,
             enforce_admission_policy=enforce_admission_policy,
         )
         completed: list[SnapshotManifest] = []
@@ -813,13 +820,14 @@ class WarmSnapshotPool:
 
     def update_next_use(
         self, key: SnapshotKey, next_use_monotonic_s: float | None,
-        revision: int = 0,
+        revision: int = 0, *, expires_at: float | None = None,
     ) -> None:
         with self._lock:
             item = self._manifests.get(key)
             if item is not None and revision >= item.next_use_revision:
                 item.next_use_monotonic_s = next_use_monotonic_s
                 item.next_use_revision = revision
+                item.next_use_expires_at = expires_at
 
     def retain_for_vm(self, key: SnapshotKey) -> None:
         """A running lazy restore still references these physical WARM pages."""
@@ -852,6 +860,7 @@ class WarmSnapshotPool:
     def lru_victims(self, required_bytes: int, *, exclude: set[SnapshotKey] | None = None,
                     candidate_retention_value_seconds: float = 0.0,
                     candidate_next_use_monotonic_s: float | None = None,
+                    candidate_next_use_expires_at: float | None = None,
                     enforce_admission_policy: bool = True,
                     ) -> tuple[SnapshotManifest, ...]:
         """Return and pin deterministic victims needed for admission.
@@ -885,9 +894,11 @@ class WarmSnapshotPool:
             if deficit == 0:
                 return ()
             compare_next_use = self.next_use_aware and enforce_admission_policy
-            if compare_next_use and candidate_next_use_monotonic_s is None:
+            if compare_next_use and (candidate_next_use_monotonic_s is None
+                                     or candidate_next_use_expires_at is None
+                                     or self._clock() >= candidate_next_use_expires_at):
                 raise WarmAdmissionRejected(
-                    "candidate has no valid queued.est_wait_s next-use estimate"
+                    "candidate has no fresh response_forecast next-use estimate"
                 )
             def victim_order(item: SnapshotManifest):
                 stable = (
@@ -906,6 +917,8 @@ class WarmSnapshotPool:
                      and item.pinned == 0 and not item.retained_by_vm
                      and (not compare_next_use or (
                          item.next_use_monotonic_s is not None
+                         and item.next_use_expires_at is not None
+                         and self._clock() < item.next_use_expires_at
                          and item.next_use_monotonic_s > candidate_next_use_monotonic_s
                      )))),
                 key=victim_order,

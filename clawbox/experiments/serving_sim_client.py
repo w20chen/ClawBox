@@ -162,10 +162,16 @@ class ServingSimClient:
             received = time.time()
             response.raise_for_status()
             info = response.json()
-            if info.get('adapter_protocol') != 2:
+            if info.get('adapter_protocol') != 3:
                 raise ValueError(
-                    f'serving_sim cluster {cluster_id} requires ClawBox adapter protocol 2'
+                    f'serving_sim cluster {cluster_id} requires ClawBox adapter protocol 3; restart with the current ClawBox serve command'
                 )
+            forecast = info.get('response_forecast', {})
+            expected_forecast = dict(protocol=1, interval_seconds=launch.forecast_interval_seconds,
+                window_seconds=launch.forecast_window_seconds, validity_seconds=launch.forecast_validity_seconds,
+                target='native_response_ready', output_length_source='recorded_current_call')
+            if forecast != expected_forecast:
+                raise ValueError(f'serving_sim cluster {cluster_id} response forecast configuration differs from experiment')
             offset = (sent + received) / 2 - float(info["server_wall_time"])
             uncertainty = max(0., received - sent) / 2
             info["client_clock_alignment"] = dict(
@@ -288,6 +294,8 @@ class ServingSimClient:
                         logged = ({k: record[k] for k in (
                             'event', 'session_id', 'request_id', 'cluster_id', 'engine_id', 'role', 'source',
                             'signal_sequence', 't', 'wall_t', 'queued_since', 'est_wait_s', 'layer',
+                            'forecast_protocol', 'phase', 'remaining_s', 'valid_for_s', 'unavailable_reason',
+                            'target', 'output_length_source', 'output_tokens', 'rate_s_per_token',
                             'adapter_emit_unix_s', 'received_unix_s', 'signal_age_seconds', 'callback_seconds')
                             if k in record} if self.compact_diagnostics else record)
                         if log_signal:
@@ -492,7 +500,7 @@ class ServingSimClient:
                             break
                         chunk = json.loads(data)
                         if kind == 'clawbox':
-                            if (mapping is not None or chunk.get('protocol') != 2
+                            if (mapping is not None or chunk.get('protocol') != 3
                                     or chunk.get('session_id') != sid or chunk.get('request_id') != rid
                                     or chunk.get('replay') != expected):
                                 raise RuntimeError('simulator adapter identity metadata mismatch')

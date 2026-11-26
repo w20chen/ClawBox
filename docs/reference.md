@@ -358,7 +358,7 @@ validation checks their dependencies.
 | `idle_reclaim` | `policy: off` (`off`, `wait`, `gpu`); `scope: tool` (`tool`, `agent_and_tool`); `checkpoint_restore_headroom_mib: 1024`; `gpu_reclaim_min_remaining_seconds: 1.0`; `gpu_signal_max_age_seconds: 5.0`. GPU policy requires `serving_sim`; scope is independent; see the inference options below. |
 | `shared_memory` | `borrow: off` (`off`, `hard`, `pressure`); `borrow_cooldown_seconds: 5`; `return_cooldown_seconds: 5`; `shared_memory_resident_headroom_mib: null` |
 | `checkpoint` | `mechanism: incremental-cow` (`full-copy`, `incremental-cow`); `storage: disk` (`disk`, `warm-only`, `tiered`); `residency: lru` (`lru`, `value`, `next-use`); transfer limits below |
-| `restore` | `prewarm_events: []`; explicitly select `think_end`, `first_token`, or both. Requires snapshot reclaim and serving_sim; independent of victim selection and scope. `promotion: off` (`off`, `if_fit`) independently controls whole-lineage COLD-to-WARM relocation before restore. |
+| `restore` | `prewarm: off` (`off`, `eta`), `prewarm_lead_seconds: 2.0` (positive seconds, restore budget including margin). Requires snapshot reclaim and serving_sim; independent of victim selection and scope. `promotion: off` (`off`, `if_fit`) independently controls whole-lineage COLD-to-WARM relocation before restore. |
 | `deployment` | `mode: managed` (`managed`, `os-default`); `resident_capacity_accounting: false`; `lifecycle_reservation_scale: 1.0` |
 | `coordination` | `action_selection: context-first` |
 
@@ -387,11 +387,11 @@ retraining, or repeated capability qualification.
 
 `checkpoint.residency: next-use` is active only with tiered storage,
 idle reclaim (`wait` or `gpu`, either scope), and
-`inference.backend: serving_sim`. Each accepted `queued.est_wait_s` observation
-is reduced by transport/queue-event age and converted to an absolute monotonic
-deadline for both Runtime and Tool. This signal estimates queue plus prefill;
-it does not include remaining decode or response delivery and is not a complete
-LLM-response ETA.
+`inference.backend: serving_sim`. Each valid `response_forecast.remaining_s`
+is reduced by transport age and converted to an absolute monotonic deadline for
+both Runtime and Tool. The deadline carries an independent observation expiry;
+expired predictions cannot rank either a candidate or a victim. With concurrent
+requests, all waits must have valid forecasts; the earliest deadline is used.
 
 If the new checkpoint already fits, WARM admission does not require an
 estimate. Otherwise, only unpinned, non-retained WARM generations with known
@@ -906,7 +906,7 @@ Fields below are under baseline `execution` except the rows explicitly prefixed
 | `snapshot_page_profile.force_model_wait_checkpoints` | `false` | Profiling-only control that checkpoints the selected single-session case at real simulator-backed model waits through the ordinary pair lifecycle. `checkpoint_tiers` supplies the finite per-generation `warm`/`cold` sequence; after it is exhausted, only normal policy checkpoints remain. This changes snapshot timing and is not throughput evidence. |
 | `snapshot_checkpoint_gate` | `null` | Evaluation-only matched-mechanism gate. `case_ids` selects workload cases and `checkpoint_tiers` supplies one finite WARM/COLD destination per generation. At each selected case's real model-wait boundary, both Runtime and Tool are checkpointed through the ordinary pair lifecycle. Use the identical value in control and preparation arms so checkpoint/restore populations match; this intentionally changes workload timing and proves only the isolated source of benefit, not production-policy throughput. Requires `serving_sim`, `agent_and_tool` snapshot pause, incremental-CoW, and a new run ID. |
 | `snapshot_page_management` | `null` | Optional COLD snapshot preparation. `mode: gpu_event` preserves event-only submission using `trigger_event` (`queued`, `prefill_start`, default `prefill_start`). `mode: state_driven` latches accepted role boundaries and rechecks after checkpoint commit; each role/request/generation submits at most once. Requires serving_sim, snapshot pause and tiered/COLD incremental-COW storage. Wait/GPU reclaim, either scope, and compressed/uncompressed storage are supported. A new run ID is required; no image rebuild or host apply. |
-| `snapshot_page_management.runtime_trigger_event`, `.tool_trigger_event` | `prefill_start`, `first_token` | Used only in `state_driven` mode. Both accept `queued`, `prefill_start`, `first_token`, `think_end`; Tool also accepts `disabled`. These are actual phase boundaries, not response ETAs. A boundary remains latched while its model wait is active. Model completion, selected full-VM prewarm and session cleanup cancel preparation; Tool admission also cancels Tool preparation. |
+| `snapshot_page_management.runtime_trigger_event`, `.tool_trigger_event` | `prefill_start`, `first_token` | Used only in `state_driven` mode. Both accept `queued`, `prefill_start`, `first_token`; Tool also accepts `disabled`. These are actual phase boundaries, not response ETAs. A boundary remains latched while its model wait is active. Model completion, selected full-VM prewarm and session cleanup cancel preparation; Tool admission also cancels Tool preparation. |
 | `snapshot_page_management.candidate_source` | `shared_lineage` | Ranks authoritative incremental-lineage ranges by shared waiters per byte. Overwritten ancestor pages are excluded. |
 | `snapshot_page_management.expansion_budget_mib` | 1024 | Arm-wide allowance for newly prepared expanded files, using compressed-manifest `decompression_allocated_bytes`, held until demand/cancellation or model-wait end. Insufficient allowance skips preparation without waiting under the snapshot lock. This is separate from bounded prefetch reads and is not a hard Linux page-cache residency limit. Whole-layer decompression remains non-preemptible; no page-selective decompression is implemented. |
 | `snapshot_page_management.prefetch_budget_mib` | required | Arm-wide concurrent preparation budget and upper bound for `max_inflight_mib`. `per_vm_prefetch_mib` defaults to 32 MiB; `max_inflight_mib` to 128 MiB; `io_workers` to 2; `candidate_chunk_kib` to 128 KiB; `batch_window_milliseconds` to 25 ms; `prefetch_bandwidth_mib_s` to 256 MiB/s; `max_ranges_per_vm` to 512; and `signal_max_age_seconds` to 5 seconds. The worker emits one aggregate record per VM/request with batch waiters, authoritative/stale-version bytes, selected/covered bytes, leader-only physical read bytes, expansion time, cancellation, and errors. |
@@ -1026,6 +1026,9 @@ repeat it when changing the simulator listener range.
 | `topology` | Required | Native simulated GPU topology for each independent cluster, e.g. `8A`; separate from real CPU budget. |
 | `decode_time_scale` | `null` (calibrated timing) | Positive finite multiplier for the decode part of each native step. Excludes `tpot_ms`; requires the upstream hybrid step model. Non-physical; prefill and block copy/zero work remain unchanged. Manual `serve`: `--decode-time-scale`. |
 | `tpot_ms` | `null` (calibrated timing) | Positive finite target milliseconds per output token, replacing the decode part of each step. Excludes `decode_time_scale`; requires the upstream hybrid step model. Non-physical; queueing, prefill, maintenance and transport still affect observed timing. Manual `serve`: `--tpot-ms`. |
+| `forecast_interval_seconds` | 0.5 seconds | Minimum interval between same-phase response forecasts; positive and smaller than validity. Manual `serve`: `--forecast-interval-seconds`. |
+| `forecast_window_seconds` | 5.0 seconds | Positive rolling token-speed window and maximum age for reusing an engine rate in queue ETA. Manual `serve`: `--forecast-window-seconds`. |
+| `forecast_validity_seconds` | 2.0 seconds | Positive forecast lifetime; expires independently of its predicted completion deadline. Manual `serve`: `--forecast-validity-seconds`. |
 | `cpu_refill_mode` | `off`; `decode-first` opt-in | CPU-aware GPU scheduling switch. Off mode preserves the native scheduler path. Decode-first uses only vLLM's native prefill-throttle argument when low CPU and mixed decode/prefill work coincide. |
 | `cpu_refill_feedback_interval_seconds` | `1.0` seconds | Minimum interval between latest-only aggregate CPU/Tool snapshots sent to every cluster. Delivery is nonblocking; background delivery errors fail the arm. |
 | `cpu_refill_activation_floor_utilization` | `0.0` fraction | Lower bound of the activation band. Below it, native scheduling is retained so decode-first cannot starve cold-start prefills before a CPU/Tool pipeline exists. It must be below the enter threshold. |
@@ -1078,13 +1081,14 @@ it may be unset when the simulator has no authentication. A provider-specific
 `clawtune_config` must be removed to use the explicit simulator endpoint.
 Launch it with `python3 -m clawbox.integrations.serving_sim` from the ClawBox checkout,
 or the installed `clawbox-serving-sim` command. This adapter imports the unmodified
-GPU application. Adapter protocol 2 adds current-request process-handle mappings
+GPU application. Adapter protocol 3 adds expiring current-response forecasts and retains process-handle mappings
 to the existing chat stream without another per-request round trip. Its management
 paths are `/v1/clawbox/simulator/info` and `/request-signals/clawbox/events`.
 `/v1/clawbox/simulator/tool-outcomes` audits recorded versus actual Tool failures
 only at session finalization when needed. The GPU service retains the recordings;
 CPU sessions retain only actual requests, replies and live process identities.
-Native GPU scheduling and filtered signal APIs remain unchanged.
+Native GPU scheduling is unchanged. The shared signal feed additionally contains
+`response_forecast`; original native events keep their meanings.
 
 The adapter targets sim-release `ab16142d9835052d5966f3c19679ce6d22789004`.
 Its standard topology enables shared-prefix checkpoints; retain the revision
@@ -1148,7 +1152,8 @@ the first model call and real Tool execution per case. It does not establish
 target-concurrency capacity or validate GPU hardware.
 The separate snapshot probe checks the configured VM pair's checkpoint/restore
 capability using a known idle pair; it does not establish GPU-triggered reclaim
-or `think_end` restoration coverage.
+or ETA prewarm coverage. Use the explicit evaluation checkpoint gate to exercise
+restore paths in a bounded smoke; it is not evidence of pressure-policy effectiveness.
 The topology digest covers expanded topology settings; it does not identify
 native source code, tokenizer files or cost-model assets. Freeze those inputs
 separately and retain the simulator's native configuration and validity outputs.
@@ -1158,35 +1163,46 @@ with either `scope: tool` or `agent_and_tool`. Its editable options are:
 
 | Field under `mechanisms.idle_reclaim` | Default | Meaning |
 | --- | --- | --- |
-| `gpu_reclaim_min_remaining_seconds` | 1.0 seconds | Minimum remaining queue/prefill estimate for pressure-driven checkpoint selection; nonnegative. This is not a decode-completion prediction. |
+| `gpu_reclaim_min_remaining_seconds` | 1.0 seconds | Minimum fresh predicted response remaining time for pressure-driven checkpoint selection; nonnegative. |
 | `gpu_signal_max_age_seconds` | 5.0 seconds | Maximum age of a usable GPU estimate; strictly positive. Missing, expired or unmodelled estimates cannot authorize GPU-aware reclaim. |
 
-`mechanisms.restore.prewarm_events` is a separate list, default `[]`. Select
-`think_end`, `first_token`, or both. It requires snapshot reclaim and serving_sim,
-but not GPU reclaim or pair scope. Disabled events never initiate prewarm.
+`mechanisms.restore.prewarm` is independent of reclaim policy and scope:
+`off` (default) or `eta`. ETA mode requires snapshot reclaim and serving_sim.
+`prewarm_lead_seconds` defaults to 2.0 positive seconds, an explicit budget for
+restore plus margin, not a measured cost. When fresh remaining time is at most
+this lead, restore Runtime first (including its model relay), then Tool and its
+bridge using ordinary memory admission. Resident VMs are skipped. Pending work
+revalidates ETA before starting; already committed restore is protected from
+immediate re-eviction. Blocked Tool admission retries on later fresh forecasts.
+Actual response readiness remains authoritative; commands keep normal admission.
 
-The policy uses observed `queued.est_wait_s` for A/P workers, excluding remote KV
-transfer waits, and discounts elapsed time. `think_end` from the answer worker
-(A/D), or its observed `first_token` fallback when enabled, requests pre-restore
-of both Runtime and Tool once, before the full response or a Tool command arrives.
-Runtime restores first, including its model relay;
-Tool then restores in the selected compute domain and its telemetry bridge is
-checked. Both restores use ordinary lifecycle memory admission; already resident
-VMs are skipped. Commands still require their normal prediction, growth admission
-and current SSH identity checks. Missing recorded reasoning counts remain unknown:
-the native simulator emits no `think_end` for that call. ClawBox only uses online
-`think_end` events marked `source: trace`; absent or other source values are
-ignored with `unobserved_reasoning_boundary`. The `first_token` trigger does not
-invent that boundary or estimate decode duration: it only begins ordinary,
-capacity-checked restore after decode has observably started. It precedes any
-later `think_end` for that call, and one-shot request binding prevents a second
-restore. Disable it when the later boundary is preferred.
-Response completion restores Runtime when
-needed. Signal loss or epoch changes fail the arm without selecting another
-reclaim policy.
+The GPU-side adapter emits `response_forecast` for the current request, without
+changing native scheduling, simulated clock, arrivals or generation timing:
+
+| Field | Meaning |
+| --- | --- |
+| `remaining_s` | Seconds until estimated native complete-response readiness; null means unknown. |
+| `valid_for_s` | Validity from observation time. CPU subtracts delivery age and also applies `gpu_signal_max_age_seconds`. |
+| `phase` | `queued`, `prefill`, `decoding`, `blocked`, `finished`, or `unknown`. Only queued/decoding can carry an ETA. |
+| `target` | `native_response_ready`: includes modeled client return delay; excludes HTTP and VM restoration latency. |
+| `source`, `output_length_source` | `trace_length_online_rate`, `recorded_current_call`. Explicit current-output-length oracle; no future call, recorded LLM time or reasoning boundary. |
+| `output_tokens`, `rate_s_per_token` | Observed progress and rolling seconds per token; absent/null when unavailable. |
+| `unavailable_reason` | Why no ETA is available, e.g. preemption, KV waiting or stale observations. |
+
+During decoding, remaining time is
+`max(total_output_tokens - observed_output_tokens, 0) * observed_seconds_per_token + modeled_return_delay`.
+A rate needs at least two output-progress observations. During queueing, a fresh
+engine rate can be combined with native queue/prefill wait (discounted for queue
+event age). Prefill admission clears that estimate; full prefill progress prediction
+is not implemented. KV-transfer waiting, preemption/recomputation, missing rate
+and observation expiry produce null estimates. `think_start`/`think_end` are
+not CPU scheduling inputs. First-token Tool metadata from trace replay is not
+treated as an early prediction of future Tool work. GPU reclaim selects the
+longest valid response ETA; next-use uses the same estimate and its expiry.
+Signal loss or epoch changes fail the arm without silently selecting another policy.
 
 Changing the bundle, simulator settings or GPU policy requires a new run ID and
-matching qualification. These settings alone require no VM image rebuild, host
+matching qualification and a fresh service running adapter protocol 3. These settings alone require no VM image rebuild, host
 apply or ClawTune retraining. A changed Runtime/Tool environment follows the
 existing image and qualification rules. Keep original traces and prior runs.
 

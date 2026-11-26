@@ -18,6 +18,8 @@ def configuration():
 @pytest.mark.parametrize('field,value', [('cores', 3), ('cpu_affinity', [0, 0, 1, 2]),
     ('sim_root', 'relative'), ('cache_dir', 'relative'), ('hf_hub_cache', 'relative'),
     ('shutdown_timeout_seconds', 0), ('nofile', 0),
+    ('forecast_interval_seconds', 0), ('forecast_interval_seconds', 2.),
+    ('forecast_window_seconds', float('inf')), ('forecast_validity_seconds', .5),
     ('tpot_ms', 0), ('tpot_ms', float('inf')), ('tpot_ms', True),
     ('decode_time_scale', -1), ('decode_time_scale', float('nan')),
     ('cpu_refill_activation_floor_utilization', -.01),
@@ -98,6 +100,17 @@ def test_decode_timing_modes_are_exclusive():
     config['serving_sim_launch'].update(tpot_ms=20., decode_time_scale=2.)
     with pytest.raises(ValueError, match='mutually exclusive'):
         InferenceSpec(backend='serving_sim', configuration=config)
+
+
+def test_forecast_parameters_reach_managed_service(tmp_path):
+    config = configuration()
+    values = dict(forecast_interval_seconds=.2, forecast_window_seconds=3.,
+                  forecast_validity_seconds=1.)
+    config['serving_sim_launch'].update(values)
+    service = ServingSimProcess(config, tmp_path)
+    command = service._command(service.layouts[0])
+    for name, value in values.items():
+        assert float(command[command.index('--' + name.replace('_', '-')) + 1]) == value
 
 
 def test_cpu_refill_configuration_is_default_off_and_forwarded_to_every_cluster(tmp_path):

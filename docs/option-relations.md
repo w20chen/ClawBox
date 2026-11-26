@@ -52,7 +52,7 @@ rules after combining the two files.
 | Idle reclaim `off/wait/gpu` | Mutually exclusive victim-selection strategies. `gpu` requires online serving_sim signals. |
 | Idle reclaim scope `tool/agent_and_tool` | Selects which VMs can be parked. Both scopes work with wait or GPU selection. Pair scope adds Runtime checkpoint/restore cost. |
 | GPU signals and reclaim | Signal consumption also serves next-use residency, page preparation or explicit prewarm. Those uses do not force the GPU victim-selection strategy. |
-| `restore.prewarm_events` | Independent event list: empty (default), think_end, first_token or both. Requires snapshots and serving_sim. It works with wait/GPU reclaim and either scope; resident VMs are skipped. |
+| `restore.prewarm` | Independent mode: off (default) or eta, with positive `prewarm_lead_seconds` (default 2 s). Uses fresh response forecasts. Requires snapshots and serving_sim. It works with wait/GPU reclaim and either scope; resident VMs are skipped. |
 | Checkpoint full-copy/incremental-cow | Mutually exclusive encodings. Idle reclaim off makes checkpoint creation dormant, but the mapping mechanism still matters for base cache. |
 | Compression none/zstd-page | Independent of the public full-copy/incremental-cow choice. Compressed snapshots require the installed native helper. Compression affects I/O and space costs. |
 | Storage disk/warm-only/tiered | Mutually exclusive destinations. WARM requires a configured DRAM pool; disk requires COLD storage. Resident runs retain declared settings but perform no idle checkpoints. |

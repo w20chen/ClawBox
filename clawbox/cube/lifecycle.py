@@ -150,6 +150,7 @@ class CubeSandboxLifecycle:
         self.restore_promotion = restore_promotion
         self._snapshot_next_use_monotonic_s: float | None = None
         self._snapshot_next_use_revision = 0
+        self._snapshot_next_use_expires_at: float | None = None
         self._snapshot_next_use_lock = Lock()
         self.snapshot_reservation_bytes = snapshot_reservation_bytes
         self.numa_borrower = numa_borrower
@@ -178,8 +179,8 @@ class CubeSandboxLifecycle:
         with self._lock:
             self._snapshot_cold_ready = callback
 
-    def set_snapshot_next_use(self, deadline: float | None, revision: int = 0) -> None:
-        """Publish the current queued.est_wait_s-derived absolute deadline."""
+    def set_snapshot_next_use(self, deadline: float | None, revision: int = 0, *, expires_at: float | None = None) -> None:
+        """Publish the current response forecast and its observation expiry."""
         # GPU queue updates are frequent. Never wait for a checkpoint/restore
         # that holds the lifecycle lock; a dedicated short lock orders only
         # deadline revisions and the pool update takes its metadata lock.
@@ -188,6 +189,7 @@ class CubeSandboxLifecycle:
                 return
             self._snapshot_next_use_monotonic_s = deadline
             self._snapshot_next_use_revision = revision
+            self._snapshot_next_use_expires_at = expires_at
         key = self._snapshot_key
         # Running VMs either have no snapshot or retain a WARM predecessor that
         # cannot be evicted. Their next checkpoint reads the scalar directly,
@@ -198,7 +200,7 @@ class CubeSandboxLifecycle:
             and self._snapshot_tier is SnapshotTier.WARM
             and self.snapshot_pool is not None
         ):
-            self.snapshot_pool.update_next_use(key, deadline, revision)
+            self.snapshot_pool.update_next_use(key, deadline, revision, expires_at=expires_at)
 
     def _emit_snapshot_page_event(self, event: Mapping[str, Any] | None) -> None:
         if event is not None and self.snapshot_page_event is not None:
@@ -522,6 +524,7 @@ class CubeSandboxLifecycle:
                     retention_value_seconds=self._retention_value_seconds(
                         self.configured_memory_bytes or self.snapshot_reservation_bytes),
                     next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
+                    next_use_expires_at=self._snapshot_next_use_expires_at,
                 )
                 self._pending_snapshot_keys.add(key)
             try:
@@ -638,6 +641,7 @@ class CubeSandboxLifecycle:
                                     timeout_s=0 if predecessor is not None or self.default_snapshot_tier is not None else 120,
                                     retention_value_seconds=retention_value,
                                     next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
+                                    next_use_expires_at=self._snapshot_next_use_expires_at,
                                 )
                             self._pending_snapshot_keys.add(key)
                         except WarmCapacityError:
@@ -736,6 +740,7 @@ class CubeSandboxLifecycle:
                                 int(manifest["logical_bytes"])
                             ),
                             next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
+                            next_use_expires_at=self._snapshot_next_use_expires_at,
                             next_use_revision=self._snapshot_next_use_revision,
                             **self._pool_allocation_fields(manifest),
                             **self._pool_lineage_fields(manifest),
@@ -760,6 +765,7 @@ class CubeSandboxLifecycle:
                     self.snapshot_pool.update_next_use(
                         key, self._snapshot_next_use_monotonic_s,
                         self._snapshot_next_use_revision,
+                        expires_at=self._snapshot_next_use_expires_at,
                     )
                 if self.numa_borrower is not None and self.sandbox_id is not None:
                     # Pause keeps a Cube tombstone/shim for resume, so its
@@ -873,6 +879,7 @@ class CubeSandboxLifecycle:
                                     int(manifest["logical_bytes"])
                                 ),
                                 next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
+                                next_use_expires_at=self._snapshot_next_use_expires_at,
                                 next_use_revision=self._snapshot_next_use_revision,
                                 **self._pool_allocation_fields(manifest),
                                 **self._pool_lineage_fields(manifest),
@@ -894,6 +901,7 @@ class CubeSandboxLifecycle:
                             self.snapshot_pool.update_next_use(
                                 key, self._snapshot_next_use_monotonic_s,
                                 self._snapshot_next_use_revision,
+                                expires_at=self._snapshot_next_use_expires_at,
                             )
                         if (
                             self.numa_borrower is not None
@@ -1579,6 +1587,7 @@ class CubeSandboxLifecycle:
                         int(promoted["logical_bytes"])
                     ),
                     next_use_monotonic_s=self._snapshot_next_use_monotonic_s,
+                    next_use_expires_at=self._snapshot_next_use_expires_at,
                     next_use_revision=self._snapshot_next_use_revision,
                     **self._pool_allocation_fields(promoted),
                     **self._pool_lineage_fields(promoted),
@@ -1591,6 +1600,7 @@ class CubeSandboxLifecycle:
                 self.snapshot_pool.update_next_use(
                     key, self._snapshot_next_use_monotonic_s,
                     self._snapshot_next_use_revision,
+                    expires_at=self._snapshot_next_use_expires_at,
                 )
                 self._record(
                     "promote", before, before, started_wall, started_mono,

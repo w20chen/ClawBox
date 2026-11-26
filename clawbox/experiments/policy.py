@@ -25,16 +25,19 @@ class Pausable(Protocol):
     @property
     def resident(self) -> bool: ...
     def checkpoint_and_evict(self, *, tier: SnapshotTier | None = None) -> float | None: ...
-    def set_snapshot_next_use(self, deadline: float | None, revision: int = 0) -> None: ...
+    def set_snapshot_next_use(self, deadline: float | None, revision: int = 0, *, expires_at: float | None = None) -> None: ...
 
 
 @dataclass(slots=True)
 class ModelWait:
     started_monotonic_s: float
     gpu_phase: str | None = None
-    gpu_prefill_estimate_s: float | None = None
-    gpu_prefill_observed_monotonic_s: float | None = None
+    gpu_response_estimate_s: float | None = None
+    gpu_response_observed_monotonic_s: float | None = None
+    gpu_response_valid_for_s: float = 0.0
     gpu_prewarm_requested: bool = False
+    gpu_prewarm_started: bool = False
+    gpu_prewarm_complete: bool = False
     gpu_signal_sequences: dict[str, int] = field(default_factory=dict)
 
 
@@ -338,11 +341,11 @@ class PolicyCoordinator:
             return changed
 
     def observe_gpu_signal(self, session_id: str, wait_id: str, event: dict) -> dict:
-        """Use online GPU observations without inventing a completion deadline.
+        """Use explicit, expiring current-response forecasts.
 
         The caller consumes the signal stream independently of Runtime residency.
         ``signal_age_seconds`` may include transport lag measured by that caller;
-        queued_since additionally accounts for the simulator's delayed queue event.
+        Only response_forecast supplies a remaining response time.
         These estimates are heuristic scheduling inputs, not completion deadlines.
         """
         result = {"accepted": False, "should_prewarm": False}
@@ -359,13 +362,6 @@ class PolicyCoordinator:
             phase, role = event.get("event"), event.get("role")
             if role not in {"A", "P", "D"}:
                 return {**result, "reason": "unknown_engine_role"}
-            # This policy uses serving_sim's online boundary event, never CPU
-            # trace lookups or catalog-wide reasoning counts. Its native engine
-            # emits source=trace only when a recorded reasoning boundary exists;
-            # missing counts produce no think_end. Ignore unsupported provenance
-            # without changing the current wait or its reclaim eligibility.
-            if phase == "think_end" and event.get("source") != "trace":
-                return {**result, "reason": "unobserved_reasoning_boundary"}
             # The transport supplies the feed sequence when available. A replayed
             # event must not renew an old estimate or repeat a prewarm action.
             engine = str(event.get("engine_id", role))
@@ -378,64 +374,62 @@ class PolicyCoordinator:
                 wait.gpu_signal_sequences[engine] = sequence
             now = time.monotonic()
             previous_phase = wait.gpu_phase
-            previous_remaining = self._gpu_prefill_remaining(wait, now)
+            previous_remaining = self._gpu_response_remaining(wait, now)
+            previously_protected = self._gpu_prewarm_protected(wait, now)
             wait.gpu_phase = str(phase)
-            if phase == "queued":
-                estimate = event.get("est_wait_s")
-                if (isinstance(estimate, bool) or not isinstance(estimate, (int, float))
-                        or not math.isfinite(estimate) or estimate < 0
-                        or role == "D" or event.get("layer") == "kv_transfer"):
-                    wait.gpu_prefill_estimate_s = None
-                    wait.gpu_prefill_observed_monotonic_s = None
-                else:
-                    age = event.get("signal_age_seconds", 0.0)
-                    if (isinstance(age, bool) or not isinstance(age, (int, float))
-                            or not math.isfinite(age) or age < 0):
-                        raise ValueError("GPU signal_age_seconds must be finite and nonnegative")
-                    published, queued = event.get("t"), event.get("queued_since")
-                    if (type(published) in (int, float) and type(queued) in (int, float)
-                            and math.isfinite(published) and math.isfinite(queued)):
-                        age += max(0.0, published - queued)
-                    wait.gpu_prefill_estimate_s = float(estimate)
-                    wait.gpu_prefill_observed_monotonic_s = now - age
-            elif phase in {"first_token", "think_start", "think_end", "finish"}:
-                wait.gpu_prefill_estimate_s = None
-                wait.gpu_prefill_observed_monotonic_s = None
-            prewarm_boundary = phase in self.policy.gpu_prewarm_events
-            if prewarm_boundary and role in {"A", "D"}:
-                result["should_prewarm"] = not wait.gpu_prewarm_requested
-                result["prewarm_trigger"] = phase
-                wait.gpu_prewarm_requested = True
-                state.eviction_eligible = False
-            # P-leg finish only completes prefill, not the logical model request.
-            if phase == "finish" and role in {"A", "D"}:
-                state.eviction_eligible = False
-            remaining = self._gpu_prefill_remaining(wait, now)
-            pair_remaining = self._pair_prefill_remaining(state, now)
+            if phase == "response_forecast":
+                estimate, validity = event.get("remaining_s"), event.get("valid_for_s")
+                age = event.get("signal_age_seconds", 0.)
+                if type(age) not in (int, float) or not math.isfinite(age) or age < 0:
+                    raise ValueError("GPU signal_age_seconds must be finite and nonnegative")
+                valid = (
+                    event.get("forecast_protocol") == 1
+                    and event.get("target") == "native_response_ready"
+                    and event.get("source") == "trace_length_online_rate"
+                    and event.get("output_length_source") == "recorded_current_call"
+                    and event.get("phase") in {"queued", "decoding"}
+                    and type(estimate) in (int, float) and math.isfinite(estimate) and estimate >= 0
+                    and type(validity) in (int, float) and math.isfinite(validity) and validity > 0
+                )
+                wait.gpu_response_estimate_s = float(estimate) if valid else None
+                wait.gpu_response_observed_monotonic_s = now - age
+                wait.gpu_response_valid_for_s = min(validity, self.policy.gpu_signal_max_age_seconds) if valid else 0.
+            elif phase in {"queued", "prefill_start", "first_token", "finish"}:
+                # Native boundaries never stand in for response ETA. P-leg finish
+                # must not imply completion of the logical request.
+                wait.gpu_response_estimate_s = None
+            remaining = self._gpu_response_remaining(wait, now)
+            due = (self.policy.gpu_prewarm == "eta" and remaining is not None
+                   and remaining <= self.policy.gpu_prewarm_lead_seconds)
+            wait.gpu_prewarm_requested = due
+            result["should_prewarm"] = due and not wait.gpu_prewarm_complete
+            result["prewarm_trigger"] = "response_forecast" if due else None
+            pair_remaining = self._pair_response_remaining(state, now)
             next_use_deadline = now + pair_remaining if pair_remaining is not None else None
+            expires_at = min(
+                (w.gpu_response_observed_monotonic_s + w.gpu_response_valid_for_s
+                 for w in state.model_waits.values()), default=now,
+            ) if pair_remaining is not None else None
             state.snapshot_next_use_revision += 1
             next_use_revision = state.snapshot_next_use_revision
             threshold = self.policy.gpu_reclaim_min_remaining_seconds
-            previously_reclaimable = (
-                previous_remaining is not None and previous_remaining >= threshold
-            )
-            reclaimable = remaining is not None and remaining >= threshold
+            previously_reclaimable = (not previously_protected and previous_remaining is not None
+                                     and previous_remaining >= threshold)
+            reclaimable = (not self._gpu_prewarm_protected(wait, now) and remaining is not None
+                           and remaining >= threshold)
             phase_changed = previous_phase != str(phase)
-            should_recheck_pressure = (
-                phase in {"queued", "prefill_start"}
-                and (phase_changed or previously_reclaimable != reclaimable)
-            )
-            should_log = phase != "queued" or phase_changed or should_recheck_pressure
+            should_recheck_pressure = phase == "response_forecast" and (
+                phase_changed or previously_reclaimable != reclaimable)
+            frequent = phase in {"queued", "response_forecast"}
+            should_log = (not frequent or phase_changed or should_recheck_pressure
+                          or due or now - self._gpu_last_queued_log_monotonic_s >= 1.)
             suppressed = 0
-            if phase == "queued":
-                if not should_log and now - self._gpu_last_queued_log_monotonic_s >= 1.0:
-                    should_log = True
-                if should_log:
-                    suppressed = self._gpu_queued_logs_suppressed
-                    self._gpu_queued_logs_suppressed = 0
-                    self._gpu_last_queued_log_monotonic_s = now
-                else:
-                    self._gpu_queued_logs_suppressed += 1
+            if should_log:
+                suppressed = self._gpu_queued_logs_suppressed
+                self._gpu_queued_logs_suppressed = 0
+                self._gpu_last_queued_log_monotonic_s = now
+            else:
+                self._gpu_queued_logs_suppressed += 1
             self._gpu_signal_counts[str(phase)] += 1
             self._gpu_policy_log_count += int(should_log)
             self._gpu_policy_log_suppressed_total += int(not should_log)
@@ -446,12 +440,12 @@ class PolicyCoordinator:
                         "should_recheck_pressure": should_recheck_pressure,
                         "should_log": should_log,
                         "queued_observations_suppressed": suppressed,
-                        "estimated_prefill_remaining_seconds": remaining,
+                        "estimated_response_remaining_seconds": remaining,
                         "prewarm_requested": wait.gpu_prewarm_requested}
         # Keep per-VM metadata publication out of the global progress lock.
         # A busy checkpoint must not stall signal handling for every session.
         self._publish_snapshot_next_use(
-            state, next_use_deadline, next_use_revision,
+            state, next_use_deadline, next_use_revision, expires_at,
         )
         return response
 
@@ -467,44 +461,65 @@ class PolicyCoordinator:
                 "pressure_rechecks": self._gpu_pressure_recheck_count,
             }
 
-    def wait_for_gpu_prewarm(self, session_id: str, wait_id: str) -> bool:
-        """Wait for a claimed checkpoint before VM-pair prewarm, outside wait_lock.
-
-        Completion/new requests/session cleanup invalidate this work. No lifecycle
-        operation is performed here; the worker retains normal restore admission.
-        """
+    def wait_for_gpu_prewarm(self, session_id: str, wait_id: str, *, claim: bool = False) -> bool:
+        """Revalidate ETA after checkpoint waits and immediately before restore."""
         with self.demand.progress_lock:
             while True:
                 state = self._sessions.get(session_id)
                 wait = state.model_waits.get(wait_id) if state else None
-                if (wait is None or not wait.gpu_prewarm_requested or state.tool_active):
+                if wait is None or state.tool_active or wait.gpu_prewarm_complete:
+                    return False
+                remaining = self._gpu_response_remaining(wait, time.monotonic())
+                if (not wait.gpu_prewarm_requested or remaining is None
+                        or remaining > self.policy.gpu_prewarm_lead_seconds):
                     return False
                 if not state.eviction_in_progress and not state.migration_in_progress:
+                    if claim:
+                        wait.gpu_prewarm_started = True
                     return True
-                self._condition.wait()
+                if claim:
+                    return False
+                self._condition.wait(timeout=.1)
 
-    def _gpu_prefill_remaining(self, state: ModelWait, now: float) -> float | None:
-        if state.gpu_prefill_estimate_s is None or state.gpu_prefill_observed_monotonic_s is None:
-            return None
-        age = max(0.0, now - state.gpu_prefill_observed_monotonic_s)
-        if age > self.policy.gpu_signal_max_age_seconds:
-            return None
-        return max(0.0, state.gpu_prefill_estimate_s - age)
+    def complete_gpu_prewarm(self, session_id: str, wait_id: str) -> None:
+        with self.demand.progress_lock:
+            state = self._sessions.get(session_id)
+            wait = state.model_waits.get(wait_id) if state else None
+            if wait is not None:
+                wait.gpu_prewarm_complete = True
 
-    def _pair_prefill_remaining(self, state: SessionState, now: float) -> float | None:
-        values = [self._gpu_prefill_remaining(wait, now)
-                  if not wait.gpu_prewarm_requested else None
-                  for wait in state.model_waits.values()]
-        return min(values) if values and all(v is not None for v in values) else None
+    def _gpu_response_remaining(self, state: ModelWait, now: float) -> float | None:
+        if state.gpu_response_estimate_s is None or state.gpu_response_observed_monotonic_s is None:
+            return None
+        age = max(0.0, now - state.gpu_response_observed_monotonic_s)
+        if age >= state.gpu_response_valid_for_s:
+            return None
+        return max(0.0, state.gpu_response_estimate_s - age)
+
+    def _pair_response_remaining(self, state: SessionState, now: float) -> float | None:
+        values = []
+        for wait in state.model_waits.values():
+            remaining = self._gpu_response_remaining(wait, now)
+            if remaining is None or self._gpu_prewarm_protected(wait, now):
+                return None
+            values.append(remaining)
+        return min(values) if values else None
+
+    def _gpu_prewarm_protected(self, wait: ModelWait, now: float) -> bool:
+        remaining = self._gpu_response_remaining(wait, now)
+        return wait.gpu_prewarm_started or (
+            self.policy.gpu_prewarm == "eta" and remaining is not None
+            and remaining <= self.policy.gpu_prewarm_lead_seconds)
 
     def _publish_snapshot_next_use(
         self, state: SessionState, deadline: float | None, revision: int,
+        expires_at: float | None = None,
     ) -> None:
         if not self.policy.snapshot_next_use_residency:
             return
-        state.lifecycle.set_snapshot_next_use(deadline, revision)
+        state.lifecycle.set_snapshot_next_use(deadline, revision, expires_at=expires_at)
         if state.runtime_lifecycle is not None and not state.shared_runtime:
-            state.runtime_lifecycle.set_snapshot_next_use(deadline, revision)
+            state.runtime_lifecycle.set_snapshot_next_use(deadline, revision, expires_at=expires_at)
 
     def complete_model_wait(self, session_id: str, wait_id: str) -> None:
         with self.demand.progress_lock:
@@ -1909,16 +1924,18 @@ class PolicyCoordinator:
                       if state.session_id != exclude and state.eviction_eligible
                       and not state.eviction_in_progress and not state.migration_in_progress
                       and not state.tool_active
+                      and not any(self._gpu_prewarm_protected(w, time.monotonic())
+                                  for w in state.model_waits.values())
                       and state.lifecycle.resident]
         if self.policy.eviction in {
                 EvictionPolicy.WAIT_AWARE_PRESSURE, EvictionPolicy.GPU_AWARE_PRESSURE}:
-            # Model duration is unknown online. A request remains idle until
-            # its response is generated. No predicted or trace duration is consulted.
+            # A request remains idle until its actual response is generated.
+            # GPU-aware selection additionally requires a fresh response forecast.
             candidates = [state for state in candidates
                           if bool(state.model_waits) and not state.response_ready]
         if self.policy.eviction is EvictionPolicy.GPU_AWARE_PRESSURE:
             now = time.monotonic()
-            estimates = [(self._pair_prefill_remaining(state, now), state)
+            estimates = [(self._pair_response_remaining(state, now), state)
                          for state in candidates]
             eligible = [(remaining, state) for remaining, state in estimates
                         if remaining is not None and remaining > 0
