@@ -74,7 +74,7 @@ def _file(value: str | None, root: Path) -> str | None:
     return str((root / path).resolve())
 
 
-def load_configuration(baseline_path: Path, workload_path: Path) -> ExperimentSpec:
+def resolved_documents(baseline_path: Path, workload_path: Path) -> tuple[dict, dict]:
     """Resolve input files relative to their owning document, never the shell cwd."""
     baseline = BaselineConfig.model_validate(read_document(baseline_path)).model_dump(mode='json')
     workload = WorkloadConfig.model_validate(read_document(workload_path)).model_dump(mode='json')
@@ -87,6 +87,10 @@ def load_configuration(baseline_path: Path, workload_path: Path) -> ExperimentSp
     for key in ('clawtune_config', 'serving_sim_catalog_manifest'):
         if inference.get(key):
             inference[key] = _file(inference[key], baseline_root)
+    launch = inference.get('serving_sim_launch') or {}
+    for key in ('sim_root', 'venv', 'trace_catalog', 'tokenizer_dir', 'cache_dir', 'hf_hub_cache'):
+        if launch.get(key):
+            launch[key] = _file(launch[key], baseline_root)
     placement = baseline['execution'].get('tool_placement')
     if placement:
         for key in ('targets_file', 'prefix_sequences_file'):
@@ -103,6 +107,11 @@ def load_configuration(baseline_path: Path, workload_path: Path) -> ExperimentSp
         if (case.get('source') == 'recorded_trace'
                 or baseline['execution'].get('snapshot_branching') is not None):
             case['source_reference'] = _file(case['source_reference'], workload_root)
+    return baseline, workload
+
+
+def load_configuration(baseline_path: Path, workload_path: Path) -> ExperimentSpec:
+    baseline, workload = resolved_documents(baseline_path, workload_path)
     return compile_configuration(BaselineConfig.model_validate(baseline),
                                  WorkloadConfig.model_validate(workload))
 

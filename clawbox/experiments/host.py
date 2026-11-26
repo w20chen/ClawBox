@@ -74,6 +74,10 @@ class HostConfig(BaseModel):
     ip_local_port_range: list[int] | None = Field(default=None, min_length=2, max_length=2)
     cube_proxy_connect_timeout_seconds: int | None = Field(default=None, ge=3, le=300)
     cubelet_tap_init_num: int | None = Field(default=None, ge=1)
+    cubelet_tap_url: str = 'http://127.0.0.1:9998/v1/network/taps'
+    cube_api_nofile: int | None = Field(default=None, ge=1024)
+    required_kernel: str | None = None
+    required_boot_parameters: list[str] = Field(default_factory=list)
     cube_scheduler_overcommit: dict[str, CubeOvercommitRatio] | None = Field(default=None, min_length=1)
     cube_scheduler_vm_count_ratio: dict[str, float] | None = Field(default=None, min_length=1)
     cube_master_log_level: Literal["debug", "info", "warn", "error"] | None = None
@@ -381,6 +385,49 @@ p.write_text(updated)
     return True
 
 
+def apply_cube_api_nofile(config: HostConfig) -> bool:
+    """Apply a minimum service limit, preserving an already larger hard limit."""
+    if config.cube_api_nofile is None:
+        return False
+    from .preflight import process_nofile
+    unit = 'cube-sandbox-cube-api'
+    actual = process_nofile(unit)
+    configured_soft = _run('systemctl', 'show', unit, '-p', 'LimitNOFILESoft', '--value')
+    limit = config.cube_api_nofile
+    if (actual['soft'] == -1 or actual['soft'] >= limit) and (
+            configured_soft == 'infinity' or int(configured_soft) >= limit):
+        return False
+    from .host_runtime import ROOT
+    _run('sudo', '-n', 'bash', str(ROOT / 'scripts/configure-cube-api-nofile.sh'),
+         '--minimum', str(limit), '--apply')
+    verified = process_nofile(unit)
+    if verified['soft'] != -1 and verified['soft'] < limit:
+        raise RuntimeError('CubeAPI NOFILE did not take effect; inspect its systemd drop-ins and /proc/MainPID/limits')
+    return True
+
+
+def recover(config: HostConfig, profile: Path, *, execute: bool = False,
+            timeout_seconds: int = 1200) -> dict:
+    """Preview recovery; explicit apply reuses the maintained startup and apply paths."""
+    from .host_runtime import ROOT, DEFAULT_LOCAL_CGROUP
+    from .preflight import idle_domain
+    idle_domain(DEFAULT_LOCAL_CGROUP)
+    plan = dict(action='recover', apply=execute, profile=str(profile),
+        steps=['start CubeAPI/CubeMaster dependencies, then Cubelet/egress and wait for storage heartbeat',
+               'apply the reviewed host plan on an idle domain',
+               'create/execute/destroy the existing host VM probe'],
+        preserved=['templates', 'VM storage', 'experiment results'],
+        next='Run experiment preflight with the intended baseline/workload; recovery is not Full1280 readiness.')
+    if execute:
+        try:
+            subprocess.run(['sudo', '-n', 'bash', str(ROOT/'scripts/recover-cubesandbox-after-reboot.sh'),
+                            str(timeout_seconds)], check=True, timeout=timeout_seconds + 30)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError('host recovery failed; inspect the preceding service/storage diagnostics, fix them and retry host recover --apply') from exc
+        plan['verified_profile'] = apply(config, profile)
+    return plan
+
+
 def inventory() -> dict:
     nodes = []
     for path in sorted(Path("/sys/devices/system/node").glob("node[0-9]*")):
@@ -403,7 +450,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
     values = HostConfig().model_dump()
     if not profile_path:
         values.update(compute_nodes=[HostComputeNode(node_id=f"node{i}", numa_node=i).model_dump() for i in (0, 1)],
-                      warm_node=2, warm_root="/mnt/clawbox-pool", cubelet_tap_init_num=2560)
+                      warm_node=2, warm_root="/mnt/clawbox-pool", cubelet_tap_init_num=2560,
+                      cube_api_nofile=65536)
     if detect:
         nodes = [n for n in inventory()['numa_nodes'] if n['cpus'] and n['total_mib'] >= 16 * 1024]
         if not nodes:
@@ -425,6 +473,9 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
                 values[key] = os.environ[env]
     if profile_path:
         profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        for key in ('cube_api_nofile', 'cubelet_tap_url', 'required_kernel', 'required_boot_parameters'):
+            if profile.get(key) is not None:
+                values[key] = profile[key]
         if profile.get("compute_nodes"):
             values["compute_nodes"] = [dict(node_id=n["node_id"], numa_node=n["numa_node"], cpus=n["cpus"],
                 memory_gib=n["memory_capacity_mib"] // 1024, low_gib=n["low_watermark_mib"] // 1024,
@@ -506,6 +557,17 @@ def check(config: HostConfig) -> dict:
     probe("cgroup v2", lambda: Path("/sys/fs/cgroup/cgroup.controllers").is_file(),
           "Boot with cgroup v2 before installing CubeSandbox.")
     probe("sudo", lambda: _run("sudo", "-n", "true"), "Run sudo -v in this terminal, then retry.")
+    if config.required_kernel:
+        probe('required kernel', lambda: platform.release() == config.required_kernel,
+              f'Boot the reviewed kernel {config.required_kernel} before applying this host plan.')
+    if config.required_boot_parameters:
+        probe('required boot parameters', lambda: set(config.required_boot_parameters) <= set(Path('/proc/cmdline').read_text().split()),
+              'Restore the saved boot parameters and reboot during maintenance.')
+    if config.cube_api_nofile is not None:
+        probe('CubeAPI NOFILE setting', lambda: {
+            'current_soft': _run('systemctl', 'show', 'cube-sandbox-cube-api', '-p', 'LimitNOFILESoft', '--value'),
+            'requested_minimum': config.cube_api_nofile,
+        }, 'Install the CubeAPI systemd service before applying its file limit.')
     if config.tcp_tw_reuse is not None:
         probe('TCP reuse setting', lambda: {
             'current': int(_run('sysctl', '-n', 'net.ipv4.tcp_tw_reuse')),
@@ -649,6 +711,8 @@ def check(config: HostConfig) -> dict:
 
 def apply(config: HostConfig, profile: Path) -> dict:
     from clawbox.experiments import host_runtime as lab
+    from .preflight import idle_domain
+    idle_domain(lab.DEFAULT_LOCAL_CGROUP)
     report = check(config)
     if not report["ready_for_apply"]:
         print(json.dumps(report, indent=2))
@@ -656,6 +720,7 @@ def apply(config: HostConfig, profile: Path) -> dict:
     report["idle_cube_cache_reclaim"] = reclaim_idle_cube_file_cache()
     print(json.dumps({"idle_cube_cache_reclaim": report["idle_cube_cache_reclaim"]}, sort_keys=True))
     apply_network(config)
+    apply_cube_api_nofile(config)
     apply_cube_proxy_connect_timeout(config)
     restart_cubemaster = False
     if config.cube_scheduler_overcommit is not None:

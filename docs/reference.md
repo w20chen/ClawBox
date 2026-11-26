@@ -34,11 +34,14 @@ they rewrite result artifacts.
 
 | Command | Purpose and main options |
 | --- | --- |
+| `prepare DIRECTORY --baseline B --workload W --machine-env M` | Create editable copies plus `experiment.sh` bound to the selected checkout, environment and output root. Optional `--host-config H`, `--creation-standard S`; never overwrite. Does not apply settings or validate live readiness. |
+| `preflight SPEC [--json] [--qualification FILE]` | Aggregate read-only launch checks and remedies; exit 0 if ready, 2 for failed checks, 1 for configuration/read errors. An explicit invalid receipt fails; without one, launch decides reuse/qualification. |
 | `schema baseline\|workload` | Print the full editable JSON Schema, including defaults and constraints. |
 | `host inspect` | Read NUMA topology, CPUs, and memory. |
 | `host init FILE [--detect] [--from-profile PROFILE]` | Write a new editable host YAML; existing files are preserved. |
 | `host check FILE` | Check the plan and prerequisites without applying it. |
 | `host apply FILE [--profile PROFILE]` | Apply a reviewed plan on an idle host; default profile is `~/.config/clawbox/host.json`. |
+| `host recover FILE --profile PROFILE [--apply] [--timeout-seconds 1200]` | Preview reboot recovery; explicit apply starts CubeAPI/CubeMaster dependencies and Cubelet/egress in dependency order, waits for heartbeat, then runs host apply and its VM probe. Timeout is a positive integer in seconds for service readiness, separate from host apply. Refuses occupied/leased VM domains. |
 | `host clean [--apply]` | Preview or remove recognized crash dumps; `--root`, `--older-than-hours` (24), `--min-size-mib` (100). |
 | `snapshot-storage init FILE` | Write a schema-2 peer-local-ssd host plan with explicit disk identities; never overwrite. |
 | `snapshot-storage check FILE` | Show the reviewed storage/network plan and verify root, tools, space, and NUMA prerequisites. |
@@ -73,6 +76,28 @@ they rewrite result artifacts.
 | `train RUN_DIRECTORY... --trace FILE --repository NAME --output FILE` | Fit frozen KBs and measured host-memory calibration from completed training runs. |
 
 ### Configuration ownership
+
+Commands accepting `SPEC`, plus `resume`, accept `--host-config H` and
+`--creation-standard S`. These select readiness constraints, not resource or
+template overrides. Defaults are `CLAWBOX_HOST_CONFIG` and
+`CLAWBOX_CREATION_STANDARD` when set; otherwise no optional plan/manifest is
+selected. Explicit flags win and are inherited by detached execution. The
+prepared wrapper passes its saved selections on each invocation. `prepare`
+requires explicit paths for the bindings it saves; it does not copy these files.
+
+Creation manifests use schema version 1 and check kernel, boot parameters,
+Full1280 TAP reserve and CubeAPI NOFILE. They do not establish the provenance
+of a later native build; retain installation evidence and real-VM qualification
+for IRQ/snapshot changes. Readiness is checked again at launch; it is not a
+reservation against another concurrent launch. Full1280 requires 2560 distinct
+Ready/unowned TAPs for 1280 active Runtime/Tool pairs. Smaller active limits use
+the actual VM demand. Managed simulator ports must be free and outside the host
+ephemeral range, or explicitly listed in `ip_local_reserved_ports`.
+
+Prepared `experiment.sh` accepts `[--sudo] COMMAND ...`, including `host`,
+`status`, `resume`, `abort`, and `report`, and fixes the output root for all of
+them. Its generated README lists command order. Editing the baseline/workload
+requires a new run ID; changing a binding requires preparing a new directory.
 
 Edit the baseline and workload YAML directly. Each baseline selects one policy.
 Each baseline defines one policy. Repetitions, cases and offered concurrency
@@ -283,6 +308,10 @@ VM pool and writes a profile only after checks succeed.
 | `ip_local_port_range` | `null` | Preserve the current host ephemeral TCP range; explicit `[LOW, HIGH]` applies inclusive port bounds until reboot. Large-concurrency Cube command streams should use a reviewed wide range such as `[10000, 65535]`. |
 | `cube_proxy_connect_timeout_seconds` | `null` | Preserve Cube default; explicit 3–300 seconds bounds guest connection setup |
 | `cubelet_tap_init_num` | `2560` in new `host init` plans; `null` when omitted | Number of TAP devices to preallocate; 2560 covers 1280 Runtime/Tool pairs. Size for the planned live VM count. `null` preserves Cube's target; profile imports preserve saved settings. Changing the target requires host apply on an idle VM pool and may restart Cubelet/egress. Preparation increases service startup time. Use a new run ID; no image rebuild or retraining. This is a preallocation target, not a VM limit. |
+| `cubelet_tap_url` | `http://127.0.0.1:9998/v1/network/taps` | Read-only Cubelet inventory endpoint for preflight. Counts distinct Ready devices without an owner; changing this URL only selects the probe endpoint. |
+| `cube_api_nofile` | `65536` in new plans; `null` when omitted/imported without a value | Minimum descriptors per CubeAPI process. Requires installed systemd service and util-linux. Host apply uses the maintained NOFILE helper without restarting CubeAPI and preserves higher limits. `null` leaves configuration unchanged; readiness still checks the actual process. No image rebuild/retraining. |
+| `required_kernel` | `null` | Exact host kernel release required by check/apply/preflight when this plan is selected. Does not install or boot a kernel. |
+| `required_boot_parameters` | `[]` | Required whitespace-separated kernel command-line tokens, expressed as a YAML list. Check only; changing boot settings requires administrator configuration and reboot. Preserve host-specific display-off settings. |
 | `cube_scheduler_overcommit` | `null` | Map actual Cube `InstanceType` to positive `cpu_ratio` and `mem_ratio` |
 | `cube_scheduler_vm_count_ratio` | `null` | Positive VM-count quota multiplier by actual `InstanceType` |
 | `cube_master_log_level` | `null` | Preserve Cube logging; `debug`, `info`, `warn`, or `error`. `warn` avoids verbose inventory logs in large runs. |

@@ -276,7 +276,7 @@ def test_os_only_design_checks_common_physical_shared_pool(monkeypatch):
     monkeypatch.setattr(qualification, 'apply_environment', profiles.append)
     monkeypatch.setattr(qualification, 'doctor', lambda *_args, **_kwargs: [])
 
-    qualification.require_host_ready(spec)
+    qualification.require_host_ready(spec, launch_checks=False)
 
     assert profiles[0]['shared_memory_borrow_limit_mib'] == \
         raw['environment']['resources']['shared_memory_borrow_limit_mib']

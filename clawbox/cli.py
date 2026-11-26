@@ -56,6 +56,16 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('must be a positive integer') from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return parsed
+
+
 def emit_overview(value: dict[str, Any]) -> None:
     if 'dimensions' in value:
         print(f"Experiment: {value['experiment_id']} | baseline: {value['arms'][0]['name']} | trials: {value['arm_count']}")
@@ -92,6 +102,12 @@ def configuration_arguments(command):
     command.add_argument('spec', type=Path, nargs='?', help='internal resolved run snapshot')
     command.add_argument('--baseline', type=Path, help='baseline YAML with all system and policy settings')
     command.add_argument('--workload', type=Path, help='workload YAML with tasks and submission settings')
+    readiness_arguments(command)
+
+
+def readiness_arguments(command):
+    command.add_argument('--host-config', type=Path, help='reviewed host YAML readiness constraints; does not override baseline resources')
+    command.add_argument('--creation-standard', type=Path, help='creation manifest with required kernel, boot settings, TAP reserve and CubeAPI NOFILE')
 
 
 def configured_spec(args):
@@ -134,6 +150,16 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="group", required=True)
     experiment = commands.add_parser("experiment")
     sub = experiment.add_subparsers(dest="command", required=True)
+    prepare = sub.add_parser('prepare', help='copy editable inputs and bind explicit paths to the existing CLI; never overwrite')
+    prepare.add_argument('directory', type=Path)
+    prepare.add_argument('--baseline', type=Path, required=True)
+    prepare.add_argument('--workload', type=Path, required=True)
+    prepare.add_argument('--machine-env', type=Path, required=True)
+    readiness_arguments(prepare)
+    preflight = sub.add_parser('preflight', help='aggregate read-only launch checks with remedies; never start VMs')
+    configuration_arguments(preflight)
+    preflight.add_argument('--qualification', type=Path)
+    preflight.add_argument('--json', action='store_true')
     schema = sub.add_parser('schema', help='print baseline or workload JSON Schema')
     schema.add_argument('kind', choices=('baseline', 'workload'))
     resolve = sub.add_parser('resolve', help='freeze a baseline and workload without launching VMs')
@@ -180,6 +206,7 @@ def parser() -> argparse.ArgumentParser:
         help="deadline for owned-VM cleanup in seconds (default: 180)",
     )
     resume.add_argument("--detach", action="store_true")
+    readiness_arguments(resume)
     host = sub.add_parser("host", help="inspect, configure and check a standalone host before changing it")
     host_actions = host.add_subparsers(dest="host_action", required=True)
     host_actions.add_parser("inspect", help="show NUMA CPUs, RAM and distances without changing the host")
@@ -198,6 +225,11 @@ def parser() -> argparse.ArgumentParser:
         if action == "apply":
             host_command.add_argument("--profile", type=Path,
                                       default=Path.home() / ".config/clawbox/host.json")
+    recover = host_actions.add_parser('recover', help='preview reboot recovery; --apply starts services and applies the reviewed host plan')
+    recover.add_argument('config', type=Path)
+    recover.add_argument('--apply', action='store_true')
+    recover.add_argument('--profile', type=Path, required=True, help='verified profile output path')
+    recover.add_argument('--timeout-seconds', type=positive_int, default=1200)
     snapshot_storage = sub.add_parser(
         "snapshot-storage",
         help="prepare local SSD domains and a private peer network",
@@ -503,6 +535,31 @@ def main(argv: list[str] | None = None) -> int:
     root = parser()
     args = root.parse_args(argv)
     try:
+        for key in ('host_config', 'creation_standard'):
+            if path := getattr(args, key, None):
+                os.environ['CLAWBOX_' + key.upper()] = str(path.resolve())
+        if args.command == 'prepare':
+            from clawbox.experiments.prepare import prepare
+            emit(prepare(args.directory, baseline=args.baseline, workload=args.workload,
+                         machine_env=args.machine_env, output_root=args.output_root,
+                         host_config=args.host_config, creation_standard=args.creation_standard))
+            return 0
+        if args.command == 'preflight':
+            from clawbox.experiments.preflight import check
+            spec = configured_spec(args)
+            ensure_supported_experiment(spec)
+            report = check(spec, output_root=args.output_root, qualification=args.qualification)
+            if args.json:
+                emit(report)
+            else:
+                print('READY' if report['ready'] else 'NOT READY')
+                for item in report['checks']:
+                    print(f"{'OK' if item['ok'] else 'FAIL'} {item['check']}: {json.dumps(item['detail'], default=str)}")
+                    if item['remedy']:
+                        print('  Remedy: ' + item['remedy'])
+                print('Qualification: ' + json.dumps(report['qualification']))
+                print(report['scope'])
+            return 0 if report['ready'] else 2
         if args.command == "trace":
             from clawbox.experiments.inputs import inspect_trace
             emit(inspect_trace(args.path))
@@ -597,6 +654,9 @@ def main(argv: list[str] | None = None) -> int:
                 report = host.check(host.load_config(args.config))
                 emit(report)
                 return 0 if report["ready_for_apply"] else 2
+            elif args.host_action == 'recover':
+                emit(host.recover(host.load_config(args.config), args.profile,
+                                 execute=args.apply, timeout_seconds=args.timeout_seconds))
             else:
                 emit({"ready": True, "profile": host.apply(host.load_config(args.config), args.profile)})
             return 0

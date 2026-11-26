@@ -12,6 +12,14 @@ timeout_seconds=${1:-1200}
 # Starting the aggregate target can expose an ordering cycle between Cubelet,
 # cube-egress, and the host-rule helper.  Starting this dependency chain in its
 # real runtime order is safe to repeat and does not restart active services.
+# CubeAPI's installed unit pulls in CubeMaster and its database/cache units.
+systemctl start cube-sandbox-cube-api.service
+for service in cube-api cubemaster; do
+  systemctl is-active --quiet "cube-sandbox-$service.service" || {
+    echo "cube-sandbox-$service.service is not active; inspect its journal and dependency units" >&2
+    exit 1
+  }
+done
 systemctl start cube-sandbox-cubelet.service
 systemctl start cube-sandbox-cube-egress.service
 

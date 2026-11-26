@@ -313,24 +313,28 @@ final task validation and owned-VM cleanup.
 
 ## Recover after reboot
 
-Recover the Cubelet and egress dependency chain, then check services and
-storage before applying the saved host plan. The optional argument is the
-maximum number of seconds to wait for Cubelet's delegated cgroup and storage-node
-heartbeat (default 1200). A large preallocated TAP pool increases startup time:
+Use the explicit machine environment and saved host plan. Preview recovery,
+then apply on an idle VM host. The command reuses the maintained Cubelet/egress
+startup ordering (first starting CubeAPI/CubeMaster and their installed service
+dependencies), waits for the cgroup/storage heartbeat and runs host apply,
+including its real VM create/execute/destroy probe. A large TAP pool increases
+startup time; `--timeout-seconds` defaults to 1200 for service readiness:
 
 ```bash
-sudo bash scripts/recover-cubesandbox-after-reboot.sh
-systemctl is-active cube-sandbox-cube-api.service \
-  cube-sandbox-cubemaster.service cube-sandbox-cubelet.service \
-  cube-sandbox-cube-egress.service cube-sandbox-cube-egress-net.service
-df -h /data/cubelet
-bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
-bash scripts/clawbox --sudo experiment host apply \
-  "$HOME/.config/clawbox/host.yaml"
+bash scripts/clawbox --machine-env /absolute/machine.env --sudo experiment host recover \
+  /absolute/host.yaml --profile /absolute/host.json
+bash scripts/clawbox --machine-env /absolute/machine.env --sudo experiment host recover \
+  /absolute/host.yaml --profile /absolute/host.json --apply
+# From the directory created by experiment prepare:
+bash /data/my-experiment/experiment.sh --sudo preflight
 ```
 
 The apply step requires an idle Cube VM cgroup and reclaims clean cache retained
 in its reusable leaves; it never deletes VM/template files or unrelated data.
+An empty cgroup with an active experiment lease also blocks recovery/apply.
+If bootstrap dependencies are unavailable after interruption, repair the Python
+environment first. The lower-level `recover-cubesandbox-after-reboot.sh` remains
+available for service startup, but its success alone is not experiment readiness.
 
 For S3lvol, also require an active backend and `/var/run/s3lvol.sock`. The
 snapshot filesystem must remain below 85% use. Preview recognized crash-dump

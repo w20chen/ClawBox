@@ -180,6 +180,8 @@ def test_malformed_host_yaml_has_actionable_cli_error(tmp_path, capsys):
 
 def test_failed_preflight_cannot_mutate_host(monkeypatch, tmp_path):
     from clawbox.experiments import host
+    from clawbox.experiments import preflight
+    monkeypatch.setattr(preflight, 'idle_domain', lambda _: None)
     monkeypatch.setattr(host, "check", lambda _: {"ready_for_apply": False})
     monkeypatch.setattr(host.subprocess, "run", lambda *a, **k: pytest.fail("host mutation"))
     with pytest.raises(ValueError, match="prerequisites failed"):

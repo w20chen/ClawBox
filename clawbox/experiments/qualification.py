@@ -407,7 +407,11 @@ def require_empty_vm_domain(path: str | Path) -> None:
         )
 
 
-def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True) -> None:
+def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True,
+                       launch_checks: bool = True) -> None:
+    if launch_checks:
+        from .preflight import require_prerequisites
+        require_prerequisites(spec)
     from .base_cache import check_experiment
     check_experiment(spec.resources)
     from .cpu_qos import check_cpu_qos_support

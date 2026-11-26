@@ -25,6 +25,57 @@ with `--sudo` also need `--sudo` for commands that rewrite their artifacts,
 including `collect` and `report`; `status` is read-only. See the
 [command and configuration reference](reference.md) for options and defaults.
 
+## Daily use: prepare once, check, launch
+
+On an installed host, create a directory from a compatible baseline/workload
+pair and the **explicit** machine environment used by that deployment:
+
+```bash
+bash scripts/clawbox --machine-env /absolute/machine.env \
+  --output-root /data/clawbox-results experiment prepare /data/my-experiment \
+  --baseline /absolute/baseline.yaml --workload /absolute/workload.yaml \
+  --machine-env /absolute/machine.env --host-config /absolute/host.yaml
+cd /data/my-experiment
+# Review baseline.yaml and workload.yaml, then:
+bash experiment.sh --sudo preflight
+bash experiment.sh --sudo launch --run-id my-new-run --detach
+bash experiment.sh status my-new-run
+```
+
+For kunpeng, also pass `--creation-standard` with the saved
+`.artifacts/experiment-standards/kunpeng-creation-20261108/manifest.json` when
+preparing. Copy that manifest to the host if it is absent there. The generated
+wrapper binds its path, the checkout, machine environment, host plan, and result
+root; it calls the existing CLI. It does not install services or copy credentials.
+An existing preparation directory is never overwritten. Relative input paths
+become absolute; per-case Tool templates, arrivals, replay times and policies
+are retained. Host profiles do not silently replace experiment resources.
+
+`preflight` checks actual Ready/unowned TAPs, CubeAPI and experiment-process
+NOFILE, idle cgroup **and its lease**, disk reserve, service/template/resource
+checks, input readiness, and managed GPU simulator paths/CPU affinity/ports.
+It prints all failed checks with remedies and exits nonzero. It does not create
+VMs or repair the host. `--json` saves the same report for audit. `launch`
+rechecks transient readiness and reuses a matching qualification receipt;
+otherwise it runs the existing real-VM qualification. Qualification finishes
+before `--detach` returns. Readiness does not prove Full1280 performance.
+
+After interruption, use the same directory and run ID:
+
+```bash
+bash experiment.sh --sudo abort my-new-run  # stop/clean only this run if needed
+bash experiment.sh --sudo preflight
+bash experiment.sh --sudo resume my-new-run --detach
+```
+
+Resume preserves completed work according to the saved run's resume rules.
+Changed experiment inputs require a new run ID. If another run owns the VM
+domain, wait for it or have its owner abort it; do not remove its lock file.
+After reboot use [host recover](installation.md#recover-after-reboot), then
+preflight again. For a new host, complete installation first; `host init --detect`
+proposes an editable plan and `host init --from-profile` reuses an explicit
+saved profile. Review template identities and resources before host apply.
+
 ## 1. Check the host
 
 ```bash
@@ -37,7 +88,8 @@ After changing the host plan, apply it on an idle VM pool and copy the verified 
 plan is `host.yaml`; `host.json` records applied settings. Neither file silently
 overrides a baseline during experiment loading.
 
-New `host init` plans propose `cubelet_tap_init_num: 2560`, enough for the
+New `host init` plans propose `cube_api_nofile: 65536` and
+`cubelet_tap_init_num: 2560`, enough for the
 Runtime and Tool VMs of 1280 simultaneously live sessions. Set this target to
 at least twice your planned live session count for larger runs. Creating TAP
 devices ahead of arrivals moves network preparation out of VM creation; it
@@ -1145,6 +1197,12 @@ return probes before calculating durations. In-flight calls at capture end
 are incomplete observations, not zero-duration operations.
 
 ## Set CubeAPI's open-file limit
+
+The preferred persistent configuration is `cube_api_nofile: 65536` in
+`host.yaml`. `host check` previews it; `host apply` on an idle host invokes the
+same helper below and verifies the running process. Higher limits are retained.
+Set `CLAWBOX_NOFILE_LIMIT=65536` in the selected `machine.env` separately for
+the experiment process. Full1280 preflight verifies both actual soft limits.
 
 Before large concurrent runs, check CubeAPI's per-process file-descriptor limit.
 A low limit can produce `Too many open files` and fail creation or updates.
