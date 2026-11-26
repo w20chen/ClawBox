@@ -137,6 +137,7 @@ def test_owned_gpu_finalizes_on_success_failure_and_timeout(tmp_path, monkeypatc
     from clawbox.experiments.spec import InferenceSpec
     spec = _short_spec()
     spec = spec.model_copy(update={'inference': InferenceSpec(backend='serving_sim', configuration={
+        'model': 'test', 'serving_sim_catalog_manifest': '/manifest.json',
         'base_url': 'http://127.0.0.1:8000', 'serving_sim_launch': dict(cpu_affinity=[999],
         cores=1, topology='8A', sim_root='/sim', venv='/venv', trace_catalog='/catalog.json')})})
     supervisor = worker(spec, run_id='gpu', attempt_id='a', owner_id='o',

@@ -24,7 +24,6 @@ inference: {backend: replay, configuration: {model: example-model, time_scale: 1
 evidence: {}
 measurement:
   validation: {command: 'test "$(cat /workspace/result.txt)" = complete'}
-  output: {directory: /results}
 conditions: {prediction_source: kb}
 mechanisms:
   deployment: {mode: managed}

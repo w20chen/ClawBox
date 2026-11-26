@@ -26,6 +26,7 @@ flowchart TD
 | workload `tasks` | Task source/manifest or explicit cases; repetitions, assignment, rollouts per case, task-specific Tool templates |
 | workload `submission` | Offered session levels, arrivals, randomization/seed, active-session bound and observation window |
 | workload `validation` | Default final task check; individual cases may provide their own check |
+| CLI / machine environment | Service connections, credentials, result root; cannot override baseline target node or case network ownership |
 
 Physical capacities, admission promises, configured guest sizes and measured
 consumption are different quantities. Declaring capacity does not prove it is
@@ -68,11 +69,19 @@ rules after combining the two files.
 | CPU QoS | Managed placement/cgroup required; group-idle requires enabled QoS. Workload case labels determine which sessions get each class. |
 | Grouped submission | Offered count must equal number of cases ? rollouts per case. Each group shares an arrival time; each rollout has separate VMs. Other assignments require rollouts_per_case=1. |
 | Offered sessions / max active / creation / dependency-install limits | Different gates. Offered count specifies work; max active caps live sessions; creation caps VM startup; installation caps matching package commands. Any can become the throughput bottleneck. |
+| Qualification concurrency | Uses the derived smoke's active-session bound, respecting the formal active cap and fixed slots. No inference key may impose a hidden cap on a formal run. |
+| Inference configuration | Closed typed key set. Managed serving_sim requires launch/model/endpoint/catalog settings; replay/API reject simulator keys. ClawTune config owns model/endpoint/credential and conflicts with duplicate inline values. |
+| Simulator CPU allocation | `cores` equals CPU-pool length; a single cluster uses that pool. Multiple clusters use one CPU each, cycling through the pool, so excess clusters share CPUs. `describe --json` shows actual assignments. |
+| Simulator persistence | `native` and `final` currently have identical native flushing/final-summary behavior; labels are not an independent performance variable. |
+| Tool templates / network | Case templates change identity and shape. Tool internet access is exclusively the baseline policy; case network overrides are rejected. |
 
 The remaining restrictions above describe actual implementation requirements or
 a named experimental control, rather than accidental coupling. In particular,
 OS-default and resident-capacity accounting are intentionally compound modes.
 Changing them into arbitrary combinations would change the experiment method.
+`evidence.idle_reclaim_costs` and pressure-control `amortization_factor` were
+unused by context-first and are no longer accepted. Measured residency/peer
+restore costs remain supported where the respective algorithm consumes them.
 
 ## Changing a configuration
 

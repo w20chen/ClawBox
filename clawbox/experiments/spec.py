@@ -7,10 +7,13 @@ import math
 import random
 import urllib.parse
 from pathlib import Path, PurePosixPath
-from typing import Literal, Any
+from typing import Annotated, Literal, Any
+from copy import deepcopy
+from typing_extensions import NotRequired, Required, TypedDict
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticUndefined
 
 from .spec_types import (
     AdmissionPolicy, AgentDriver, ArrivalSchedule, EvictionPolicy, InferenceBackend,
@@ -87,13 +90,6 @@ class SnapshotResidencyCostSpec(StrictFrozenModel):
     cold_restore_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
 
 
-class IdleReclaimCostSpec(StrictFrozenModel):
-    provenance: str = Field(min_length=1)
-    warm_checkpoint_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
-    warm_restore_seconds_per_gib: float = Field(gt=0, allow_inf_nan=False)
-    cold_checkpoint_seconds_per_gib: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    cold_restore_seconds_per_gib: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-
 class WorkloadCase(StrictFrozenModel):
     case_id: str = Field(min_length=1)
     qos_class: Literal["neutral", "ls", "be"] = "neutral"
@@ -104,11 +100,19 @@ class WorkloadCase(StrictFrozenModel):
     base_commit: str | None = None
     replay_trace_reference: str | None = None
     validation: str | dict[str, Any] | None = None
-    sandbox: "SandboxSpec | None" = None
+    sandbox: "TemplateSpec | None" = None
     snapshot_reuse_probability: float | None = Field(
         default=None, ge=0, le=1, allow_inf_nan=False,
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator('sandbox', mode='before')
+    @classmethod
+    def template_only(cls, value):
+        if isinstance(value, dict) and 'allow_internet_access' in value:
+            raise ValueError('case.sandbox only selects template/shape; set '
+                             'environment.sandbox.allow_internet_access in the baseline')
+        return value
 
 
 class WorkloadSpec(StrictFrozenModel):
@@ -143,20 +147,20 @@ class ServingSimLaunchSpec(StrictFrozenModel):
     sim_root: str
     venv: str
     trace_catalog: str
-    cpu_affinity: tuple[int, ...] = Field(min_length=1)
-    cores: int = Field(gt=0)
+    cpu_affinity: tuple[Annotated[int, Field(ge=0, strict=True)], ...] = Field(min_length=1)
+    cores: int = Field(gt=0, strict=True)
     topology: str = Field(min_length=1)
     decode_time_scale: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
     tpot_ms: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
-    forecast_interval_seconds: float = Field(default=.5, gt=0, allow_inf_nan=False)
-    forecast_window_seconds: float = Field(default=5., gt=0, allow_inf_nan=False)
-    forecast_validity_seconds: float = Field(default=2., gt=0, allow_inf_nan=False)
-    cluster_count: int = Field(default=1, ge=1)
+    forecast_interval_seconds: float = Field(default=.5, gt=0, allow_inf_nan=False, strict=True)
+    forecast_window_seconds: float = Field(default=5., gt=0, allow_inf_nan=False, strict=True)
+    forecast_validity_seconds: float = Field(default=2., gt=0, allow_inf_nan=False, strict=True)
+    cluster_count: int = Field(default=1, ge=1, strict=True)
     routing: Literal['sticky_balanced_by_case'] = 'sticky_balanced_by_case'
     persistence: Literal['native', 'final'] = 'final'
-    nofile: int = Field(default=65536, gt=0)
-    startup_timeout_seconds: float = Field(default=180., gt=0, allow_inf_nan=False)
-    shutdown_timeout_seconds: float = Field(default=720., gt=0, allow_inf_nan=False)
+    nofile: int = Field(default=65536, gt=0, strict=True)
+    startup_timeout_seconds: float = Field(default=180., gt=0, allow_inf_nan=False, strict=True)
+    shutdown_timeout_seconds: float = Field(default=720., gt=0, allow_inf_nan=False, strict=True)
     tokenizer_dir: str | None = None
     cache_dir: str | None = None
     hf_hub_cache: str | None = None
@@ -220,25 +224,133 @@ class ServingSimLaunchSpec(StrictFrozenModel):
         }
 
 
-class InferenceSpec(StrictFrozenModel):
-    backend: InferenceBackend = InferenceBackend.REPLAY
-    configuration: dict[str, Any] = Field(default_factory=dict)
+def _launch_configuration_type():
+    """Share launch field types with the dictionary passed to child processes.
 
-    @model_validator(mode="after")
-    def no_llm_duration_policy(self):
-        for name in ('qualification_case_limit', 'qualification_simulator_cluster_count'):
-            if name in self.configuration:
-                value = self.configuration[name]
-                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                    raise ValueError(f'{name} must be a positive integer')
+    Keep omitted keys omitted: callers use membership to distinguish a supplied
+    path/override from a default. JSON Schema still documents model defaults.
+    Cross-field launch validation remains in ServingSimLaunchSpec.
+    """
+    fields = {}
+    for name, original in ServingSimLaunchSpec.model_fields.items():
+        field = deepcopy(original)
+        required = field.is_required()
+        if not required:
+            field.json_schema_extra = {**(field.json_schema_extra or {}), 'default': field.default}
+        field.default, field.default_factory = PydanticUndefined, None
+        annotation = Annotated[field.annotation, field]
+        fields[name] = Required[annotation] if required else NotRequired[annotation]
+    result = TypedDict('ServingSimLaunchConfiguration', fields)
+    result.__pydantic_config__ = ConfigDict(extra='forbid')
+    return result
+
+
+ServingSimLaunchConfiguration = _launch_configuration_type()
+
+
+class InferenceConfiguration(TypedDict, total=False):
+    """Public inference keys; execution/qualification state belongs elsewhere."""
+    __pydantic_config__ = ConfigDict(extra='forbid')
+
+    base_url: Annotated[str, Field(min_length=1)]
+    model: Annotated[str, Field(min_length=1)]
+    api_key_env: Annotated[str, Field(pattern=r'^[A-Za-z_][A-Za-z0-9_]*$',
+                                     json_schema_extra={'default': 'OPENCLAW_API_KEY'})]
+    clawtune_config: Annotated[str, Field(min_length=1)]
+    clawtune_root: Annotated[str, Field(min_length=1)]
+    time_scale: Annotated[float, Field(ge=0, strict=True, allow_inf_nan=False,
+                                      json_schema_extra={'default': 1.0})]
+    max_model_steps: Annotated[int, Field(ge=1, strict=True)]
+    openclaw_bin: Annotated[str, Field(min_length=1, json_schema_extra={'default': 'openclaw'})]
+    openclaw_tool_home: Annotated[str, Field(pattern=r'^/', json_schema_extra={'default': '/root'})]
+    runtime_startup_timeout_seconds: Annotated[int, Field(ge=1, le=3600, strict=True,
+                                                         json_schema_extra={'default': 60})]
+    runtime_completion_watch_seconds: Annotated[int, Field(ge=1, le=60, strict=True,
+                                                          json_schema_extra={'default': 10})]
+    openclaw_exec_yield_ms: Annotated[int, Field(ge=10, le=120000, strict=True)]
+    repo_fingerprint: Annotated[str, Field(min_length=1)]
+    serving_sim_catalog_manifest: Annotated[str, Field(min_length=1)]
+    serving_sim_topology_digest: Annotated[str, Field(min_length=1)]
+    serving_sim_diagnostic_interval_seconds: Annotated[float, Field(gt=0, strict=True,
+        allow_inf_nan=False, json_schema_extra={'default': 1.0})]
+    serving_sim_diagnostic_detail: Annotated[Literal['compact', 'full'], Field(
+        json_schema_extra={'default': 'full'})]
+    serving_sim_keepalive_expiry_seconds: Annotated[float, Field(ge=0, strict=True,
+        allow_inf_nan=False, json_schema_extra={'default': 2.0})]
+    serving_sim_launch: ServingSimLaunchConfiguration
+    qualification_case_limit: Annotated[int, Field(ge=1, strict=True,
+                                                  json_schema_extra={'default': 16})]
+    qualification_simulator_cluster_count: Annotated[int, Field(ge=1, strict=True,
+                                                               json_schema_extra={'default': 1})]
+
+
+class InferenceSpec(StrictFrozenModel):
+    model_config = ConfigDict(json_schema_extra={
+        'allOf': [{
+            'if': {'properties': {'backend': {'const': 'serving_sim'}}, 'required': ['backend']},
+            'then': {'required': ['configuration'], 'properties': {'configuration': {
+                'required': ['serving_sim_launch', 'base_url', 'model', 'serving_sim_catalog_manifest'],
+            }}},
+        }],
+    })
+    backend: InferenceBackend = InferenceBackend.REPLAY
+    configuration: InferenceConfiguration = Field(default_factory=dict)
+
+    @field_validator('configuration', mode='before')
+    @classmethod
+    def public_keys(cls, value):
+        if not isinstance(value, dict):
+            return value
         forbidden = {"model_wait_prediction_seconds", "model_wait_prediction_source",
                      "oracle_model_wait_seconds", "oracle_model_wait_source"}
-        if forbidden.intersection(self.configuration):
+        if forbidden.intersection(value):
             raise ValueError("CPU-side LLM-duration prediction settings are unsupported; use serving_sim response forecasts through GPU coordination")
+        if 'qualification_max_parallel_sessions' in value:
+            raise ValueError('qualification_max_parallel_sessions is internal and unsupported; '
+                             'use workload.submission.max_active_sessions for a run, '
+                             'or qualify --concurrency for the qualification gate')
+        if 'api_key' in value:
+            raise ValueError('model credentials must be injected from an environment variable; use api_key_env')
+        owners = {
+            'command_timeout_seconds': 'execution.command_timeout_seconds',
+            'tool_placement_control_timeout_seconds': 'execution.tool_placement.control_timeout_seconds',
+            'host_live': 'conditions.prediction_source',
+            'subagents': 'agent.subagents',
+            'subagent_max_concurrent': 'agent.subagent_max_concurrent',
+            'subagent_max_spawn_depth': 'agent.subagent_max_spawn_depth',
+            'kb_http_timeout_seconds': 'execution.kb_http_timeout_seconds',
+            'repository': 'workload.tasks.cases[].repository',
+            'runtime_trace_content_retention': 'execution.runtime_trace_content_retention',
+            'runtime_log_retention': 'execution.runtime_log_retention',
+            'retain_tool_resource_timelines': 'execution.retain_tool_resource_timelines',
+        }
+        if misplaced := owners.keys() & value.keys():
+            raise ValueError('inference.configuration cannot override other configuration owners: '
+                             + '; '.join(f'{key}: use {owners[key]}' for key in sorted(misplaced)))
+        return value
+
+    @model_validator(mode="after")
+    def configuration_contract(self):
+        if self.configuration.get('clawtune_config'):
+            duplicates = {'base_url', 'model', 'api_key_env'}.intersection(self.configuration)
+            if duplicates:
+                raise ValueError('clawtune_config owns base_url/model/credentials; remove duplicate '
+                                 'inference.configuration keys: ' + ', '.join(sorted(duplicates)))
+        elif 'clawtune_root' in self.configuration:
+            raise ValueError('clawtune_root requires clawtune_config')
+        if self.backend is InferenceBackend.API and 'max_model_steps' in self.configuration:
+            raise ValueError('max_model_steps requires replay or serving_sim')
+        if self.backend is InferenceBackend.SERVING_SIM and self.configuration.get('time_scale', 1.) != 1.:
+            raise ValueError('serving_sim cannot scale recorded delays; remove time_scale or set it to 1')
+        if self.backend is InferenceBackend.SERVING_SIM and 'serving_sim_launch' not in self.configuration:
+            raise ValueError('serving_sim requires inference.configuration.serving_sim_launch; '
+                             'configure the managed simulator paths, CPU affinity and topology')
+        if self.backend is not InferenceBackend.SERVING_SIM and any(
+            key.startswith('serving_sim_') or key == 'qualification_simulator_cluster_count'
+            for key in self.configuration
+        ):
+            raise ValueError('serving_sim settings require inference.backend=serving_sim')
         if 'serving_sim_launch' in self.configuration:
-            if self.backend is not InferenceBackend.SERVING_SIM:
-                raise ValueError('serving_sim_launch requires the serving_sim backend')
-            ServingSimLaunchSpec.model_validate(self.configuration['serving_sim_launch'])
             if self.configuration.get('clawtune_config'):
                 raise ValueError('managed serving_sim requires explicit base_url/model/api_key_env; remove clawtune_config')
             url = urllib.parse.urlsplit(str(self.configuration.get('base_url', '')))
@@ -255,18 +367,13 @@ class InferenceSpec(StrictFrozenModel):
                 raise ValueError(
                     'serving_sim cluster ports exceed 65535; choose a lower base_url port'
                 )
-        interval = self.configuration.get('serving_sim_diagnostic_interval_seconds', 1.)
-        if self.configuration.get('serving_sim_diagnostic_detail', 'full') not in ('compact', 'full'):
-            raise ValueError('serving_sim_diagnostic_detail must be compact or full')
-        expiry = self.configuration.get('serving_sim_keepalive_expiry_seconds', 2.)
-        if isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not math.isfinite(expiry) or expiry < 0:
-            raise ValueError('serving_sim_keepalive_expiry_seconds must be nonnegative and finite')
-        if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval <= 0:
-            raise ValueError('serving_sim_diagnostic_interval_seconds must be positive and finite')
+            if missing := {'model', 'serving_sim_catalog_manifest'} - self.configuration.keys():
+                raise ValueError('serving_sim requires inference.configuration: ' + ', '.join(sorted(missing)))
         return self
 
 
-class SandboxSpec(StrictFrozenModel):
+class TemplateSpec(StrictFrozenModel):
+    """Template identity and shape. Network policy is owned by the baseline."""
     template_id: str | None = Field(default=None, min_length=1)
     template_alias: str | None = Field(default=None, min_length=1)
     source_image_reference: str | None = Field(default=None, min_length=1)
@@ -276,10 +383,9 @@ class SandboxSpec(StrictFrozenModel):
     memory_mib: int = Field(default=3072, ge=128)
     workspace: str = Field(default="/workspace", pattern=r"^/")
     preflight_command: str | None = Field(default=None, min_length=1)
-    allow_internet_access: bool = True
 
     @model_validator(mode="after")
-    def exactly_one_template_reference(self) -> "SandboxSpec":
+    def exactly_one_template_reference(self) -> "TemplateSpec":
         if (self.template_id is None) == (self.template_alias is None):
             raise ValueError("sandbox requires exactly one of template_id or template_alias")
         return self
@@ -287,6 +393,10 @@ class SandboxSpec(StrictFrozenModel):
     @property
     def template(self) -> str:
         return self.template_id or self.template_alias or ""
+
+
+class SandboxSpec(TemplateSpec):
+    allow_internet_access: bool = True
 
 
 class RuntimeSandboxSpec(SandboxSpec):
@@ -424,8 +534,8 @@ def resolve_case_sandbox(
     """Keep per-case VM identity while honoring experiment network policy."""
     if case.sandbox is None:
         return configured
-    return case.sandbox.model_copy(update={
-        "allow_internet_access": configured.allow_internet_access,
+    return SandboxSpec.model_validate({
+        **case.sandbox.model_dump(), 'allow_internet_access': configured.allow_internet_access,
     })
 
 
@@ -791,7 +901,6 @@ class PressureControlSpec(StrictFrozenModel):
     max_boosted_vms: int = Field(default=1, ge=0, le=4)
     boost_cpu_weight: int = Field(default=200, ge=100, le=400)
     min_release_mib: int = Field(default=64, ge=1)
-    amortization_factor: float = Field(default=2., ge=1, allow_inf_nan=False)
 
 
 class ResourcesSpec(StrictFrozenModel):
@@ -846,7 +955,6 @@ class ResourcesSpec(StrictFrozenModel):
     return_cooldown_seconds: float = Field(default=5, ge=0, allow_inf_nan=False)
     memory_action_costs: MemoryActionCostSpec | None = None
     snapshot_residency_costs: SnapshotResidencyCostSpec | None = None
-    idle_reclaim_costs: IdleReclaimCostSpec | None = None
     template_base_sharing: Literal["disabled", "required"] = "disabled"
     template_base_sharing_artifact: str | None = None
     base_template_cache: Literal["disabled", "required"] = "disabled"

@@ -28,7 +28,6 @@ workload:
         memory_mib: 4096
         workspace: /testbed
         preflight_command: cd /testbed && test "$(git rev-parse HEAD)" = bc68289d4d368b29241e56b8f0aefc36db65ad47
-        allow_internet_access: false
     - case_id: 15five-scim2-filter-parser-13
       source: recorded_trace
       source_reference: examples/traces/15five-scim2-agent-rl-replay.jsonl
@@ -48,7 +47,6 @@ workload:
         memory_mib: 4096
         workspace: /testbed
         preflight_command: cd /testbed && test "$(git rev-parse HEAD)" = 7ddc216f8c3dd1cdb2152944187e8f7f5ee07be2 && python3 -m pytest --version
-        allow_internet_access: false
     - case_id: click-memory-workset
       source: recorded_trace
       source_reference: examples/traces/memory-smoke.jsonl
@@ -68,7 +66,6 @@ workload:
         memory_mib: 4096
         workspace: /workspace
         preflight_command: cd /testbed && test "$(git rev-parse HEAD)" = 874ca2bc1c30d93a4ac6e36a15ed685eafe89097 && python3 -m pytest --version
-        allow_internet_access: false
 agent: {driver: openclaw}
 inference:
   backend: replay

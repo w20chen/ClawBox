@@ -398,9 +398,7 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
         "qualified_unix_s": 1.0,
-        "concurrency": qualified.inference.configuration[
-            "qualification_max_parallel_sessions"
-        ],
+        "concurrency": qualified.execution.max_active_sessions,
         "qualified_session_count": max(qualified.execution.concurrency_levels),
         "qualified_case_ids": [
             case.case_id for case in load_workload_cases(qualified.workload)
@@ -601,9 +599,7 @@ def test_default_gate_uses_create_limit_without_repeating_cases():
 
     qualified = qualification_spec(spec)
 
-    assert qualified.inference.configuration[
-        "qualification_max_parallel_sessions"
-    ] == 2
+    assert qualified.execution.max_active_sessions == 2
     assert qualified.execution.concurrency_levels == (3,)
     assert session_worker_count(expand_matrix(qualified)[0]) == 2
 
@@ -630,9 +626,7 @@ def test_default_gate_samples_large_corpus_deterministically(tmp_path):
     assert selected[-1] == "qualification-case-19"
     assert len(set(selected)) == 16
     assert qualified.execution.concurrency_levels == (16,)
-    assert qualified.inference.configuration[
-        "qualification_max_parallel_sessions"
-    ] == 16
+    assert qualified.execution.max_active_sessions == 16
     path = tmp_path / 'sampled.json'
     receipt = _receipt(spec)
     path.write_text(json.dumps(receipt))
@@ -713,9 +707,7 @@ def test_qualification_limits_are_configurable():
     qualified = qualification_spec(spec, concurrency=16)
 
     assert len(qualified.workload.cases) == 5
-    assert qualified.inference.configuration[
-        "qualification_max_parallel_sessions"
-    ] == 16
+    assert qualified.execution.max_active_sessions == 16
     assert qualified.inference.configuration["serving_sim_launch"]["cluster_count"] == 2
 
 

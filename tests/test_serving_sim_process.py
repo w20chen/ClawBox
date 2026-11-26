@@ -10,7 +10,8 @@ from clawbox.experiments.serving_sim_process import (
 
 
 def configuration():
-    return dict(base_url='http://127.0.0.1:8000', serving_sim_launch=dict(
+    return dict(model='test', serving_sim_catalog_manifest='/manifest.json',
+                base_url='http://127.0.0.1:8000', serving_sim_launch=dict(
         sim_root='/sim', venv='/venv', trace_catalog='/catalog.json',
         cpu_affinity=[240, 241, 242, 243], cores=4, topology='8A'))
 

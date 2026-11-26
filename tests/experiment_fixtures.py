@@ -25,3 +25,11 @@ def worker_fixture(path):
     if raw.get('kind') == 'clawbox-resolved-experiment':
         return load_experiment(Path(path))
     return ExperimentSpec.model_validate(raw)
+
+
+def simulator_configuration(**overrides):
+    """Complete launch contract for model-only tests; never starts a service."""
+    return dict(model='test', base_url='http://127.0.0.1:8000',
+                serving_sim_catalog_manifest='/test/catalog-manifest.json',
+                serving_sim_launch=dict(sim_root='/sim', venv='/venv', trace_catalog='/catalog.json',
+                                        cpu_affinity=[0], cores=1, topology='8A')) | overrides

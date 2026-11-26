@@ -54,6 +54,10 @@ are retained. Host profiles do not silently replace experiment resources.
 `preflight` checks actual Ready/unowned TAPs, CubeAPI and experiment-process
 NOFILE, idle cgroup **and its lease**, disk reserve, service/template/resource
 checks, input readiness, and managed GPU simulator paths/CPU affinity/ports.
+It also validates a configured template-sharing proof against the exact current
+Tool template set. After changing cases/templates, use `prove-template-sharing`
+with matching raw `--resume-result` files to reuse prior measurements, then set
+`evidence.template_base_sharing_artifact` to the new proof.
 It prints all failed checks with remedies and exits nonzero. It does not create
 VMs or repair the host. `--json` saves the same report for audit. `launch`
 rechecks transient readiness and reuses a matching qualification receipt;
@@ -75,6 +79,39 @@ After reboot use [host recover](installation.md#recover-after-reboot), then
 preflight again. For a new host, complete installation first; `host init --detect`
 proposes an editable plan and `host init --from-profile` reuses an explicit
 saved profile. Review template identities and resources before host apply.
+
+Before launching an edited configuration, inspect its effective settings:
+
+```bash
+bash experiment.sh validate
+bash experiment.sh describe --json
+bash experiment.sh resolve --output /data/my-experiment/resolved.yaml
+```
+
+Use a new destination for each `resolve`; it never overwrites a frozen snapshot.
+`describe --json` includes the simulator's actual per-process CPU and port layout:
+one cluster uses the configured CPU pool; multiple clusters each use one CPU,
+cycling through that pool. `native` and `final` persistence currently share the
+same native write/finalization behavior and are not different I/O ablations.
+
+Inference settings now reject unknown keys and require a complete managed launch
+for `serving_sim`. Remove unused `evidence.idle_reclaim_costs` and
+`mechanisms.runtime.pressure_control.amortization_factor`; the context-first
+policy never used them. Select the result root with `--output-root` when preparing,
+instead of `measurement.output`. Put Tool network access only in baseline
+`environment.sandbox.allow_internet_access`, not each case's template.
+Remove a conflicting `CLAWBOX_WORKER_NODE` from machine.env; baseline
+`environment.resources.target_node` is the node actually checked and used.
+Replace hidden `qualification_max_parallel_sessions` with workload
+`submission.max_active_sessions`, or `qualify --concurrency` for a smoke.
+These edits need a new run ID, but do not by themselves need host apply, image
+rebuild or retraining. Preserve archived configurations and results.
+For serving_sim, removing case network fields changes the task identity in the
+CPU binding manifest. Edit a copy of the original replay workload (including its
+case manifest), then run `experiment prepare-serving-sim` into a new bundle as
+shown in the [GPU preparation walkthrough](#connect-the-gpu-serving-simulator).
+Use that bundle's new workload/manifest/catalog paths. Do not edit old binding
+hashes or overwrite frozen bundles; the recorded responses and times stay intact.
 
 ## 1. Check the host
 

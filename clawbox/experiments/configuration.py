@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+import os
 
 import yaml
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .design import (
     Conditions, DesignExecution, Environment, Evidence, Measurement,
@@ -42,6 +43,19 @@ class BaselineConfig(StrictFrozenModel):
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
     conditions: Conditions = Field(default_factory=Conditions)
     execution: BaselineExecution = Field(default_factory=BaselineExecution)
+
+    @model_validator(mode='before')
+    @classmethod
+    def removed_settings(cls, value):
+        if isinstance(value, dict):
+            measurement = value.get('measurement')
+            if isinstance(measurement, dict) and 'output' in measurement:
+                raise ValueError('measurement.output is not an experiment setting; '
+                                 'use CLI --output-root or CLAWBOX_OUTPUT_ROOT for all run commands')
+            evidence = value.get('evidence')
+            if isinstance(evidence, dict) and 'idle_reclaim_costs' in evidence:
+                raise ValueError('evidence.idle_reclaim_costs was unused by context-first; remove it')
+        return value
 
 
 class WorkloadConfig(StrictFrozenModel):
@@ -84,7 +98,7 @@ def resolved_documents(baseline_path: Path, workload_path: Path) -> tuple[dict, 
         if evidence.get(key):
             evidence[key] = _file(evidence[key], baseline_root)
     inference = baseline.get('inference', {}).get('configuration', {})
-    for key in ('clawtune_config', 'serving_sim_catalog_manifest'):
+    for key in ('clawtune_config', 'clawtune_root', 'serving_sim_catalog_manifest'):
         if inference.get(key):
             inference[key] = _file(inference[key], baseline_root)
     launch = inference.get('serving_sim_launch') or {}
@@ -156,3 +170,12 @@ def dump_experiment(spec: ExperimentSpec, *, compact: bool = False) -> str:
 def experiment_overview(spec: ExperimentSpec) -> dict:
     from .design import design_overview
     return design_overview(spec)
+
+
+def require_configured_node(target_node: str) -> str:
+    """A stale shell override must not make readiness and execution disagree."""
+    inherited = os.environ.get('CLAWBOX_WORKER_NODE', '').strip()
+    if inherited and inherited != target_node:
+        raise ValueError('CLAWBOX_WORKER_NODE cannot override environment.resources.target_node; '
+                         'unset CLAWBOX_WORKER_NODE and edit the baseline target_node if needed')
+    return target_node

@@ -32,7 +32,7 @@ RESOURCE_FIELDS = {
                    'pool_transfer_timeout_seconds'),
 }
 EVIDENCE_FIELDS = ('prediction_artifact', 'snapshot_residency_costs',
-                   'idle_reclaim_costs', 'template_base_sharing_artifact')
+                   'template_base_sharing_artifact')
 REMOVED_FIELDS = ('memory_action_costs',)
 DERIVED_FIELDS = ('memory_scheduling', 'snapshot_mechanism', 'snapshot_storage',
                   'snapshot_destination', 'template_base_sharing', 'observe_predictions', 'lazy_restore', 'physical_live_limit_mib',
@@ -124,8 +124,7 @@ DesignExecution = subset('DesignExecution', ExecutionSpec,
 Evidence = subset('Evidence', ResourcesSpec, EVIDENCE_FIELDS)
 Measurement = subset('Measurement', ExecutionSpec, MEASUREMENT_FIELDS,
                      observe_predictions=(bool, False),
-                     validation=(ValidationSpec, Field(default_factory=ValidationSpec)),
-                     output=(OutputSpec, Field(default_factory=OutputSpec)))
+                     validation=(ValidationSpec, Field(default_factory=ValidationSpec)))
 
 
 class Environment(StrictFrozenModel):
@@ -337,7 +336,7 @@ def compile_design(raw):
                 sandbox=d.environment.sandbox.model_dump(mode='json'), resources=resources,
                 execution=execution, policies=policies,
                 validation=d.measurement.validation.model_dump(mode='json'),
-                output=d.measurement.output.model_dump(mode='json'))
+                output=OutputSpec().model_dump(mode='json'))
 
 
 def export_design(spec):
@@ -349,7 +348,6 @@ def export_design(spec):
     raw['execution'] = {key: getattr(spec.execution, key) for key in DesignExecution.model_fields}
     raw['measurement'].update({key: getattr(spec.execution, key) for key in MEASUREMENT_FIELDS})
     raw['measurement']['validation'] = spec.validation.model_dump(mode='json')
-    raw['measurement']['output'] = spec.output.model_dump(mode='json')
     common = raw['mechanisms']
     declared = {arm['name']: arm.get('override', {}) for arm in raw['comparison']['arms']}
     raw['comparison']['arms'] = [dict(name=p.name, override={
@@ -399,6 +397,21 @@ def design_overview(spec):
                          effective_resources=resolved.resources.model_dump(mode='json'),
                          effective_placement=resolved.execution.placement_policy,
                          effective_resume_policy=resolved.execution.resume_policy))
+    inference = spec.inference.model_dump(mode='json')
+    simulator = None
+    if 'serving_sim_launch' in spec.inference.configuration:
+        from .spec import ServingSimLaunchSpec
+        from .serving_sim_process import serving_sim_cluster_layouts
+        launch = ServingSimLaunchSpec.model_validate(spec.inference.configuration['serving_sim_launch'])
+        layouts = serving_sim_cluster_layouts(spec.inference.configuration, launch, Path('.'))
+        simulator = dict(
+            clusters=[{key: item[key] for key in ('cluster_id', 'port', 'cpu_affinity', 'cores')}
+                      for item in layouts],
+            configured_cpu_pool=list(launch.cpu_affinity),
+            active_cpu_ids=sorted({cpu for item in layouts for cpu in item['cpu_affinity']}),
+            shared_cpus=launch.cluster_count > len(launch.cpu_affinity),
+            persistence_semantics='native incremental input flushing and final summaries at graceful shutdown',
+        )
     return dict(experiment_id=spec.experiment_id, recipe=spec.design['comparison']['recipe'],
                 dimensions=list(DIMENSIONS), control_groups=['deployment', 'coordination'],
                 conditions=spec.design['conditions'], arms=rows, arm_count=len(expand_matrix(spec)),
@@ -408,4 +421,12 @@ def design_overview(spec):
                           'rollouts_per_case': spec.workload.rollouts_per_case,
                           'offered_sessions': list(spec.execution.concurrency_levels),
                           'offered_vms': [2*count for count in spec.execution.concurrency_levels]},
-                execution=spec.design['execution'])
+                execution=spec.design['execution'], inference=inference, simulator=simulator,
+                configuration_ownership=dict(
+                    target_node=spec.resources.target_node,
+                    output_root='CLI --output-root > CLAWBOX_OUTPUT_ROOT > results',
+                    tool_network=dict(owner='environment.sandbox.allow_internet_access',
+                                      allow_internet_access=spec.sandbox.allow_internet_access),
+                    fixed=dict(kb_scope_policy=spec.execution.kb_scope_policy,
+                               action_selection=common['coordination']['action_selection']),
+                ))

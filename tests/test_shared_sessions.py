@@ -99,7 +99,7 @@ def test_subagent_config_requires_live_host_kb_and_explicit_runtime_residency():
     assert qualified.agent.subagents
     assert qualified.inference.backend.value == 'api'
     assert 'max_model_steps' not in qualified.inference.configuration
-    assert qualified.inference.configuration['qualification_max_parallel_sessions'] == 1
+    assert qualified.execution.max_active_sessions == 1
     baseline['mechanisms']['idle_reclaim']['scope'] = 'agent_and_tool'
     with pytest.raises(ValueError, match='scope=tool'):
         compile_pair(baseline, workload)

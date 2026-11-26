@@ -62,7 +62,7 @@ they rewrite result artifacts.
 | `prepare-serving-sim SPEC --output DIRECTORY` | Prepare a new GPU catalog and CPU binding manifest from selected replay cases. Optional `--source-map FILE` maps case IDs to original format-5 paths; relative paths use that JSON file's directory. Existing output directories are rejected. |
 | `trace FILE` | Inspect a replay without creating VMs. |
 | `validate SPEC [--inputs]` | Validate the design; `--inputs` also parses and hashes workload/prediction inputs. |
-| `describe SPEC [--json]` | Show VM shapes, policies, budgets, and arm count. |
+| `describe SPEC [--json]` | Show VM shapes, policies, budgets, and arm count. JSON also includes inference settings, simulator CPU/port assignment and configuration ownership. |
 | `plan SPEC` | Print the expanded trial matrix. |
 | `doctor SPEC [--probe-vm]` | Check services, templates, and resources; optionally probe a real VM. |
 | `prove-template-sharing SPEC --output FILE` | Prove physical RAM-base sharing; `--artifact-root`, repeated `--resume-result`. Reuses matching template IDs from prior raw proofs and retains their file hashes; replaced IDs are omitted. |
@@ -76,6 +76,15 @@ they rewrite result artifacts.
 | `train RUN_DIRECTORY... --trace FILE --repository NAME --output FILE` | Fit frozen KBs and measured host-memory calibration from completed training runs. |
 
 ### Configuration ownership
+
+`environment.resources.target_node` selects the node for both host checks and
+VM creation. `CLAWBOX_WORKER_NODE` cannot override it; a conflicting value fails
+preflight and worker startup. Remove that variable from the shell/machine.env
+and edit the baseline to select another node.
+
+Results use root CLI `--output-root DIRECTORY`, then `CLAWBOX_OUTPUT_ROOT`, then
+`results` relative to the launch directory. There is no baseline output-directory
+field. Prepared wrappers save an explicit root and reuse it for all run commands.
 
 Commands accepting `SPEC`, plus `resume`, accept `--host-config H` and
 `--creation-standard S`. These select readiness constraints, not resource or
@@ -159,7 +168,7 @@ Linux logical CPU IDs; vCPU counts do not reserve physical cores.
 | Workload `submission` | Offered sessions, arrivals, repetition ordering, active-session bound and measurement window |
 | `evidence` | Prediction artifacts, measured cost models, sharing proof |
 | `execution` | Timeouts, creation/installation limits and diagnostics |
-| `measurement` | Sampling, stabilization and worker output fallback; final validation is workload `validation` |
+| `measurement` | Sampling and stabilization; final validation is workload `validation` |
 
 ### Peer-local-SSD restore
 
@@ -334,10 +343,15 @@ Each VM specifies exactly one of `template_id` or `template_alias`. Optional
 for Runtime and 3072 for Tool, `workspace` defaults to `/workspace`, and
 `allow_internet_access` defaults to `true`. `preflight_command` optionally checks
 guest prerequisites. Template shape must match the specification. For Tool VMs,
-the top-level `sandbox.allow_internet_access` is the experiment network policy;
-it also applies to case-specific Tool sandboxes while their template, image,
-shape and workspace remain case-specific. Changing it requires a new run ID and
+baseline `environment.sandbox.allow_internet_access` is the experiment network policy.
+Case `sandbox` selects only template, image, shape, workspace and preflight command;
+it rejects `allow_internet_access` rather than silently ignoring it.
+Changing the baseline network policy requires a new run ID and
 qualification, but no host apply or image rebuild.
+When removing legacy case network fields from a serving_sim input, prepare a
+new bundle from the original replay workload: its task digest includes the case
+template. Update workload input, catalog manifest and launch trace_catalog paths
+together; preserve the old bundle. No recorded responses or timing need changing.
 
 `environment.resources` holds the target node, `pool_memory_budget_mib`,
 `emergency_free_memory_mib`, `compute_nodes`, `local_memory_cgroup`, LOCAL
@@ -469,7 +483,6 @@ These fields are under `mechanisms.runtime.pressure_control`:
 | `max_boosted_vms` | 1 | VMs, range 0–4 |
 | `boost_cpu_weight` | 200 | cgroup weight, range 100–400 |
 | `min_release_mib` | 64 | Minimum predicted release, MiB |
-| `amortization_factor` | 2 | Dimensionless cost multiplier, at least 1 |
 
 ### Tool-call CPU placement
 
@@ -832,8 +845,12 @@ Evidence models that remain part of the supported workflow require a nonempty
 | Evidence field | Required content |
 | --- | --- |
 | `snapshot_residency_costs` | WARM and COLD restore seconds/GiB |
-| `idle_reclaim_costs` | WARM checkpoint/restore seconds/GiB; optional COLD costs |
 | `template_base_sharing_artifact` | Path to reusable proof for the exact Tool templates and node |
+
+Preflight checks configured sharing proofs, including their raw file hashes,
+before VM probes. A changed task cohort may need a new proof even when each
+template is unchanged; `prove-template-sharing --resume-result FILE` reuses
+matching prior raw measurements. Preserve old proofs and update only the new baseline.
 
 Use measured values from the intended deployment. The JSON Schema lists exact
 field names and required ranges; `describe` reports which arms need each model.
@@ -980,13 +997,25 @@ Tools still execute in real VMs. Qualification accepts replay, serving_sim and
 API inference. API qualification runs the selected complete live tasks, including
 child Sessions, with the configured credentials and arm timeout. It does not
 inject the single-step replay stop. Fields below are in
-`inference.configuration`:
+`inference.configuration`. Its schema lists the accepted keys and nested launch
+fields; unknown keys, invalid types and misplaced execution/agent settings fail
+validation. Integers cannot be booleans or fractional numbers; numeric timing
+values must be finite. Omitted optional overrides remain omitted.
+
+`qualification_max_parallel_sessions` is not a public setting. Use workload
+`submission.max_active_sessions` for formal sessions, and `qualify --concurrency`
+for the smoke bound. Qualification writes its bound into its own derived
+execution settings, respecting the formal active cap and fixed CPU slots;
+it does not alter the original workload. The specialized Tool-placement gate
+uses ordinary corpus smokes without its formal fixed slots.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `model`, `base_url` | Explicit configuration or saved environment | Provider model and endpoint |
+| `model`, `base_url` | Explicit configuration, or `clawtune_config` | Provider model and endpoint; serving_sim requires both explicitly |
 | `api_key_env` | `OPENCLAW_API_KEY` | Name of the host environment variable holding the credential |
-| `time_scale` | 1.0 | Nonnegative multiplier on replayed model delays |
+| `time_scale` | 1.0 | Nonnegative multiplier on replayed model delays and the recorded-duration input to automatic Poisson arrival windows; does not scale simulator decode time |
+| `max_model_steps` | Unset | Positive integer model-call prefix limit for replay/serving_sim; rejected for API tasks. Qualification sets 1 for its derived replay/simulator smoke only. |
+| `repo_fingerprint` | Case repository, then case ID | Fallback identity in worker prediction/model paths; does not replace an explicit case repository |
 | `qualification_case_limit` | 16 cases | Positive integer; maximum distinct real-VM smoke cases, evenly sampled in workload order including the endpoints. All source inputs are still validated and receipt-bound. Increase to the corpus size for full execution coverage. Does not change formal workload size. |
 | `qualification_simulator_cluster_count` | 1 cluster | Positive integer; managed simulator clusters used by qualification, capped by formal `serving_sim_launch.cluster_count`. A single-cluster smoke does not prove cross-cluster routing or capacity. Formal startup checks every configured cluster before VM admission. |
 | `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; set workload `tasks.input` to its `workload.json` and clear `tasks.cases`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
@@ -994,13 +1023,13 @@ inject the single-step replay stop. Fields below are in
 | `serving_sim_diagnostic_interval_seconds` | 1.0 seconds | Positive finite interval for client process/FD/event-loop samples, and managed server samples. Request diagnostics retain stages and exception chains without extra prompt/response copies. |
 | `serving_sim_diagnostic_detail` | `full` | `compact` omits verbose native signal payloads and repeated full pool snapshots/cost provenance. With GPU-aware reclaim, it retains phase changes, reclaim-threshold crossings, actions and at most one repeated queued summary per second across the coordinator; suppressed counts are retained in aggregate result metrics. Every signal still updates the live estimate and policy state. Request stages, errors and lifecycle events remain recorded. Diagnostics are buffered, flushed at process samples/errors and closed normally. Use a new run ID when changing this field. |
 | `serving_sim_keepalive_expiry_seconds` | 2.0 seconds | Idle HTTP connection reuse lifetime; nonnegative and finite, 0 disables idle reuse. Keep below the server's idle timeout (Uvicorn default: 5 seconds) to avoid racing server-side close. Active model/signal streams are unaffected; failed model requests are not automatically resubmitted. |
-| `serving_sim_launch` | Unset | Optional managed local simulator configuration below. Qualification and each formal arm launch a fresh service; success, failure and timeout all finalize it. Omit for a manually managed external service. |
+| `serving_sim_launch` | Required for `serving_sim` | Managed local simulator configuration below. Qualification and each formal arm launch a fresh service; success, failure and timeout all finalize it. The experiment workflow does not support omitting launch settings for an externally managed service. All `serving_sim_*` keys require the simulator backend. |
 | `runtime_startup_timeout_seconds` | 60 | Integer 1–3600; Runtime setup and sidecar readiness deadline |
 | `runtime_completion_watch_seconds` | 10 | 1–60 seconds per completion notification wait; events wake it immediately |
 | `openclaw_bin` | `openclaw` | Guest executable |
 | `openclaw_exec_yield_ms` | Unset | Optional integer from 10 to 120000 milliseconds for background-capable OpenClaw exec calls. Synchronous replay recordings disable automatic background execution; see [workloads](workloads.md). |
 | `openclaw_tool_home` | `/root` | Absolute home directory inside the Tool VM. OpenClaw shell commands use it to find the image's Git and Conda configuration. Change for a custom Tool user; takes effect with a new run ID, without host apply or retraining. |
-| `clawtune_config`, `clawtune_root` | Unset | Reuse a ClawTune model configuration and source root |
+| `clawtune_config`, `clawtune_root` | Unset | Reuse a ClawTune model configuration and optional source root (otherwise `CLAWTUNE_ROOT`, then sibling ClawTune). Paths resolve relative to baseline.yaml. `clawtune_root` requires `clawtune_config`; config owns model/endpoint/credential, so explicit `base_url`, `model`, `api_key_env` conflict. Not supported with serving_sim. |
 
 Fields under `agent` for shared OpenClaw Sessions:
 
@@ -1099,7 +1128,7 @@ abort/clean it up and preserve its artifacts before starting a new run.
 
 Put credential values in the environment or selected credential configuration,
 not experiment YAML. A selected `clawtune_config` supplies the endpoint, model,
-and credential in preference to direct provider fields. Model-wait prediction/oracle settings are unsupported;
+and credential; duplicate direct provider fields are rejected. Model-wait prediction/oracle settings are unsupported;
 checkpoint decisions use actual outstanding model requests.
 
 For `serving_sim`, `base_url` points to one fresh simulator service or the first
@@ -1108,8 +1137,10 @@ service in a managed pool. Every cluster uses virtual clock speed `k=1`.
 latency. Use a dedicated `api_key_env` such as `CLAWBOX_SIM_API_KEY`;
 it may be unset when the simulator has no authentication. A provider-specific
 `clawtune_config` must be removed to use the explicit simulator endpoint.
-Launch it with `python3 -m clawbox.integrations.serving_sim` from the ClawBox checkout,
-or the installed `clawbox-serving-sim` command. This adapter imports the unmodified
+The experiment worker launches this adapter from the configured managed launch.
+For standalone adapter diagnostics, use `python3 -m clawbox.integrations.serving_sim`
+from the ClawBox checkout, or the installed `clawbox-serving-sim` command.
+Standalone service flags do not replace the managed experiment contract. This adapter imports the unmodified
 GPU application. Adapter protocol 3 adds expiring current-response forecasts and retains process-handle mappings
 to the existing chat stream without another per-request round trip. Its management
 paths are `/v1/clawbox/simulator/info` and `/request-signals/clawbox/events`.
@@ -1249,7 +1280,7 @@ serial loop at the same interval; B uses its independent
 report coalescing and cached-demand age; see [result interpretation](results.md).
 Changing the interval or host sampling implementation requires a new run ID,
 without host apply, image rebuild or retraining.
-`measurement.validation.command` optionally checks the final task result.
+Workload `validation.command` optionally checks the final task result.
 For `host-live`, the KB manifest records `prediction_memory_policy`.
 `observed_guest_after_seed_proxy_v1` uses the seed measurement until a pair has
 an eligible, uncensored guest-memory observation, then queries
@@ -1259,9 +1290,9 @@ new run ID when updating this host policy; no image rebuild or retraining is nee
 The Runtime SSH shim exposes standard OpenClaw payload clauses to the collector
 by using shell builtins for launcher environment setup. Update the host checkout
 and start a new run to use this correction; existing guest templates remain valid.
-`measurement.output.directory` defaults to `/results` and is a worker fallback.
-The supported CLI supplies the host output root through `--output-root` or
-`CLAWBOX_OUTPUT_ROOT` (default `results`). Diagnostic logging does not disable
+The CLI supplies the host output root through `--output-root` or
+`CLAWBOX_OUTPUT_ROOT` (default `results`). `measurement.output` is rejected.
+Diagnostic logging does not disable
 the Tool collector, required measurements, or final validation.
 
 ## Image build options

@@ -522,9 +522,6 @@ def base():
                 workload=raw['workload'], inference=dict(backend='replay', configuration={'model': 'test'}),
                 mechanisms=Mechanisms().model_dump(mode='json'),
                 evidence=dict(prediction_artifact='/separate-training/prediction.json',
-                    snapshot_residency_costs=dict(provenance='unit-test', warm_restore_seconds_per_gib=1, cold_restore_seconds_per_gib=2),
-                    idle_reclaim_costs=dict(provenance='unit-test', warm_checkpoint_seconds_per_gib=1,
-                        warm_restore_seconds_per_gib=1, cold_checkpoint_seconds_per_gib=2,
-                        cold_restore_seconds_per_gib=2)),
+                    snapshot_residency_costs=dict(provenance='unit-test', warm_restore_seconds_per_gib=1, cold_restore_seconds_per_gib=2)),
                 execution=dict(concurrency_levels=[2], randomized_order=False),
                 comparison=dict(recipe='custom', arms=[dict(name='custom')]))

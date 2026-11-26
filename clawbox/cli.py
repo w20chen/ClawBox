@@ -146,7 +146,8 @@ def materialize_configuration(args, spec):
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--output-root", type=Path,
-                      default=Path(os.getenv("CLAWBOX_OUTPUT_ROOT", "results")))
+                      default=Path(os.getenv("CLAWBOX_OUTPUT_ROOT", "results")),
+                      help="result root for launch/status/resume/cleanup; overrides CLAWBOX_OUTPUT_ROOT (default: results); not a baseline field")
     commands = root.add_subparsers(dest="group", required=True)
     experiment = commands.add_parser("experiment")
     sub = experiment.add_subparsers(dest="command", required=True)

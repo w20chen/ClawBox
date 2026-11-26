@@ -82,4 +82,3 @@ measurement:
   memory_sample_interval_seconds: 0.2
   observe_predictions: false
   validation: {command: null}
-  output: {directory: /data/clawbox-results}

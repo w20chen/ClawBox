@@ -1,4 +1,5 @@
 from copy import deepcopy
+from experiment_fixtures import simulator_configuration
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -172,7 +173,7 @@ def test_measurement_frequency_does_not_set_cpu_control_frequency(cpu_policy):
 @pytest.mark.parametrize('scope', ['tool', 'agent_and_tool'])
 def test_gpu_signal_consumers_are_independent_of_reclaim_choice(reclaim, scope):
     b, w = documents()
-    b['inference']['backend'] = 'serving_sim'
+    b['inference'] = dict(backend='serving_sim', configuration=simulator_configuration())
     b['mechanisms']['idle_reclaim'].update(policy=reclaim, scope=scope)
     b['mechanisms']['checkpoint'].update(storage='tiered', residency='next-use')
     b['mechanisms']['restore']['prewarm'] = 'eta'
@@ -186,7 +187,7 @@ def test_gpu_signal_consumers_are_independent_of_reclaim_choice(reclaim, scope):
 def test_prewarm_can_be_independently_disabled_with_wait_reclaim(events, expected):
     from test_gpu_policy import Lifecycle
     b, w = documents()
-    b['inference']['backend'] = 'serving_sim'
+    b['inference'] = dict(backend='serving_sim', configuration=simulator_configuration())
     b['mechanisms']['idle_reclaim'].update(policy='wait', scope='tool')
     b['mechanisms']['restore']['prewarm'] = events
     policy = compile_pair(b, w).policies[0]
@@ -200,7 +201,7 @@ def test_prewarm_can_be_independently_disabled_with_wait_reclaim(events, expecte
 @pytest.mark.parametrize('compression', ['none', 'zstd-page'])
 def test_page_preparation_allows_uncompressed_wait_tool_snapshots(compression):
     b, w = documents()
-    b['inference']['backend'] = 'serving_sim'
+    b['inference'] = dict(backend='serving_sim', configuration=simulator_configuration())
     b['mechanisms']['idle_reclaim'].update(policy='wait', scope='tool')
     b['environment']['resources']['snapshot_compression'] = compression
     b['execution']['snapshot_page_management'] = {'prefetch_budget_mib': 128}
@@ -210,7 +211,7 @@ def test_page_preparation_allows_uncompressed_wait_tool_snapshots(compression):
 
 def test_snapshot_checkpoint_gate_is_independent_of_page_preparation():
     b, w = documents()
-    b['inference']['backend'] = 'serving_sim'
+    b['inference'] = dict(backend='serving_sim', configuration=simulator_configuration())
     b['mechanisms']['idle_reclaim'].update(policy='gpu', scope='agent_and_tool')
     b['execution']['snapshot_checkpoint_gate'] = {
         'case_ids': [w['tasks']['cases'][0]['case_id']],
@@ -228,7 +229,7 @@ def test_snapshot_checkpoint_gate_is_independent_of_page_preparation():
 @pytest.mark.parametrize('residency', ['lru', 'next-use'])
 def test_restore_promotion_is_explicit_and_independent_of_residency(residency):
     b, w = documents()
-    b['inference']['backend'] = 'serving_sim'
+    b['inference'] = dict(backend='serving_sim', configuration=simulator_configuration())
     b['mechanisms']['idle_reclaim'].update(policy='wait')
     b['mechanisms']['checkpoint'].update(storage='tiered', residency=residency)
     assert compile_pair(b, w).policies[0].snapshot_restore_promotion == 'off'

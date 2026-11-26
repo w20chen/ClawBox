@@ -349,12 +349,7 @@ def session_worker_count(arm: ExperimentArm) -> int:
     limit = min(arm.concurrency, arm.execution.max_active_sessions or arm.concurrency)
     if arm.execution.session_cpu_slots:
         limit = min(limit, len(arm.execution.session_cpu_slots))
-    value = arm.inference.configuration.get("qualification_max_parallel_sessions")
-    if value is None:
-        return limit
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("qualification_max_parallel_sessions must be a positive integer")
-    return min(limit, value)
+    return limit
 
 
 def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
@@ -2154,6 +2149,8 @@ class ExperimentWorker:
                  task_uid: str, output_root: Path | None = None,
                  state_root: Path | None = None,
                  client: CubeSandboxClient | None = None) -> None:
+        from .configuration import require_configured_node
+        require_configured_node(spec.resources.target_node)
         self.spec = spec
         self.run_id = run_id
         self.attempt_id = attempt_id
@@ -2229,7 +2226,7 @@ class ExperimentWorker:
         if requires_control and not gateway_host:
             raise RuntimeError(
                 "managed ModelGateway requires CLAWBOX_MODEL_GATEWAY_HOST and "
-                "CLAWBOX_MODEL_GATEWAY_NODE_PORT"
+                "CLAWBOX_MODEL_GATEWAY_PORT"
             )
         policy_context = (
             PolicyControlServer(advertise_host=control_host, advertised_port=policy_port,
@@ -3847,7 +3844,7 @@ class ExperimentWorker:
             runtime_allow_out = list(dict.fromkeys(runtime_allow_out))
         runtime_lifecycle = CubeSandboxLifecycle(
             self.client, template=arm.runtime.template,
-            node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
+            node_name=arm.resources.target_node,
             ownership=runtime_ownership,
             allow_internet_access=arm.runtime.allow_internet_access,
             env_vars=runtime_env,
@@ -3911,7 +3908,7 @@ class ExperimentWorker:
         }
         lifecycle = CubeSandboxLifecycle(
             self.client, template=arm.sandbox.template,
-            node_name=os.environ.get("CLAWBOX_WORKER_NODE", arm.resources.target_node),
+            node_name=arm.resources.target_node,
             ownership=tool_ownership, allow_internet_access=arm.sandbox.allow_internet_access,
             env_vars=tool_env,
             network_allow_out=tool_allow_out,

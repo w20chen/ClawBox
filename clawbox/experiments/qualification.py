@@ -412,6 +412,17 @@ def require_host_ready(spec: ExperimentSpec, *, current_images: bool = True,
     if launch_checks:
         from .preflight import require_prerequisites
         require_prerequisites(spec)
+    from .spec import effective_spec
+    for policy in spec.policies:
+        effective = effective_spec(spec, policy)
+        artifact = effective.resources.template_base_sharing_artifact
+        if artifact and effective.resources.template_base_sharing == 'required':
+            try:
+                validate_template_base_sharing_artifact(effective, Path(artifact))
+            except ValueError as exc:
+                raise ValueError(f'{exc}; run experiment prove-template-sharing for this workload '
+                                 '(--resume-result can reuse matching raw proofs), then update '
+                                 'evidence.template_base_sharing_artifact') from exc
     from .base_cache import check_experiment
     check_experiment(spec.resources)
     from .cpu_qos import check_cpu_qos_support
@@ -1238,7 +1249,6 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         # Live API tasks (including child Sessions) must reach their ordinary
         # terminal state; a fabricated replay stop would invalidate this check.
         **({"max_model_steps": 1} if spec.inference.backend is not InferenceBackend.API else {}),
-        "qualification_max_parallel_sessions": level,
     }
     if spec.inference.backend is InferenceBackend.SERVING_SIM:
         launch = configuration.get("serving_sim_launch")
@@ -1264,6 +1274,7 @@ def qualification_spec(spec: ExperimentSpec, *, concurrency: int | None = None) 
         # Run each selected case once unless an explicit parallel bound asks
         # for more sessions. This does not prove full-corpus or target density.
         "concurrency_levels": (max(level, len(cases)),),
+        "max_active_sessions": min(level, spec.execution.max_active_sessions or level),
         "randomized_order": False,
         "stabilization_seconds": min(spec.execution.stabilization_seconds, 1.0),
         "arrival_schedule": ArrivalSchedule.BURST,
@@ -1854,9 +1865,7 @@ def qualify(
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
         "qualified_unix_s": time.time(),
-        "concurrency": int(
-            qualified.inference.configuration["qualification_max_parallel_sessions"]
-        ),
+        "concurrency": qualified.execution.max_active_sessions,
         "qualified_session_count": max(qualified.execution.concurrency_levels),
         "qualified_case_ids": [case.case_id for case in load_workload_cases(qualified.workload)],
         "qualified_simulator_cluster_count": qualified.inference.configuration.get(

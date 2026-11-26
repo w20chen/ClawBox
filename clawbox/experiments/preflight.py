@@ -151,6 +151,9 @@ def prerequisites(spec, *, output_root: Path | None = None) -> dict:
         if not condition:
             raise RuntimeError(str(detail))
         return detail
+    from .configuration import require_configured_node
+    probe('configured target node', lambda: require_configured_node(spec.resources.target_node),
+          'Unset CLAWBOX_WORKER_NODE; select environment.resources.target_node in baseline.yaml.')
     probe('Linux experiment host', lambda: require(platform.system() == 'Linux', platform.system()),
           'Run this command on the configured Linux experiment host.')
     if platform.system() != 'Linux':
