@@ -2556,6 +2556,9 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         assert preflight_calls == ["runtime", "tool"]
         assert preflight_failure is None
         assert all((session_id, "create") not in c.demand.claims for c in coordinators)
+        tool_vm = created_vm("tool-tpl")
+        assert tool_vm.create_kwargs["env_vars"]["TOOL_MAX_CONCURRENCY"] == "1"
+        assert tool_vm.create_kwargs["env_vars"]["CLAWBOX_GUEST_COLLECTOR_DRAIN_MS"] == "0"
         assert resident_poll is not None
         assert callable(resident_file_nonempty)
         assert checkpoint_relay is True
@@ -2604,6 +2607,9 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
             "endpoint_port": admission["port"],
         })
         endpoint_calls_after_first_admission = created_vm("tool-tpl").endpoint_calls
+        bridge_commands = [command for command, _ in tool_vm.command_calls if 'nohup env ' in command]
+        assert len(bridge_commands) >= 2  # Initial start and post-restore preparation.
+        assert all('CLAWBOX_GUEST_COLLECTOR_DRAIN_MS=0 ' in command for command in bridge_commands)
         identity_checks_after_first_admission = sum(
             'printf %s "$TASK_ID"' in command
             for command, _kwargs in created_vm("runtime-tpl").command_calls
@@ -2677,6 +2683,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                     "workspace": "/tool-workspace", "preflight_command": "tool-preflight"},
         "execution": {"concurrency_levels": [1], "randomized_order": False,
                        "arm_timeout_seconds": 10, "command_timeout_seconds": 5,
+                       "guest_collector_drain_ms": 0,
                        "stabilization_seconds": 0},
         "resources": {"target_node": "node-a", "pool_memory_budget_mib": 100000,
                        "local_memory_cgroup": str(cg),

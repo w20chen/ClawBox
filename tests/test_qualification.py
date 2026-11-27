@@ -398,6 +398,7 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
         "runtime_preflight_command": spec.runtime.preflight_command,
+        "guest_collector_drain_ms": spec.execution.guest_collector_drain_ms,
         "qualified_unix_s": 1.0,
         "concurrency": qualified.execution.max_active_sessions,
         "qualified_session_count": max(qualified.execution.concurrency_levels),
@@ -476,6 +477,29 @@ def test_receipt_requires_executed_runtime_preflight_only_when_configured(
             validate_receipt(spec, path)
     else:
         assert validate_receipt(spec, path)["status"] == "succeeded"
+
+
+def test_receipt_binds_the_tested_collector_delay(tmp_path: Path) -> None:
+    spec = worker_fixture(EXAMPLE)
+    path = tmp_path / "qualification.json"
+    for delay in (0, 1, 50):
+        tested = spec.model_copy(update={
+            "execution": spec.execution.model_copy(update={"guest_collector_drain_ms": delay}),
+        })
+        path.write_text(json.dumps(_receipt(tested)), encoding="utf-8")
+        assert validate_receipt(tested, path)["status"] == "succeeded"
+        changed = tested.model_copy(update={
+            "execution": tested.execution.model_copy(update={"guest_collector_drain_ms": 50 - delay}),
+        })
+        with pytest.raises(ValueError, match="guest_collector_drain_ms"):
+            validate_receipt(changed, path)
+    # Existing receipts exercised the previously fixed 50 ms delay.
+    receipt = _receipt(tested)
+    receipt.pop("guest_collector_drain_ms")
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    assert validate_receipt(tested, path)["status"] == "succeeded"
+    with pytest.raises(ValueError, match="guest_collector_drain_ms"):
+        validate_receipt(changed, path)
 
 
 def test_receipt_reuses_capability_across_scheduling_and_same_image_template_change(

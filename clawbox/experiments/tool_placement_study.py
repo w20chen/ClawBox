@@ -311,6 +311,7 @@ def qualify_placement(spec, *, artifact_root):
         vm = client.create_sandbox(template=arm.sandbox.template, node_name=arm.resources.target_node,
             ownership=ownership, env_vars={'CLAWBOX_CGROUP_TOKEN': domain.token(0, 'tool'),
                 'TOOL_MAX_CONCURRENCY': '1', 'CLAWTUNE_PMU_ENABLED': 'true', 'CLAWTUNE_PMU_MAX_ACTIVE': '1',
+                'CLAWBOX_GUEST_COLLECTOR_DRAIN_MS': str(arm.execution.guest_collector_drain_ms),
                 'TOOL_BRIDGE_LOG_PATH': '/var/lib/clawtune/artifacts/tool-bridge.jsonl',
                 'TOOL_BRIDGE_WORKDIR': arm.sandbox.workspace,
                 'CLAWBOX_TOOL_HOST_KEY_B64': base64.b64encode(credentials.host_private.encode()).decode(),
@@ -320,6 +321,7 @@ def qualify_placement(spec, *, artifact_root):
         setup = client.run_command(vm, native_tool_bridge_setup_command(
             knowledge_environment={}, require_progress_events=False,
             command_timeout_seconds=arm.execution.command_timeout_seconds,
+            guest_collector_drain_ms=arm.execution.guest_collector_drain_ms,
             allow_internet_access=arm.sandbox.allow_internet_access), timeout_s=60)
         if setup.exit_code:
             raise RuntimeError('placement qualification bridge setup failed: '+setup.stderr[-1000:])

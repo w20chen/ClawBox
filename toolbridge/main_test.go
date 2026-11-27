@@ -7,11 +7,49 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestCollectorDrainEnvironment(t *testing.T) {
+	const name = "CLAWBOX_GUEST_COLLECTOR_DRAIN_MS"
+	for _, tc := range []struct {
+		value string
+		want  int
+	}{{"", 50}, {"0", 0}, {"1", 1}, {"50", 50}} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv(name, tc.value)
+			if got := envIntMin(name, 50, 0); got != tc.want {
+				t.Fatalf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInvalidIntegerEnvironment(t *testing.T) {
+	if mode := os.Getenv("CLAWBOX_TEST_INTEGER_MODE"); mode != "" {
+		if mode == "positive" {
+			envInt("CLAWBOX_TEST_INTEGER_VALUE", 1)
+		} else {
+			envIntMin("CLAWBOX_TEST_INTEGER_VALUE", 50, 0)
+		}
+		return
+	}
+	for _, tc := range []struct{ mode, value string }{
+		{"positive", "0"}, {"nonnegative", "-1"}, {"nonnegative", "1.5"},
+	} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestInvalidIntegerEnvironment$")
+		cmd.Env = append(os.Environ(), "CLAWBOX_TEST_INTEGER_MODE="+tc.mode, "CLAWBOX_TEST_INTEGER_VALUE="+tc.value)
+		output, err := cmd.CombinedOutput()
+		if err == nil || !bytes.Contains(output, []byte("invalid CLAWBOX_TEST_INTEGER_VALUE")) {
+			t.Fatalf("%s %s: expected rejection; error=%v output=%s", tc.mode, tc.value, err, output)
+		}
+	}
+}
 
 func TestParseExecEnvelope_PlainCommand(t *testing.T) {
 	payload, executionID, profileCommand, ok := parseExecEnvelope("echo hello")

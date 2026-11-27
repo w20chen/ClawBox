@@ -140,12 +140,16 @@ func (w *limitedStream) Write(p []byte) (int, error) {
 }
 
 func envInt(name string, fallback int) int {
+	return envIntMin(name, fallback, 1)
+}
+
+func envIntMin(name string, fallback, minimum int) int {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed <= 0 {
+	if err != nil || parsed < minimum {
 		log.Fatalf("invalid %s=%q", name, value)
 	}
 	return parsed
@@ -559,7 +563,7 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 			// loop has drained the exec event that was emitted after Begin.
 			// Keep validation fail-closed, but give that already-emitted event a
 			// bounded drain window before asking the collector to finalize.
-			drainMS := envInt("CLAWBOX_GUEST_COLLECTOR_DRAIN_MS", 50)
+			drainMS := envIntMin("CLAWBOX_GUEST_COLLECTOR_DRAIN_MS", 50, 0)
 			if drainMS > 0 {
 				time.Sleep(time.Duration(drainMS) * time.Millisecond)
 			}
@@ -800,7 +804,7 @@ func handleConnection(raw net.Conn, config *ssh.ServerConfig, workdir string, ti
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--self-test" {
-		fmt.Printf("{\"name\":\"clawbox-tool-bridge\",\"version\":%q,\"arch\":%q,\"progress_events\":true}\n", version, runtime.GOARCH)
+		fmt.Printf("{\"name\":\"clawbox-tool-bridge\",\"version\":%q,\"arch\":%q,\"progress_events\":true,\"collector_drain_zero\":true}\n", version, runtime.GOARCH)
 		if runtime.GOARCH != "arm64" {
 			os.Exit(1)
 		}

@@ -3887,6 +3887,7 @@ class ExperimentWorker:
             "TOOL_BRIDGE_LOG_PATH": "/var/lib/clawtune/artifacts/tool-bridge.jsonl",
             "TOOL_BRIDGE_WORKDIR": arm.sandbox.workspace,
             "TOOL_MAX_CONCURRENCY": "1",
+            "CLAWBOX_GUEST_COLLECTOR_DRAIN_MS": str(arm.execution.guest_collector_drain_ms),
             # Each experiment Tool VM runs one OpenClaw execution at a time.
             # The guest reports time_running/time_enabled instead of hiding
             # visible PMU multiplexing. Host VM admission remains the separate
@@ -4858,6 +4859,7 @@ class ExperimentWorker:
                                 require_progress_events=(arm.policy.runtime_control.adaptive or (arm.resources.prediction_mode == 'host-live' and arm.execution.clawtune_signals.admission_eta)),
                                 restart=bridge_attempt in (2, 10, 20),
                                 command_timeout_seconds=arm.execution.command_timeout_seconds,
+                                guest_collector_drain_ms=arm.execution.guest_collector_drain_ms,
                                 apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
                                 pypi_cache_index_url=arm.execution.pypi_cache_index_url,
                                 allow_internet_access=arm.sandbox.allow_internet_access,
@@ -5534,6 +5536,7 @@ class ExperimentWorker:
                                                 knowledge_environment=kb_env,
                     require_progress_events=(arm.policy.runtime_control.adaptive or (arm.resources.prediction_mode == 'host-live' and arm.execution.clawtune_signals.admission_eta)),
                     command_timeout_seconds=arm.execution.command_timeout_seconds,
+                    guest_collector_drain_ms=arm.execution.guest_collector_drain_ms,
                     apt_cache_proxy_url=arm.execution.apt_cache_proxy_url,
                     pypi_cache_index_url=arm.execution.pypi_cache_index_url,
                     allow_internet_access=arm.sandbox.allow_internet_access,

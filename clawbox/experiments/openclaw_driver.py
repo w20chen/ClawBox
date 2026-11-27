@@ -321,6 +321,7 @@ def native_ssh_target(host: str, *, port: int = 22, user: str = "executor") -> s
 def native_tool_bridge_setup_command(*, restart: bool = False,
                                      require_progress_events: bool = False,
                                      command_timeout_seconds: int = 300,
+                                     guest_collector_drain_ms: int = 1,
                                      apt_cache_proxy_url: str | None = None,
                                      pypi_cache_index_url: str | None = None,
                                      allow_internet_access: bool = True,
@@ -347,6 +348,10 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "/usr/local/bin/tool-bridge --self-test | grep -q '\"progress_events\":true' || "
         "{ echo 'Toolbridge lacks execution progress events; rebuild the Tool image with clawbox experiment images' >&2; exit 1; }; "
     ) if require_progress_events else ""
+    drain_check = (
+        "/usr/local/bin/tool-bridge --self-test | grep -q '\"collector_drain_zero\":true' || "
+        "{ echo 'ToolBridge cannot use a zero collector delay; set execution.guest_collector_drain_ms to 1 or rebuild the Tool image with clawbox experiment images --role sandbox' >&2; exit 1; }; "
+    ) if guest_collector_drain_ms == 0 else ""
     # Explicit package-cache settings apply with either network policy. Without
     # an explicit proxy, open VMs use their normal network path.
     apt_proxy_setup = (
@@ -380,6 +385,7 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "bridge_listening() { awk '$2 ~ /:08AE$/ && $4 == \"0A\" "
         "{ found=1 } END { exit !found }' /proc/net/tcp; }; "
         + progress_check
+        + drain_check
         + apt_proxy_setup
         + "mkdir -p /etc/profile.d; "
         "printf 'export PYTHONHASHSEED=0\\n' > /etc/profile.d/clawbox-experiment.sh; "
@@ -396,6 +402,7 @@ def native_tool_bridge_setup_command(*, restart: bool = False,
         "TOOL_BRIDGE_AUTHORIZED_KEY=/run/clawbox-ssh/authorized_key "
         "TOOL_BRIDGE_LISTEN=0.0.0.0:2222 "
         f"TOOL_EXEC_TIMEOUT_SECONDS={int(command_timeout_seconds)} "
+        f"CLAWBOX_GUEST_COLLECTOR_DRAIN_MS={int(guest_collector_drain_ms)} "
         + pypi_environment
         + "".join(f"{key}={shlex.quote(value)} " for key, value in (knowledge_environment or {}).items())
         + "PYTHONHASHSEED=0 "

@@ -27,6 +27,27 @@ def compile_pair(b, w):
     return compile_configuration(BaselineConfig.model_validate(b), WorkloadConfig.model_validate(w))
 
 
+@pytest.mark.parametrize('delay', [0, 1, 10, 50])
+def test_guest_collector_delay_survives_resolve_freeze_and_qualification(tmp_path, delay):
+    b, w = documents()
+    b.setdefault('execution', {})['guest_collector_drain_ms'] = delay
+    spec = compile_pair(b, w)
+    path = tmp_path / 'experiment.yaml'
+    path.write_text(dump_experiment(spec), encoding='utf-8')
+    frozen = load_experiment(path)
+    assert frozen.execution.guest_collector_drain_ms == delay
+    assert expand_matrix(frozen)[0].execution.guest_collector_drain_ms == delay
+    assert qualification_spec(frozen).execution.guest_collector_drain_ms == delay
+
+
+@pytest.mark.parametrize('delay', [-1, 1.5, True, '0'])
+def test_guest_collector_delay_requires_nonnegative_integer(delay):
+    b, w = documents()
+    b.setdefault('execution', {})['guest_collector_drain_ms'] = delay
+    with pytest.raises(ValueError, match='guest_collector_drain_ms'):
+        compile_pair(b, w)
+
+
 @pytest.mark.parametrize('count,grouped,window', [(4, False, 60.), (1, False, None), (4, True, None)])
 def test_api_poisson_needs_no_duration_for_explicit_window_or_single_group(count, grouped, window):
     from clawbox.experiments.inputs import validate_launch_inputs

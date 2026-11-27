@@ -1866,6 +1866,7 @@ def qualify(
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
         "runtime_preflight_command": spec.runtime.preflight_command,
+        "guest_collector_drain_ms": spec.execution.guest_collector_drain_ms,
         "qualified_unix_s": time.time(),
         "concurrency": qualified.execution.max_active_sessions,
         "qualified_session_count": max(qualified.execution.concurrency_levels),
@@ -1930,6 +1931,10 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
     # evidence only when requested, preserving unrelated capability receipts.
     if spec.runtime.preflight_command:
         expected["runtime_preflight_command"] = spec.runtime.preflight_command
+    # The previous fixed delay was 50 ms. Other values need a smoke that
+    # actually exercised that delay, including when returning from 0 to 50.
+    if spec.execution.guest_collector_drain_ms != 50 or "guest_collector_drain_ms" in receipt:
+        expected["guest_collector_drain_ms"] = spec.execution.guest_collector_drain_ms
     peer = spec.resources.snapshot_scheduling_storage
     if peer is not None and peer.topology == 'peer-local-ssd':
         # This receipt proves the exact domain/catalog and pair-resume contract.

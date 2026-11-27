@@ -682,6 +682,7 @@ class ExecutionSpec(StrictFrozenModel):
     kb_observation_retries: int = Field(default=2, ge=0, le=5)
     kb_processes: int = Field(default=4, ge=1, le=64)
     kb_queue_capacity: int = Field(default=1024, ge=1)
+    guest_collector_drain_ms: int = Field(default=1, ge=0, strict=True)
     control_timing_details: bool = False
     # Normal experiments retain structured trace identities and failed
     # payloads, but omit successful conversation/tool content. ``all`` is an

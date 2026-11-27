@@ -713,6 +713,24 @@ Keep `execution.control_timing_details: false` for normal throughput runs.
 Required traces, errors, resource measurements, and compact timings remain
 enabled; expensive diagnostic detail is opt-in.
 
+To compare Tool collector finalization delays, set the baseline field
+`execution.guest_collector_drain_ms` to `1` (the default) or `50` (the former
+fixed delay). The unit is
+milliseconds. Existing Tool templates that support this environment setting
+accept positive values, so testing `1` does not require rebuilding the templates.
+`0` removes the outer wait completely, but requires a ToolBridge whose
+`--self-test` reports `collector_drain_zero: true`; older binaries reject zero.
+The installed collector's own finalization and integrity checks remain active.
+Use the same workload and templates with a different run ID for each value,
+then run the usual `experiment validate --inputs` and `experiment launch`
+commands with `--baseline` and `--workload`. Launch qualifies the selected delay.
+Compare post-command return time and telemetry completeness, including short
+commands and several active sessions. No host apply or retraining is required.
+If you need zero with an older Tool image, rebuild the selected Tool image with
+`clawbox experiment images --profile HOST_PROFILE --role sandbox`; Runtime
+images are unchanged. To avoid rebuilding a collection of workload templates,
+use a validated positive delay such as `1` instead.
+
 Normal Full experiments should also keep the content and Runtime-log defaults:
 
 ```yaml

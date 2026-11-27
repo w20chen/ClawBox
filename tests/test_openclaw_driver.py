@@ -84,6 +84,20 @@ def test_tool_bootstrap_uses_the_same_python_hash_seed_for_record_and_replay():
     assert "PYTHONHASHSEED=0 " in command
 
 
+@pytest.mark.parametrize('delay', [0, 1, 50])
+@pytest.mark.parametrize('restart', [False, True])
+def test_tool_bootstrap_passes_collector_delay_on_start_and_restart(delay, restart):
+    command = native_tool_bridge_setup_command(
+        guest_collector_drain_ms=delay, restart=restart,
+    )
+    launch = command[command.index('nohup env '):]
+    assert f'CLAWBOX_GUEST_COLLECTOR_DRAIN_MS={delay} ' in launch
+    assert launch.index('CLAWBOX_GUEST_COLLECTOR_DRAIN_MS=') < launch.index('/usr/local/bin/tool-bridge ')
+    assert ('collector_drain_zero' in command) == (delay == 0)
+    if delay == 0:
+        assert command.index('collector_drain_zero') < command.index('nohup env ')
+
+
 def test_tool_workspace_restores_recorded_conda_prefix_and_isolates_git_config():
     command = native_tool_workspace_setup_command("/testbed")
     assert "ln -s /opt/conda /opt/miniconda3" in command
