@@ -2362,9 +2362,13 @@ def test_lifecycle_consumption_waits_for_selected_spill(operation: str) -> None:
     assert not _Sandbox.items
 
 
-@pytest.mark.parametrize("fail_runtime_create", [False, True])
+@pytest.mark.parametrize("fail_runtime_create,preflight_failure", [
+    (False, None), (True, None), (False, "runtime"), (False, "tool"),
+    (False, "runtime-transport"),
+])
 def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_runtime_create: bool,
+    preflight_failure: str | None,
 ) -> None:
     from clawbox.experiments import base_cache
     monkeypatch.setattr(base_cache, "REGISTRY", tmp_path / "base-cache.json")
@@ -2386,10 +2390,21 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
 
     monkeypatch.setattr(worker_module, "PolicyCoordinator", ObservedCoordinator)
     monkeypatch.setattr(worker_module, "warm_runtime_ssh_route", lambda *_args, **_kwargs: 1)
+    preflight_calls = []
 
     class SnapshotCommands(_Commands):
         def run(self, command: str, **kwargs):
             self.owner.command_calls.append((command, kwargs))
+            if command in {"runtime-preflight", "tool-preflight"}:
+                role = command.removesuffix("-preflight")
+                assert self.owner.template_id == f"{role}-tpl"
+                assert kwargs["cwd"] == f"/{role}-workspace"
+                assert kwargs["timeout"] == 5
+                preflight_calls.append(role)
+                if preflight_failure == f"{role}-transport":
+                    raise RuntimeError("injected preflight transport failure")
+                return SimpleNamespace(exit_code=97 if preflight_failure == role else 0,
+                                       stdout="checked", stderr="preflight rejected" if preflight_failure == role else "")
             if "kill -0 $pid" in command:
                 return SimpleNamespace(exit_code=0, stdout="4242", stderr="")
             if 'printf %s "$TASK_ID"' in command:
@@ -2538,6 +2553,8 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         # even when demand-backed Guest RAM uses less than configured capacity.
         # Otherwise the unused footprint remains pending until session teardown.
         assert coordinators
+        assert preflight_calls == ["runtime", "tool"]
+        assert preflight_failure is None
         assert all((session_id, "create") not in c.demand.claims for c in coordinators)
         assert resident_poll is not None
         assert callable(resident_file_nonempty)
@@ -2654,8 +2671,10 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         "inference": {"backend": "replay", "configuration": {
             "model": "recorded-model",
         }},
-        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048},
-        "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096},
+        "runtime": {"template_alias": "runtime-tpl", "memory_mib": 2048,
+                    "workspace": "/runtime-workspace", "preflight_command": "runtime-preflight"},
+        "sandbox": {"template_alias": "tool-tpl", "memory_mib": 4096,
+                    "workspace": "/tool-workspace", "preflight_command": "tool-preflight"},
         "execution": {"concurrency_levels": [1], "randomized_order": False,
                        "arm_timeout_seconds": 10, "command_timeout_seconds": 5,
                        "stabilization_seconds": 0},
@@ -2678,6 +2697,21 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
     ).run()[0]
 
     assert create_claims_at_cleanup and not any(create_claims_at_cleanup), result.model_dump()
+    event_path = next((tmp_path / "results" / "events").glob("*.jsonl"))
+    event_rows = [json.loads(line) for line in event_path.read_text().splitlines()]
+    preflight_rows = [row for row in event_rows if row.get("event") == "task_environment_checked"]
+    if preflight_failure:
+        assert result.status.value == "failed", result.model_dump()
+        assert not agent_finished[0]
+        assert len(SnapshotSandbox.created) == 2 and SnapshotSandbox.items == {}
+        assert all(not c.demand.claims for c in coordinators)
+        assert preflight_calls == (["runtime", "tool"] if preflight_failure == "tool" else ["runtime"])
+        if preflight_failure.endswith("-transport"):
+            assert preflight_rows == []
+        else:
+            assert preflight_rows[-1]["role"] == preflight_failure
+            assert preflight_rows[-1]["exit_code"] == 97
+        return
     if fail_runtime_create:
         assert result.status.value == "failed"
         assert len(SnapshotSandbox.created) == 1
@@ -2685,6 +2719,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         assert all(not c.demand.claims for c in coordinators)
         return
     assert result.status.value == "succeeded", result.model_dump()
+    assert [(row["role"], row["exit_code"]) for row in preflight_rows] == [("runtime", 0), ("tool", 0)]
     assert result.provenance["evidence_class"] == "deterministic-managed-replay"
     assert result.provenance["configured_traces"] == [{
         "case_id": "snapshot-case", "reference": str(trace),

@@ -27,6 +27,33 @@ def compile_pair(b, w):
     return compile_configuration(BaselineConfig.model_validate(b), WorkloadConfig.model_validate(w))
 
 
+@pytest.mark.parametrize('count,grouped,window', [(4, False, 60.), (1, False, None), (4, True, None)])
+def test_api_poisson_needs_no_duration_for_explicit_window_or_single_group(count, grouped, window):
+    from clawbox.experiments.inputs import validate_launch_inputs
+    from clawbox.experiments.worker import session_offer_offsets
+    b, w = documents()
+    b['inference'] = dict(backend='api', configuration=dict(model='test', base_url='https://example.invalid/v1'))
+    w['tasks'].update(source='synthetic', input='inline-cases',
+        session_assignment='grouped' if grouped else 'single_case',
+        rollouts_per_case=count if grouped else 1,
+        cases=[dict(case_id='live', source='synthetic', source_reference='opaque-live-task-id', prompt='Run a task.')])
+    w['submission'].update(concurrency_levels=[count], arrival_schedule='poisson', poisson_arrival_window_seconds=window)
+    spec = compile_pair(b, w)
+    assert validate_launch_inputs(spec)['traces'] == []
+    offsets = session_offer_offsets(expand_matrix(spec)[0])
+    assert len(offsets) == count and offsets[0] == 0.
+    if window is None:
+        assert offsets == (0.,) * count
+    else:
+        assert all(a < b for a, b in zip(offsets, offsets[1:]))
+        # Explicit windows retain the sequence used when durations existed,
+        # and do not depend on replay scaling or automatic-window settings.
+        w['tasks']['cases'][0]['metadata'] = {'recorded_duration_seconds': 123.}
+        w['submission']['poisson_arrival_window_fraction'] = 99.
+        b['inference']['configuration']['time_scale'] = 2.
+        assert session_offer_offsets(expand_matrix(compile_pair(b, w))[0]) == offsets
+
+
 @pytest.mark.parametrize('settings,remedy', [
     ({'misspelled_unknown_knob': 7}, 'extra_forbidden'),
     ({'qualification_max_parallel_sessions': 1}, 'max_active_sessions'),

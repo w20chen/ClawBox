@@ -261,7 +261,8 @@ def implementation_digest() -> str:
 
     Receipt compatibility is intentionally explicit.  Changes to VM execution,
     ToolBridge/policy handling, prediction integration, or qualification must
-    bump ``QUALIFICATION_SCHEMA_VERSION``.  Unrelated CLI, reporting, test, and
+    bump ``QUALIFICATION_SCHEMA_VERSION`` or require explicit evidence for the
+    affected capability in ``validate_receipt``. Unrelated CLI, reporting, test, and
     documentation edits must not make users rerun hundreds of real-VM smokes.
     """
     return hashlib.sha256(
@@ -1864,6 +1865,7 @@ def qualify(
         ),
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
+        "runtime_preflight_command": spec.runtime.preflight_command,
         "qualified_unix_s": time.time(),
         "concurrency": qualified.execution.max_active_sessions,
         "qualified_session_count": max(qualified.execution.concurrency_levels),
@@ -1924,6 +1926,10 @@ def validate_receipt(spec: ExperimentSpec, path: Path) -> dict[str, Any]:
         "cleanup_verified": True,
         "scope": "capability_smoke",
     }
+    # Earlier workers accepted this command without executing it. Require
+    # evidence only when requested, preserving unrelated capability receipts.
+    if spec.runtime.preflight_command:
+        expected["runtime_preflight_command"] = spec.runtime.preflight_command
     peer = spec.resources.snapshot_scheduling_storage
     if peer is not None and peer.topology == 'peer-local-ssd':
         # This receipt proves the exact domain/catalog and pair-resume contract.

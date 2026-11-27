@@ -397,6 +397,7 @@ def _receipt(spec, *, concurrency: int | None = None) -> dict:
         "input_manifest": qualification_input_manifest(spec),
         "implementation_digest": implementation_digest(),
         "qualification_spec_digest": spec_digest(qualified),
+        "runtime_preflight_command": spec.runtime.preflight_command,
         "qualified_unix_s": 1.0,
         "concurrency": qualified.execution.max_active_sessions,
         "qualified_session_count": max(qualified.execution.concurrency_levels),
@@ -445,6 +446,36 @@ def test_qualification_uses_all_policies_at_target_concurrency() -> None:
     assert [item.name for item in qualified.policies] == [
         item.name for item in spec.policies
     ]
+
+
+@pytest.mark.parametrize("command", [None, "command -v openclaw"])
+def test_receipt_requires_executed_runtime_preflight_only_when_configured(
+    tmp_path: Path, command: str | None,
+) -> None:
+    spec = worker_fixture(EXAMPLE)
+    spec = spec.model_copy(update={
+        "runtime": spec.runtime.model_copy(update={"preflight_command": command}),
+    })
+    receipt = _receipt(spec)
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    assert validate_receipt(spec, path)["status"] == "succeeded"
+
+    if command:
+        changed = spec.model_copy(update={
+            "runtime": spec.runtime.model_copy(update={"preflight_command": "false"}),
+        })
+        with pytest.raises(ValueError, match="runtime_preflight_command"):
+            validate_receipt(changed, path)
+
+    # Pre-fix receipts had no evidence that a Runtime command actually ran.
+    receipt.pop("runtime_preflight_command")
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    if command:
+        with pytest.raises(ValueError, match="runtime_preflight_command"):
+            validate_receipt(spec, path)
+    else:
+        assert validate_receipt(spec, path)["status"] == "succeeded"
 
 
 def test_receipt_reuses_capability_across_scheduling_and_same_image_template_change(

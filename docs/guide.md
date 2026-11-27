@@ -303,6 +303,15 @@ bash "$HOME/src/ClawBox/scripts/clawbox" --sudo experiment report smoke-01
 
 The smoke creates `/workspace/result.txt` and checks its content. Template shapes
 must match registered images; editing YAML does not resize or rebuild them.
+To check guest prerequisites before the Agent starts, set
+`environment.runtime.preflight_command` and/or `environment.sandbox.preflight_command`
+in the baseline (a case Tool template may supply its own command). Runtime's
+check runs first, then Tool's, each in that VM's configured workspace with
+`execution.command_timeout_seconds`. A failed check fails the session and cleans
+up both VMs. For example, `preflight_command: 'command -v openclaw'` checks the
+Runtime executable. Use a new run ID after editing these checks; no host apply,
+image rebuild or retraining is needed. Launch renews older qualification receipts
+that did not execute a configured Runtime check.
 `launch` uses the existing qualification and worker path. It freezes the complete
 resolved settings under the run ID. Repeated launch of the same unchanged run
 returns its status or resumes it; changed settings require a new run ID.
@@ -494,6 +503,11 @@ median selected trace duration after replay time scaling. Set
 Identical cases, concurrency, repetition, and seed produce the same arrival
 sequence across policy arms. The realized Poisson window differs from its
 expectation.
+An explicit window does not require a replay trace or recorded-duration metadata;
+use it for live API tasks without recordings. Only automatic window sizing reads
+recorded durations. A single session (or one grouped arrival) starts at zero and
+needs no duration input. Changing arrival settings requires a new run ID, not
+host apply, image rebuilding or retraining.
 
 For a target rate of `lambda` sessions/second and `N > 1` sessions, use an
 expected window of `(N - 1) / lambda` seconds. Set the arm timeout beyond arrival

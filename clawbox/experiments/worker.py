@@ -377,30 +377,27 @@ def session_offer_offsets(arm: ExperimentArm) -> tuple[float, ...]:
         draws = sorted(generator.gauss(0., arm.execution.normal_arrival_std_seconds)
                        for _ in range(group_count))
         return tuple(value-draws[0] for value in draws for _ in range(group_size))
-    selected = [session_case_for(arm, index) for index in range(count)]
-    time_scale = float(arm.inference.configuration.get("time_scale", 1.0))
-    durations = []
-    for case in selected:
-        recorded = case.metadata.get("recorded_duration_seconds")
-        if arm.inference.backend.value == 'serving_sim':
-            recorded = serving_sim_case_binding(arm.inference.configuration, case.case_id)['recorded_duration_seconds']
-        if recorded is None:
-            actions = load_trace(Path(
-                case.replay_trace_reference or case.source_reference
-            ))
-            recorded = (
-                max(action.start_s + action.duration_s for action in actions)
-                - min(action.start_s for action in actions)
-            )
-        durations.append(max(1.0, float(recorded) * time_scale))
-    reference = statistics.median(durations)
-    expected_window = (
-        arm.execution.poisson_arrival_window_seconds
-        if arm.execution.poisson_arrival_window_seconds is not None
-        else reference * arm.execution.poisson_arrival_window_fraction
-    )
     if group_count == 1:
         return (0.0,) * count
+    selected = [session_case_for(arm, index) for index in range(count)]
+    expected_window = arm.execution.poisson_arrival_window_seconds
+    if expected_window is None:
+        time_scale = float(arm.inference.configuration.get("time_scale", 1.0))
+        durations = []
+        for case in selected:
+            recorded = case.metadata.get("recorded_duration_seconds")
+            if arm.inference.backend.value == 'serving_sim':
+                recorded = serving_sim_case_binding(arm.inference.configuration, case.case_id)['recorded_duration_seconds']
+            if recorded is None:
+                actions = load_trace(Path(
+                    case.replay_trace_reference or case.source_reference
+                ))
+                recorded = (
+                    max(action.start_s + action.duration_s for action in actions)
+                    - min(action.start_s for action in actions)
+                )
+            durations.append(max(1.0, float(recorded) * time_scale))
+        expected_window = statistics.median(durations) * arm.execution.poisson_arrival_window_fraction
     mean_interval = expected_window / (group_count - 1)
     seed_material = json.dumps({
         "random_seed": arm.execution.random_seed,
@@ -4755,13 +4752,18 @@ class ExperimentWorker:
                 self.client, lambda: runtime_lifecycle.sandbox, cwd=arm.runtime.workspace,
             )
             executor = CubeCommandExecutor(self.client, lambda: lifecycle.sandbox, cwd=arm.sandbox.workspace)
-            if arm.sandbox.preflight_command:
-                preflight = executor.execute(arm.sandbox.preflight_command, arm.execution.command_timeout_seconds)
-                events.write({"event": "task_environment_checked", "session_id": session_id,
+            for role, guest, guest_executor in (
+                ("runtime", arm.runtime, runtime_executor),
+                ("tool", arm.sandbox, executor),
+            ):
+                if not guest.preflight_command:
+                    continue
+                preflight = guest_executor.execute(guest.preflight_command, arm.execution.command_timeout_seconds)
+                events.write({"event": "task_environment_checked", "session_id": session_id, "role": role,
                               "exit_code": preflight.exit_code,
                               "stdout": preflight.stdout[-16000:], "stderr": preflight.stderr[-16000:]})
                 if preflight.exit_code != 0:
-                    raise RuntimeError("Task environment preflight failed: " +
+                    raise RuntimeError(f"{role} environment preflight failed: " +
                                        (preflight.stderr or preflight.stdout)[-2000:])
             agent_pid_file = f"/state/openclaw/{session_id}/agent.pid"
             agent_pid_observations: list[dict[str, Any]] = []

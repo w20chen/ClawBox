@@ -342,7 +342,14 @@ Each VM specifies exactly one of `template_id` or `template_alias`. Optional
 `architecture` is `arm64`, `vcpu` defaults to 2, `memory_mib` defaults to 1024
 for Runtime and 3072 for Tool, `workspace` defaults to `/workspace`, and
 `allow_internet_access` defaults to `true`. `preflight_command` optionally checks
-guest prerequisites. Template shape must match the specification. For Tool VMs,
+guest prerequisites: after pair creation and before Agent startup, Runtime's
+command runs first in `environment.runtime.workspace`, then Tool's command in
+its selected workspace. Each uses `execution.command_timeout_seconds`; a nonzero
+exit or transport error fails the session and cleans up both VMs. The
+`task_environment_checked` event identifies the VM `role`. The default is no
+command. Changing it requires a new run ID, not host apply or an image rebuild.
+Receipts from before Runtime checks were executed must be renewed if a Runtime
+command is configured. Template shape must match the specification. For Tool VMs,
 baseline `environment.sandbox.allow_internet_access` is the experiment network policy.
 Case `sandbox` selects only template, image, shape, workspace and preflight command;
 it rejects `allow_internet_access` rather than silently ignoring it.
@@ -938,7 +945,7 @@ Fields below are under baseline `execution` except the rows explicitly prefixed
 | `submission.normal_arrival_std_seconds` | 60 | Positive standard deviation in seconds. Normal scheduling draws one seeded N(0, sigma) value per group/session, sorts the draws and subtracts the minimum so the first arrival is zero. No clipping or rescaling; the resulting last arrival is not a fixed window. Seed also includes repetition and ordered case IDs; policies share arrivals. New run ID required; no host apply, rebuild or retraining. |
 | `submission.stagger_interval_seconds` | 0 | Positive for fixed staggering; zero for burst/Poisson/normal |
 | `submission.poisson_arrival_window_fraction` | 2.0 | Expected window divided by median scaled trace duration |
-| `submission.poisson_arrival_window_seconds` | `null` | Positive explicit expected window; overrides the fraction |
+| `submission.poisson_arrival_window_seconds` | `null` | Positive explicit expected window in seconds; overrides the fraction without reading recorded durations. A single arrival group starts at zero without duration inputs. |
 | `submission.session_arrival_offsets_seconds` | `null` | Explicit nondecreasing finite offsets, in seconds from arm start; one per offered session, with exactly one concurrency level. Overrides generated arrival times. Grouped rollouts of the same case must have identical offsets. Preserve each LS case's offset when removing BE for a no-BE reference. Changing offsets requires a new run ID; no host apply, image rebuild, or retraining. |
 | `control_timing_details` | `false` | Enable nested control spans, GC tracing, raw lifecycle dumps, duplicate payloads, and Runtime working-KB exports |
 | `runtime_trace_content_retention` | `failures` | `failures` keeps structured trace identities and measurements, failed/timeout Tool output, and content needed for replay completeness, but omits raw hook payloads, LLM messages/model bodies, and successful Tool output. `all` restores those bodies with the 64 MiB full-audit limits. Use a new run ID; no host apply, image rebuild, or retraining is required unless the packaged ClawTune source itself changed. |
