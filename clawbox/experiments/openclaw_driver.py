@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from clawbox.replay.lifecycle import CommandResult
 from .runtime_model_relay import RELAY_PORT, RUNTIME_MODEL_RELAY_SCRIPT
+from .openclaw_module_resolver import OPENCLAW_MODULE_RESOLVER
 
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -138,6 +139,10 @@ const saved = await upsertAuthProfileWithLock({
 });
 if (!saved) throw new Error('OpenClaw native session credential initialization failed');
 """
+
+
+def openclaw_auth_preload(*, fast_module_resolution: bool = True) -> str:
+    return (OPENCLAW_MODULE_RESOLVER if fast_module_resolution else "") + OPENCLAW_AUTH_PRELOAD
 
 
 def openclaw_shared_ssh_runtime_directory(workspace_root: str) -> str:
@@ -430,6 +435,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  resident_poll: Callable[[str, float], CommandResult | None] | None = None,
                  resident_wait: Callable[[str, float], CommandResult | None] | None = None,
                  resident_file_nonempty: Callable[[str, float], bool | None] | None = None,
+                 resident_file_check: Callable[[str, float], bool | None] | None = None,
+                 completion_wait: Callable[[str, float], bool] | None = None,
                  checkpoint_relay: bool = False,
                  diagnostic_artifacts: bool = False,
                  startup_begin: Callable[[], None] | None = None,
@@ -438,6 +445,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                  cancelled: Callable[[], bool] | None = None) -> dict:
     """Run OpenClaw while every agent tool operation uses its SSH sandbox."""
     executable = str(configuration.get("openclaw_bin") or "openclaw")
+    completion_notifications = configuration.get('runtime_completion_notifications', True)
+    if not isinstance(completion_notifications, bool):
+        raise ValueError('runtime_completion_notifications must be a boolean')
+    notify_completion = (completion_notifications and completion_wait is not None
+                         and resident_file_check is not None and resident_poll is not None
+                         and resident_wait is None)
     clawtune_plugin = "/opt/clawtune/packages/clawtune-plugin"
     base_url = str(configuration.get("base_url") or "")
     model = str(configuration.get("model") or "")
@@ -459,6 +472,14 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         None if timeout_seconds is None
         else min(86400, max(120, int(timeout_seconds) + 60))
     )
+    # A queued admission must not expire before the experiment arm. Placement
+    # studies retain their explicit control timeout; command execution still
+    # uses its separate deadline, starting only after admission.
+    admission_timeout_seconds = (
+        int(configuration["tool_placement_control_timeout_seconds"])
+        if configuration.get("tool_placement_control_timeout_seconds")
+        else max(3600, int(timeout_seconds) + 60) if timeout_seconds is not None else 3600
+    )
     tool_timeout_seconds = int(configuration.get("command_timeout_seconds") or 300)
     if tool_timeout_seconds < 1:
         raise ValueError("command_timeout_seconds must be positive")
@@ -476,6 +497,15 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     if not isinstance(retain_resource_timelines, bool):
         raise ValueError("retain_tool_resource_timelines must be a boolean")
     full_trace_content = trace_content_retention == "all"
+    trace_flush_span_start = configuration.get("runtime_trace_flush_span_start", False)
+    if not isinstance(trace_flush_span_start, bool):
+        raise ValueError("runtime_trace_flush_span_start must be a boolean")
+    fast_module_resolution = configuration.get("runtime_fast_module_resolution", True)
+    if not isinstance(fast_module_resolution, bool):
+        raise ValueError("runtime_fast_module_resolution must be a boolean")
+    node_compile_cache = configuration.get("runtime_node_compile_cache", False)
+    if not isinstance(node_compile_cache, bool):
+        raise ValueError("runtime_node_compile_cache must be a boolean")
     trace_message_limit = 67_108_864 if full_trace_content else 131_072
     trace_string_limit = 67_108_864 if full_trace_content else 16_384
     trace_tool_output_limit = 67_108_864 if full_trace_content else 65_536
@@ -534,6 +564,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     agent_stdout_file = f"{home}/logs/agent.stdout"
     agent_stderr_file = f"{home}/logs/agent.stderr"
     agent_exit_file = f"{home}/completion/agent.exit"
+    completion_notify_file = f"{launcher_dir}/runtime-complete.py"
     policy_audit_file = f"{home}/logs/policy-ssh.jsonl"
     replay_mode = getattr(getattr(model_gateway, "gateway", None), "mode", None) in {"replay", "serving_sim"}
     subagents = bool(configuration.get('subagents', False))
@@ -565,6 +596,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         f"CLAWBOX_POLICY_SESSION_ID={shlex.quote(session_id)} "
         f"CLAWBOX_POLICY_AUDIT_FILE={shlex.quote(policy_audit_file)} "
         f"CLAWBOX_TOOL_TIMEOUT_SECONDS={tool_timeout_seconds} "
+        f"CLAWBOX_POLICY_ADMISSION_TIMEOUT_SECONDS={admission_timeout_seconds} "
         f"CLAWBOX_REPLAY_NO_AUTO_COMPACTION={int(replay_mode)} "
         f"CLAWBOX_REPLAY_NO_REMOTE_SKILLS={int(replay_mode)} "
         f"CLAWBOX_REAL_SSH={shlex.quote(real_ssh)} "
@@ -580,7 +612,16 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
     )
     # Apply --import only to the native agent launch. The preload restores
     # inherited NODE_OPTIONS before OpenClaw can spawn any child processes.
+    # OpenClaw otherwise respawns Node merely to set this same warning flag,
+    # loading its CLI module graph twice on every fresh Runtime VM.
+    # Fresh session VMs run one agent process; persisting its compiled modules
+    # adds writes without benefiting that process. Keep an explicit opt-in for
+    # experiments with a prepared cache in the Runtime template.
     agent_prefix = prefix + (
+        'unset NODE_DISABLE_COMPILE_CACHE; ' if node_compile_cache
+        else 'export NODE_DISABLE_COMPILE_CACHE=1; '
+    ) + (
+        'export NODE_OPTIONS="${NODE_OPTIONS-} --disable-warning=ExperimentalWarning"; '
         'export CLAWBOX_OPENCLAW_NODE_OPTIONS_SET="${NODE_OPTIONS+x}" '
         'CLAWBOX_OPENCLAW_NODE_OPTIONS="${NODE_OPTIONS-}"; '
         'export NODE_OPTIONS="${NODE_OPTIONS-} --import='
@@ -661,6 +702,12 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "\r\n", "\n"
     ).encode()
     launcher_b64 = base64.b64encode(launcher_source).decode()
+    completion_setup = ''
+    if notify_completion:
+        notify_source = Path(__file__).resolve().parents[2] / 'scripts/clawbox-runtime-complete.py'
+        notify_b64 = base64.b64encode(notify_source.read_bytes()).decode()
+        completion_setup = (f'printf %s {shlex.quote(notify_b64)} | base64 -d > '
+                            f'{shlex.quote(completion_notify_file)}; ')
     relay_b64 = base64.b64encode(RUNTIME_MODEL_RELAY_SCRIPT.encode()).decode()
     relay_setup = ""
     sidecar_upstream_url = upstream_url
@@ -693,6 +740,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"printf %s {shlex.quote(private_b64)} | base64 -d > {shlex.quote(identity_file)}; "
         + f"printf %s {shlex.quote(known_b64)} | base64 -d > {shlex.quote(known_hosts_file)}; "
         + f"printf %s {shlex.quote(launcher_b64)} | base64 -d > {shlex.quote(ssh_launcher)}; "
+        + completion_setup
         # OpenClaw uses two SSH paths: backend preparation resolves
         # /usr/local/bin/ssh, while Agent exec calls resolve /usr/bin/ssh.
         # Preserve the real client under this session before replacing both
@@ -899,7 +947,7 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                       "tool_output_retention": (
                           "all" if full_trace_content else "failures"
                       ),
-                      "redact_sensitive_data": False, "flush_span_start": True,
+                      "redact_sensitive_data": False, "flush_span_start": trace_flush_span_start,
                       "max_messages_bytes": trace_message_limit,
                       "max_string_bytes": trace_string_limit,
                       "max_tool_output_bytes": trace_tool_output_limit,
@@ -913,7 +961,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             'runTimeoutSeconds': timeout_seconds,
         }
     config_b64 = base64.b64encode(json.dumps(native_config).encode()).decode()
-    auth_preload_b64 = base64.b64encode(OPENCLAW_AUTH_PRELOAD.encode()).decode()
+    auth_preload_b64 = base64.b64encode(openclaw_auth_preload(
+        fast_module_resolution=fast_module_resolution,
+    ).encode()).decode()
     config_started = time.monotonic()
     try:
         configured = runtime_executor.execute(
@@ -977,7 +1027,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         argv = " ".join(shlex.quote(item) for item in [executable, *agent_args])
         body = (
             f"{argv}; status=$?; printf '%s\\n' \"$status\" > "
-            f"{shlex.quote(agent_exit_file)}; exit \"$status\""
+            f"{shlex.quote(agent_exit_file)}; "
+            + (f'python3 {shlex.quote(completion_notify_file)} agent; ' if notify_completion else '')
+            + 'exit "$status"'
         )
         launched = runtime_executor.execute(
             agent_prefix
@@ -995,7 +1047,17 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             )
         agent_started = time.monotonic()
         deadline = None if timeout_seconds is None else agent_started + timeout_seconds
-        if resident_wait is not None and timeout_seconds is not None:
+        if notify_completion:
+            from .runtime_completion import wait_runtime_completion
+            try:
+                wait_runtime_completion('agent', agent_exit_file, wait=completion_wait,
+                    probe=resident_file_check, interval_seconds=float(completion_watch_seconds),
+                    deadline=deadline, cancelled=cancelled,
+                    event=(lambda row: startup_event({'session_id': session_id, **row})) if startup_event else None)
+            except (TimeoutError, InterruptedError):
+                resident_poll(f"kill -TERM $(cat {shlex.quote(agent_pid_file)}) 2>/dev/null || true", 10)
+                raise
+        elif resident_wait is not None and timeout_seconds is not None:
             try:
                 status = resident_wait(agent_exit_file, float(timeout_seconds))
             except TimeoutError:
@@ -1110,11 +1172,19 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
             drain_exit = home + '/completion/subagents.exit'
             drain_out, drain_err = home + '/logs/subagents.stdout', home + '/logs/subagents.stderr'
             body = drain_command + f'; status=$?; printf "%s\\n" "$status" > {shlex.quote(drain_exit)}'
+            if notify_completion:
+                body += f'; python3 {shlex.quote(completion_notify_file)} subagents; exit "$status"'
             launched = runtime_executor.execute(prefix
                 + f'nohup sh -c {shlex.quote(body)} </dev/null >{shlex.quote(drain_out)} 2>{shlex.quote(drain_err)} &', 30)
             if launched.exit_code:
                 raise RuntimeError('OpenClaw shared-session watcher could not start: ' + launched.stderr[-2000:])
-            if resident_wait is not None:
+            if notify_completion:
+                from .runtime_completion import wait_runtime_completion
+                wait_runtime_completion('subagents', drain_exit, wait=completion_wait,
+                    probe=resident_file_check, interval_seconds=float(completion_watch_seconds),
+                    deadline=time.monotonic()+remaining+10, cancelled=cancelled,
+                    event=(lambda row: startup_event({'session_id': session_id, **row})) if startup_event else None)
+            elif resident_wait is not None:
                 status = resident_wait(drain_exit, remaining + 10)
                 if status is None or status.exit_code:
                     raise RuntimeError('OpenClaw shared-session completion wait failed')

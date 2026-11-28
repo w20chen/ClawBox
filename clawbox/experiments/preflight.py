@@ -158,6 +158,9 @@ def prerequisites(spec, *, output_root: Path | None = None) -> dict:
           'Run this command on the configured Linux experiment host.')
     if platform.system() != 'Linux':
         return dict(ready=False, checks=checks)
+    from .policy_http import policy_event_loop
+    probe('policy HTTP event loop', lambda: policy_event_loop(spec.execution.policy_http_loop)[0],
+          'Install the updated ClawBox host Python dependencies; select execution.policy_http_loop explicitly for a comparison.')
     host = None
     if path := os.getenv('CLAWBOX_HOST_CONFIG'):
         def read_host():
@@ -185,6 +188,10 @@ def prerequisites(spec, *, output_root: Path | None = None) -> dict:
               'Restore the saved host boot settings and reboot during maintenance.')
     probe('exclusive VM domain', lambda: idle_domain(spec.resources.local_memory_cgroup),
           'Use experiment status RUN_ID in its owning output root; wait for an active run, or explicitly abort an owned stale run. Never delete lock files.')
+    if host and host.cubelet_numa_policy is not None:
+        from .numa_policy import verify as verify_numa_policy
+        probe('Cubelet NUMA policy', lambda: verify_numa_policy(host.cubelet_numa_policy),
+              'Apply the selected host plan on an idle VM pool; Cubelet must restart to pass its NUMA policy to new VMs.')
     demand = host_profile_for(spec)['cube_capacity_demand']['vm_count']
     required_taps = max(demand, int(standard.get('required_unowned_ready_taps_full1280', 0)) if demand >= 2560 else 0)
     def taps():

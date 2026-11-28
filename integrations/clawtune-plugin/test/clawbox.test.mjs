@@ -58,6 +58,65 @@ test("host session registration is acknowledged before caching and isolates chil
   } finally { globalThis.fetch = previous; }
 });
 
+test("host envelope completion skips local lookups but preserves completion and execution identity", async () => {
+  const {default: plugin} = await import("../dist/index.js");
+  const previous = globalThis.fetch;
+  try {
+    for (const backend of ["hook-only", "managed-wrapper", "marker"]) {
+      const hooks = new Map(), requests = [], warnings = [];
+      let registeredId, reported;
+      globalThis.fetch = async (url, options) => {
+        const path = new URL(url).pathname;
+        requests.push(path);
+        let body = {};
+        if (path === '/v1/decisions/tool') {
+          const load = {targets: Object.fromEntries([
+            'duration_ms', 'cpu_time_seconds', 'cpu_avg_cores', 'cpu_peak_cores',
+            'sampled_peak_rss_bytes', 'memory_total_peak_bytes', 'memory_extra_peak_bytes',
+          ].map(name => [name, {status: 'unavailable', backend: 'runtime', unit: 'ms',
+            evidence_counts: [], buckets: {edges: [], probabilities: null}, context: [], assumptions: []}]))};
+          body = {decision_id: 'decision', lease_id: 'lease', action: 'allow',
+            prediction: {tool: {load}, trie: {load}, lattice: {load}}};
+        } else if (path === '/v2/executions') {
+          registeredId = JSON.parse(options.body).execution_id;
+          body = {one_time_token: 'test-token'};
+        } else if (path.endsWith('/scope')) {
+          body = {execution_scope: {execution_id: registeredId, pid: 42, root_pid: 42,
+            source: 'clawtune-sidecar-host-cgroup', attribution_source: 'trusted-execution-root-pid'}};
+        } else if (path.endsWith('/telemetry')) {
+          body = {tool_resource: null};
+        } else if (path === '/v1/signals') {
+          const signal = JSON.parse(options.body);
+          if (signal.type === 'tool.completed') reported = signal;
+        } else assert.fail(`unexpected request ${path}`);
+        return new Response(JSON.stringify(body), {status: 200});
+      };
+      plugin.register({pluginConfig: {autoStartSidecar: false, executionBackend: backend,
+        sandboxExecEnvelope: backend === 'hook-only', trace: {trace_dir: ''}},
+        on(name, callback) { hooks.set(name, callback); },
+        logger: {info() {}, warn(message) { warnings.push(message); }, error() {}}});
+      const event = {toolName: 'exec', toolCallId: 'call', params: {command: 'true'}};
+      const context = {sessionId: 'session', runId: 'run'};
+      const before = await hooks.get('before_tool_call')(event, context);
+      const executionId = before.params.env.CLAWTUNE_EXECUTION_ID;
+      await hooks.get('after_tool_call')({...event, durationMs: 5, result: {details: {exitCode: 0}}}, context);
+      assert.deepEqual(warnings, []);
+      assert.equal(reported.identity.execution_id, executionId);
+      assert.equal(reported.payload.execution_id, executionId);
+      assert.equal(reported.payload.succeeded, true);
+      assert.equal(reported.payload.decision_id, 'decision');
+      const lookups = requests.filter(path => path.endsWith('/scope') || path.endsWith('/telemetry'));
+      assert.deepEqual(lookups, backend === 'hook-only' ? [] : [
+        `/v2/executions/${executionId}/scope`, `/v2/executions/${executionId}/telemetry`,
+      ]);
+      if (backend !== 'hook-only') {
+        assert.equal(reported.payload.resource_scope.root_pid, 42);
+        assert.equal(reported.payload.resource_scope.execution_id, executionId);
+      }
+    }
+  } finally { globalThis.fetch = previous; }
+});
+
 test("parent and multiple child sessions with identical tool IDs remain independent", async () => {
   const sent = [];
   const owner = name => ({gatewayId: "g", runtimeId: "shared", sessionId: name,

@@ -24,6 +24,32 @@ policy_ssh = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(policy_ssh)
 
 
+@pytest.mark.skipif(not hasattr(os, 'pidfd_open'), reason='Linux process exit notification')
+def test_process_exit_notification_reaps_status_without_timed_polling(monkeypatch):
+    with subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(.05); raise SystemExit(7)']) as child:
+        original_wait = child.wait
+
+        def wait(timeout=None):
+            assert timeout is None, 'exit notification must not return to timed polling'
+            return original_wait()
+
+        monkeypatch.setattr(child, 'wait', wait)
+        assert policy_ssh._wait_for_exit(child, 5) == 7
+        assert child.returncode == 7
+
+
+@pytest.mark.skipif(not hasattr(os, 'pidfd_open'), reason='Linux process exit notification')
+def test_process_exit_notification_timeout_does_not_reap_running_command():
+    with subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']) as child:
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                policy_ssh._wait_for_exit(child, .02)
+            assert child.poll() is None
+        finally:
+            child.terminate()
+            child.wait()
+
+
 @pytest.mark.skipif(sys.platform == 'win32', reason='Unix pipe capture in Runtime VM')
 @pytest.mark.parametrize('close_input', [False, True])
 def test_placement_capture_preserves_binary_input_and_open_stdin(tmp_path, monkeypatch, close_input):
@@ -84,6 +110,85 @@ def _argv(tool_name: str = "exec") -> list[str]:
     ]
 
 
+def test_long_queued_admission_does_not_retry_or_consume_command_timeout(monkeypatch, tmp_path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append(self.path)
+            if self.path == "/v1/tool/admit":
+                time.sleep(.2)  # Longer than the ordinary callback timeout.
+                response = {"decision": "ADMIT", "sandbox_id": "tool-a", "epoch": 1,
+                            "container_port": 2222, "host": "192.0.2.20", "port": 20020}
+            else:
+                response = {"status": "COMPLETED"}
+            payload = json.dumps(response).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    for name, value in {
+        "CLAWBOX_REAL_SSH": "/fake/ssh",
+        "CLAWBOX_POLICY_CONTROL_URL": f"http://127.0.0.1:{server.server_port}",
+        "CLAWBOX_POLICY_CONTROL_AUTH": "test-token",
+        "CLAWBOX_POLICY_SESSION_ID": "session-a",
+        "CLAWBOX_TOOL_SANDBOX_ID": "tool-a",
+        "CLAWBOX_SSH_HOST_KEY_ALIAS": "clawbox-tool-tool-a",
+        "CLAWBOX_POLICY_TIMEOUT_SECONDS": ".05",
+        "CLAWBOX_POLICY_ADMISSION_TIMEOUT_SECONDS": "5",
+        "CLAWBOX_TOOL_TIMEOUT_SECONDS": "300",
+    }.items():
+        monkeypatch.setenv(name, value)
+    executions = tmp_path / "executions"
+    timeouts = []
+
+    def execute(_argv, _execution_id, *, timeout_seconds):
+        timeouts.append(timeout_seconds)
+        return subprocess.run([sys.executable, "-c",
+                               "from pathlib import Path; import sys; "
+                               "p=Path(sys.argv[1]); p.open('a').write('executed\\n')",
+                               str(executions)], timeout=timeout_seconds).returncode
+
+    monkeypatch.setattr(policy_ssh, "_wait_for_ssh", execute)
+    monkeypatch.setattr(sys, "argv", ["clawbox-policy-ssh.py", *_argv()])
+    try:
+        assert policy_ssh.main() == 0
+        assert requests.count("/v1/tool/admit") == 1
+        assert executions.read_text().splitlines() == ["executed"]
+        assert timeouts == [300]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_admission_timeout_does_not_change_callback_timeout(monkeypatch):
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_URL", "http://policy.test")
+    monkeypatch.setenv("CLAWBOX_POLICY_CONTROL_AUTH", "test-token")
+    monkeypatch.setenv("CLAWBOX_POLICY_TIMEOUT_SECONDS", "3600")
+    monkeypatch.setenv("CLAWBOX_POLICY_ADMISSION_TIMEOUT_SECONDS", "21660")
+    timeouts = []
+
+    def urlopen(_request, timeout):
+        timeouts.append(timeout)
+        return io.BytesIO(b'{}')
+
+    monkeypatch.setattr(policy_ssh.urllib.request, "urlopen", urlopen)
+    for path in ("/v1/tool/admit", "/v1/tool/start", "/v1/tool/complete"):
+        policy_ssh._post(path, {}, attempts=1)
+    assert timeouts == [21660, 3600, 3600]
+
+
 def test_clawtune_prediction_crosses_ssh_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
     prediction = {"schema_version": "call_load.v2", "scope": "tool_call",
                   "targets": {"memory_extra_peak_bytes": {"status": "available", "p90": 1024}}}
@@ -116,6 +221,8 @@ def test_policy_route_is_injected_per_invocation_without_replacing_ssh_config(
                 "container_port": 2222, "host": "192.0.2.20", "port": 20020,
             }
         return {"status": "COMPLETED"}
+
+    monkeypatch.setattr(policy_ssh, '_wait_for_exit', lambda child, timeout: child.wait())
 
     class Child:
         def wait(self) -> int:
@@ -223,6 +330,8 @@ def test_each_tool_vm_operation_keeps_its_native_policy_operation(
             }
         return {"status": "COMPLETED"}
 
+    monkeypatch.setattr(policy_ssh, '_wait_for_exit', lambda child, timeout: child.wait())
+
     class Child:
         def wait(self) -> int:
             return 0
@@ -271,6 +380,8 @@ def test_openclaw_filesystem_ssh_gets_admission_and_bridge_envelope(
                 "container_port": 2222, "host": "192.0.2.20", "port": 20020,
             }
         return {"status": "COMPLETED"}
+
+    monkeypatch.setattr(policy_ssh, '_wait_for_exit', lambda child, timeout: child.wait())
 
     class Child:
         def wait(self) -> int:
@@ -337,6 +448,8 @@ def test_wrapped_exec_admits_logical_digest_and_exposes_payload_clauses(
                 "container_port": 2222, "host": "192.0.2.20", "port": 20020,
             }
         return {"status": "COMPLETED"}
+
+    monkeypatch.setattr(policy_ssh, '_wait_for_exit', lambda child, timeout: child.wait())
 
     class Child:
         def wait(self) -> int:
@@ -439,6 +552,8 @@ def test_deferred_timeout_is_removed_from_profile_and_begins_after_admission(
 
 
 def test_real_ssh_timeout_is_reported_as_124_and_sends_cancel(monkeypatch) -> None:
+    monkeypatch.setattr(policy_ssh, '_wait_for_exit', lambda child, timeout: child.wait())
+
     class Child:
         waits = 0
 
@@ -455,6 +570,7 @@ def test_real_ssh_timeout_is_reported_as_124_and_sends_cancel(monkeypatch) -> No
             raise AssertionError("cooperative cancel should reap SSH")
 
     child = Child()
+    monkeypatch.setattr(policy_ssh, "_wait_for_exit", lambda child, timeout: child.wait(timeout=timeout))
     cancellations: list[list[str]] = []
     monkeypatch.setattr(policy_ssh.subprocess, "Popen", lambda *_args, **_kwargs: child)
     monkeypatch.setattr(
@@ -616,6 +732,8 @@ def test_cancellation_keeps_ssh_alive_until_remote_cleanup(monkeypatch):
         handlers[sig] = handler
         return previous
 
+    monkeypatch.setattr(policy_ssh, '_wait_for_exit', lambda child, timeout: child.wait())
+
     class Child:
         def wait(self):
             handlers[policy_ssh.signal.SIGTERM](None, None)
@@ -661,6 +779,8 @@ def test_policy_does_not_complete_while_ssh_child_is_active(
             }
         return {"status": "COMPLETED"}
 
+    monkeypatch.setattr(policy_ssh, '_wait_for_exit', lambda child, timeout: child.wait())
+
     class Child:
         def wait(self) -> int:
             child_started.set()
@@ -699,6 +819,8 @@ def test_frozen_p50_manifest_overrides_runtime_envelope(monkeypatch):
         return {'decision': 'ADMIT', 'sandbox_id': 'tool-a', 'epoch': 1,
                 'container_port': 2222, 'host': '192.0.2.20', 'port': 20020}
     monkeypatch.setattr(policy_ssh, '_post', post)
+    monkeypatch.setattr(policy_ssh, '_wait_for_exit', lambda child, timeout: child.wait())
+
     class Child:
         def wait(self): return 0
     monkeypatch.setattr(policy_ssh.subprocess, 'Popen', lambda *a, **k: Child())

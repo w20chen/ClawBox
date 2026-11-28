@@ -1,0 +1,261 @@
+diff --git a/Cubelet/services/cubebox/relocate_snapshot.go b/Cubelet/services/cubebox/relocate_snapshot.go
+--- a/Cubelet/services/cubebox/relocate_snapshot.go
++++ b/Cubelet/services/cubebox/relocate_snapshot.go
+@@ -73,6 +73,13 @@
+ 		sourceRoot = storage.BackendStorageRoot(backend)
+ 	}
+ 	sourceBacking, backingErr := filepath.EvalSymlinks(source)
++	compressed := false
++	if _, statErr := os.Stat(source + compressedSnapshotSuffix); statErr == nil {
++		compressed = true
++		manifestBacking, err := filepath.EvalSymlinks(source + compressedSnapshotSuffix)
++		backingErr = err
++		sourceBacking = strings.TrimSuffix(manifestBacking, compressedSnapshotSuffix)
++	}
+ 	if backingErr != nil {
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+ 		rsp.Ret.RetMsg = backingErr.Error()
+@@ -131,7 +138,7 @@
+ 		rsp.Ret.RetMsg = fmt.Sprintf("persist relocated catalog: %v", err)
+ 		return rsp, nil
+ 	}
+-	if err = os.Remove(source); err != nil {
++	if err = os.Remove(source); err != nil && !(compressed && os.IsNotExist(err)) {
+ 		entry.MemoryVol = previous
+ 		revertErr := storage.WriteSnapshotCatalogFor(backend, entry)
+ 		if revertErr == nil {
+@@ -223,12 +230,22 @@
+ // named by MemoryVol. Layer names are relative, so relocation needs no parent
+ // path rewrites and never leaves hidden references back into volatile WARM.
+ func copyLogicalSnapshot(source, destination string, requireLineage bool) (int64, error) {
++	if _, err := os.Stat(source + compressedSnapshotSuffix); err == nil {
++		return copyCompressedLogicalSnapshot(source, destination, requireLineage)
++	} else if !os.IsNotExist(err) { return 0, err }
++	return copyLogicalSnapshotFiles(source, destination, requireLineage, false)
++}
++
++func copyLogicalSnapshotFiles(source, destination string, requireLineage, decoded bool) (int64, error) {
++	copyOwned := copySnapshot
++	if decoded { copyOwned = linkDecodedSnapshot }
++
+ 	data, err := os.ReadFile(source + ".lineage.json")
+ 	if os.IsNotExist(err) {
+ 		if requireLineage {
+ 			return 0, fmt.Errorf("missing committed RAM lineage")
+ 		}
+-		return copySnapshot(source, destination)
++		return copyOwned(source, destination)
+ 	}
+ 	if err != nil {
+ 		return 0, err
+@@ -319,7 +336,9 @@
+ 			reused, err = linkSnapshotBase(layerSource, target)
+ 		}
+ 		if err == nil && !reused {
+-			count, err = copySnapshot(layerSource, target)
++			if layer.ExternalPath != nil {
++				count, err = copySnapshot(layerSource, target)
++			} else { count, err = copyOwned(layerSource, target) }
+ 		}
+ 		transferred += count
+ 		if err != nil {
+diff --git a/Cubelet/services/cubebox/compressed_relocation.go b/Cubelet/services/cubebox/compressed_relocation.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/compressed_relocation.go
+@@ -0,0 +1,120 @@
++package cubebox
++
++import (
++    "encoding/json"
++    "fmt"
++    "os"
++    "os/exec"
++    "path/filepath"
++
++    "golang.org/x/sys/unix"
++)
++
++const compressedSnapshotSuffix = ".zstd-pages.json"
++
++// Decode only into the destination filesystem. The authoritative compressed
++// WARM files remain intact until the relocation catalog transaction commits.
++// The final copy links these COLD files, so decoded data is written once.
++func copyCompressedLogicalSnapshot(source, destination string, requireLineage bool) (int64, error) {
++    data, err := os.ReadFile(source + compressedSnapshotSuffix)
++    if err != nil { return 0, err }
++    var document struct {
++        SchemaVersion int `json:"schema_version"`
++        SnapshotPath string `json:"snapshot_path"`
++        Binary string `json:"decompression_binary"`
++        Groups []struct {
++            Paths []string `json:"paths"`
++            Container string `json:"container"`
++            Mode uint32 `json:"mode"`
++        } `json:"groups"`
++    }
++    if err = json.Unmarshal(data, &document); err != nil { return 0, err }
++    if document.SchemaVersion != 1 || filepath.Clean(document.SnapshotPath) != source ||
++        len(document.Groups) == 0 || !filepath.IsAbs(document.Binary) {
++        return 0, fmt.Errorf("invalid compressed relocation manifest or missing decompression_binary")
++    }
++    stage, err := os.MkdirTemp(filepath.Dir(destination), ".compressed-relocation-")
++    if err != nil { return 0, err }
++    defer os.RemoveAll(stage)
++    head := filepath.Join(stage, "snapshot.mem")
++    if err = os.Mkdir(head+".layers", 0700); err != nil { return 0, err }
++    mapPath := func(path string) (string, error) {
++        path = filepath.Clean(path)
++        if path == source { return head, nil }
++        if filepath.Dir(path) == source+".layers" && filepath.Ext(path) == ".mem" {
++            return filepath.Join(head+".layers", filepath.Base(path)), nil
++        }
++        return "", fmt.Errorf("compressed group path is outside snapshot: %s", path)
++    }
++    seen := map[string]bool{}
++    for _, group := range document.Groups {
++        if len(group.Paths) == 0 || filepath.Dir(group.Container) != source+".zstd-pages" {
++            return 0, fmt.Errorf("invalid compressed group")
++        }
++        paths := make([]string, 0, len(group.Paths))
++        for _, path := range group.Paths {
++            target, err := mapPath(path)
++            if err != nil { return 0, err }
++            if seen[target] { return 0, fmt.Errorf("duplicate compressed group path") }
++            seen[target] = true
++            paths = append(paths, target)
++        }
++        output, err := exec.Command(document.Binary, "decompress", group.Container, paths[0]).CombinedOutput()
++        if err != nil { return 0, fmt.Errorf("decode COLD snapshot: %w: %s", err, output) }
++        if err = os.Chmod(paths[0], os.FileMode(group.Mode)&0777); err != nil { return 0, err }
++        // Drop the newly written SSD cache just as ordinary relocation does.
++        file, err := os.Open(paths[0])
++        if err != nil { return 0, err }
++        err = unix.Fadvise(int(file.Fd()), 0, 0, unix.FADV_DONTNEED)
++        file.Close()
++        if err != nil { return 0, err }
++        for _, alias := range paths[1:] {
++            if err = os.Link(paths[0], alias); err != nil { return 0, err }
++        }
++    }
++    // Compression leaves shared owned files in raw form. Preserve their head
++    // aliases; external/managed dependencies remain in the lineage and are
++    // materialized by the existing copyLogicalSnapshot validation below.
++    raw, err := filepath.Glob(source+".layers/*.mem")
++    if err != nil { return 0, err }
++    raw = append(raw, source)
++    type copiedFile struct { info os.FileInfo; target string }
++    var copied []copiedFile
++    for _, path := range raw {
++        target, err := mapPath(path)
++        if err != nil { return 0, err }
++        if seen[target] { continue }
++        info, err := os.Lstat(path)
++        if err != nil { return 0, err }
++        if !info.Mode().IsRegular() { return 0, fmt.Errorf("nonregular snapshot layer") }
++        linked := false
++        for _, previous := range copied {
++            if os.SameFile(info, previous.info) {
++                err = os.Link(previous.target, target)
++                linked = true
++                break
++            }
++        }
++        if !linked {
++            linked, err = linkSnapshotBase(path, target)
++            if err == nil && !linked { _, err = copySnapshot(path, target) }
++        }
++        if err != nil { return 0, err }
++        copied = append(copied, copiedFile{info, target})
++    }
++    lineage, err := os.ReadFile(source+".lineage.json")
++    if err == nil {
++        err = os.WriteFile(head+".lineage.json", lineage, 0600)
++    } else if os.IsNotExist(err) && !requireLineage { err = nil }
++    if err != nil { return 0, err }
++    return copyLogicalSnapshotFiles(head, destination, requireLineage, true)
++}
++
++func linkDecodedSnapshot(source, destination string) (int64, error) {
++    if err := os.Link(source, destination); err != nil { return 0, err }
++    var info unix.Stat_t
++    if err := unix.Stat(source, &info); err != nil { return 0, err }
++    // Transferred bytes represent decoded/copy-written COLD allocation;
++    // publication itself only links the staging inode.
++    return info.Blocks * 512, nil
++}
+diff --git a/Cubelet/services/cubebox/compressed_relocation_test.go b/Cubelet/services/cubebox/compressed_relocation_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/compressed_relocation_test.go
+@@ -0,0 +1,70 @@
++package cubebox
++
++import (
++    "encoding/json"
++    "os"
++    "os/exec"
++    "path/filepath"
++    "strings"
++    "testing"
++)
++
++func TestCompressedRelocationColdOnly(t *testing.T) {
++    for _, lineage := range []bool{false, true} {
++        t.Run(map[bool]string{false:"full",true:"incremental"}[lineage], func(t *testing.T) {
++            root:=t.TempDir()
++            warm:=filepath.Join(root,"warm")
++            cold:=filepath.Join(root,"cold")
++            os.Mkdir(warm,0700); os.Mkdir(cold,0700)
++            source:=filepath.Join(warm,"vm.mem")
++            destination:=filepath.Join(cold,"vm.mem")
++            os.Mkdir(source+".zstd-pages",0700)
++            container:=source+".zstd-pages/000000.zpg"
++            payload:=strings.Repeat("data",1024)
++            os.WriteFile(container,[]byte(payload),0600)
++            helper:=filepath.Join(root,"decode")
++            // This helper also rejects every output outside COLD.
++            os.WriteFile(helper,[]byte("#!/bin/sh\ncase \"$3\" in "+cold+"/*) cp \"$2\" \"$3\";; *) exit 41;; esac\n"),0700)
++            if binary := os.Getenv("CLAWBOX_TEST_ZSTD_BINARY"); binary != "" {
++                helper = binary
++                raw := container+".raw"
++                os.Rename(container,raw)
++                if out,err:=exec.Command(binary,"compress",raw,container).CombinedOutput();err!=nil {t.Fatalf("codec: %v %s",err,out)}
++                os.Remove(raw)
++            }
++            paths:=[]string{source}
++            if lineage {
++                paths=append(paths,source+".layers/000001.mem")
++                base:=filepath.Join(root,"base.mem")
++                os.WriteFile(base,[]byte(strings.Repeat("base",1024)),0600)
++                doc:=map[string]interface{}{"schema_version":2,"logical_bytes":4096,"layers":[]interface{}{
++                    map[string]interface{}{"name":"000000.mem","external_path":base,"ranges":[]interface{}{map[string]int{"offset":0,"length":4096}}},
++                    map[string]interface{}{"name":"000001.mem","ranges":[]interface{}{map[string]int{"offset":0,"length":4096}}},
++                }}
++                data,_:=json.Marshal(doc);os.WriteFile(source+".lineage.json",data,0600)
++            }
++            doc:=map[string]interface{}{"schema_version":1,"snapshot_path":source,"decompression_binary":helper,
++                "groups":[]interface{}{map[string]interface{}{"paths":paths,"container":container,"mode":0600}}}
++            data,_:=json.Marshal(doc);os.WriteFile(source+compressedSnapshotSuffix,data,0600)
++            if _,err:=copyLogicalSnapshot(source,destination,lineage);err!=nil {t.Fatal(err)}
++            got,err:=os.ReadFile(destination);if err!=nil || string(got)!=payload {t.Fatalf("payload: %v",err)}
++            if _,err:=os.Stat(source);!os.IsNotExist(err) {t.Fatalf("WARM raw materialized: %v",err)}
++            if _,err:=os.Stat(container);err!=nil {t.Fatal("source lost before catalog commit",err)}
++            if lineage {
++                a,_:=os.Stat(destination); b,_:=os.Stat(destination+".layers/000001.mem")
++                if !os.SameFile(a,b) {t.Fatal("head hardlink lost")}
++                if _,err:=os.Stat(destination+".layers/000000.mem");err!=nil {t.Fatal(err)}
++            }
++            stage,_:=filepath.Glob(filepath.Join(cold,".compressed-relocation-*"))
++            if len(stage)!=0 {t.Fatal("staging leaked",stage)}
++            failedHelper:=filepath.Join(root,"decode-failed")
++            os.WriteFile(failedHelper,[]byte("#!/bin/sh\nexit 42\n"),0700)
++            doc["decompression_binary"]=failedHelper
++            data,_=json.Marshal(doc);os.WriteFile(source+compressedSnapshotSuffix,data,0600)
++            if _,err:=copyLogicalSnapshot(source,destination+".failed",lineage);err==nil {t.Fatal("decode failure hidden")}
++            stage,_=filepath.Glob(filepath.Join(cold,".compressed-relocation-*"))
++            if len(stage)!=0 {t.Fatal("failed staging leaked",stage)}
++            if _,err:=os.Stat(container);err!=nil {t.Fatal("failure removed source",err)}
++        })
++    }
++}

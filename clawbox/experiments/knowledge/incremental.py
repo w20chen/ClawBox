@@ -231,7 +231,7 @@ class _View:
         self.first_cover = index.first_cover
         self.legacy, self.maximum, self.subset_coverage = legacy, maximum, subset_coverage
 
-    def extend(self, added, contexts, *, shared=False):
+    def extend(self, added, contexts, *, shared=False, structural_cache=None):
         from clawbox.experiments.knowledge.layers import SharedSequence, fork_map
         from tool_time.lattice_kb import _NODE_MODE, _SHRINKAGE_KAPPA
         if not added:
@@ -257,6 +257,13 @@ class _View:
             new.update(dict.fromkeys(fs for fs in own if fs not in self.nodes))
             affected.update(self.index.subsets(row.features) if self.subset_coverage else own)
         affected.update(new)
+        # Resource targets often have the same evidence geometry but different
+        # measured values. Share only feature coverage, never target statistics.
+        # Keep small updates on the direct path; the cache lives for one update.
+        position_cache = None
+        if structural_cache is not None and len(affected) >= 64:
+            signature = tuple(row.features for row in samples)
+            position_cache = structural_cache.setdefault('positions', {}).setdefault(signature, {})
         nodes = fork_map(self.raw_nodes, shared)
         logs = (tuple(math.log1p(row.value) for row in samples) if late else
                 SharedSequence(self.logs, tuple(math.log1p(row.value) for row in added)))
@@ -266,7 +273,11 @@ class _View:
         coverage_cache = {}
         added_orders = {r.order for r in added}
         for fs in affected:
-            positions = sorted(records.supersets(fs))
+            positions = position_cache.get(fs) if position_cache is not None else None
+            if positions is None:
+                positions = sorted(records.supersets(fs))
+                if position_cache is not None:
+                    position_cache[fs] = positions
             matching = [samples[i] for i in positions]
             if not self.subset_coverage:
                 matching = [r for r in matching if fs == r.features or
@@ -324,8 +335,19 @@ class _View:
         else:
             index = self.index
         parents = fork_map(self.parents, shared) if new else self.parents
+        parent_cache = None
+        if structural_cache is not None and len(parent_changes) >= 64:
+            parent_cache = structural_cache.setdefault('parents', {}).setdefault(frozenset(nodes), {})
         for fs in parent_changes:
-            parents[fs] = tuple(nodes[p].features for p in find_immediate_parents(fs, nodes, index=index))
+            # Parent ordering follows combinations(list(fs)), including its
+            # iteration order. Equal sets alone are insufficient as a key.
+            key = (fs, tuple(fs)) if parent_cache is not None else None
+            selected = parent_cache.get(key) if parent_cache is not None else None
+            if selected is None:
+                selected = tuple(find_immediate_parents(fs, nodes, index=index))
+                if parent_cache is not None:
+                    parent_cache[key] = selected
+            parents[fs] = tuple(nodes[p].features for p in selected)
         if index is not self.index:
             index.parent_sets = parents
             index.first_cover = first_cover
@@ -364,6 +386,7 @@ class IncrementalLatticeState:
         result.contexts = fork_map(self.contexts, shared)
         result.views = {}
         shared = {}
+        structural_cache = {}
         for name in dict.fromkeys((*self.views, *added)):
             previous = self.views.get(name)
             if previous is None:
@@ -373,7 +396,8 @@ class IncrementalLatticeState:
             incoming = added.get(name, ())
             key = (id(previous), tuple((s.order, s.features, s.core, s.value.hex()) for s in incoming))
             if key not in shared:
-                shared[key] = previous.extend(incoming, result.contexts, shared=isinstance(result.rows, SharedSequence))
+                shared[key] = previous.extend(incoming, result.contexts,
+                    shared=isinstance(result.rows, SharedSequence), structural_cache=structural_cache)
             result.views[name] = shared[key]
         return result
 

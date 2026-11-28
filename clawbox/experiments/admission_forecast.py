@@ -6,8 +6,9 @@ Nothing here grants capacity or assumes that process exit releases VM memory.
 """
 from collections import deque
 from bisect import bisect_left
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import groupby
+from operator import sub
 import math
 import threading
 import time
@@ -21,7 +22,9 @@ class Waiting:
     duration: float | None = None
     memory: float = 0.
     category: tuple | None = None
-    observations: deque = field(default_factory=lambda: deque(maxlen=32))
+    # Observations change at most once per second per waiter. Keep immutable
+    # snapshots so every forecast can share them outside the global lock.
+    observations: tuple = ()
     started: float | None = None
     finished: bool = False
     invalid: bool = False
@@ -45,14 +48,14 @@ class AdmissionForecaster:
         with self.lock:
             self.bindings[session] = (domain, load, resident, stable)
 
-    def begin(self, session, request):
+    def begin(self, session, request, arrived=None):
         receipt = request.get('prediction_receipt')
         if not receipt or session not in self.bindings:
             return
         key = (session, request['execution_id'])
         with self.lock:
             if key not in self.pending:
-                item = Waiting(session, receipt, self.clock())
+                item = Waiting(session, receipt, self.clock() if arrived is None else arrived)
                 self.pending[key] = item
                 self.receipts[(session, receipt)] = item
 
@@ -118,7 +121,7 @@ class AdmissionForecaster:
         with self.lock:
             if item.started is None and not item.finished:
                 if not item.observations or now - item.observations[-1][0] >= 1.:
-                    item.observations.append(sample)
+                    item.observations = (*item.observations[-31:], sample)
         return sample
 
     def start(self, session, execution):
@@ -128,7 +131,7 @@ class AdmissionForecaster:
                 item.started = self.clock()
                 item.conditions = self.bindings[session][3]()
                 if item.observations:
-                    self.history.append((item.category, tuple(item.observations), item.started))
+                    self.history.append((item.category, item.observations, item.started))
 
     def finish(self, session, execution):
         with self.lock:
@@ -146,7 +149,10 @@ class AdmissionForecaster:
 
     @staticmethod
     def _distance(a, b):
-        return max((x-y)**2 for x, y in zip(a, b))
+        # Chebyshev distance squared: one square after the maximum is exactly
+        # the same metric. C iterators avoid a Python generator/power per feature
+        # in this heavily repeated forecast path.
+        return max(map(abs, map(sub, a, b))) ** 2
 
     def _wait(self, item, observation):
         if observation is None:
@@ -164,9 +170,10 @@ class AdmissionForecaster:
                         for category, samples, end in self.history if category == item.category]
             if len(evidence) < self.min_samples:
                 return None, len(evidence)
-            evidence += [(other.category, tuple(other.observations), now, False)
+            evidence += [(other.category, other.observations, now, False)
                          for other in self.pending.values()
-                         if other is not item and other.started is None and not other.finished]
+                         if other is not item and other.category == item.category
+                         and other.started is None and not other.finished]
         for category, samples, end, completed in evidence:
             if category != item.category or not samples:
                 continue

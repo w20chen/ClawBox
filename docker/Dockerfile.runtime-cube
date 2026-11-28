@@ -26,6 +26,8 @@ USER root
 COPY --from=cube-base /usr/bin/envd /usr/bin/envd
 COPY docker/cube-runtime-entrypoint.sh /usr/local/bin/cube-runtime-entrypoint.sh
 COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
+COPY scripts/patch-openclaw-ssh-backend.js /tmp/patch-openclaw-ssh-backend.js
+RUN node /tmp/patch-openclaw-ssh-backend.js && rm /tmp/patch-openclaw-ssh-backend.js
 # Refresh the same ClawTune sidecar package used by Docker deployments; the
 # Cube runtime changes only execution-scope/capability discovery.
 COPY --from=clawtune services/sidecar /opt/clawtune/services/sidecar

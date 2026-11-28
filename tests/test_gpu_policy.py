@@ -185,6 +185,55 @@ def test_gpu_policy_does_not_change_wait_only_baseline():
     assert c.victim_for_restore("other").session_id == "session"
 
 
+def test_alternating_queue_refresh_and_blocked_forecast_do_not_wake_waiters(monkeypatch):
+    now = [100.]
+    monkeypatch.setattr('clawbox.experiments.policy.time.monotonic', lambda: now[0])
+    c = coordinator()
+    waiting(c)
+    notifications = []
+    monkeypatch.setattr(c._condition, 'notify_all', lambda: notifications.append(now[0]))
+    first_queue = signal(c, event='queued', layer='kv_transfer')
+    first_forecast = signal(c, phase='blocked', remaining_s=None)
+    assert first_queue['phase_changed'] and first_forecast['should_recheck_pressure']
+    assert len(notifications) == 2
+    for _ in range(20):
+        now[0] += .01
+        queued = signal(c, event='queued', layer='kv_transfer')
+        predicted = signal(c, phase='blocked', remaining_s=None)
+        for result in (queued, predicted):
+            assert result['accepted'] and not result['phase_changed']
+            assert not result['should_recheck_pressure'] and not result['should_log']
+            assert result['estimated_response_remaining_seconds'] is None
+    assert len(notifications) == 2
+    assert signal(c, event='queued', layer='decode')['phase_changed']
+    assert len(notifications) == 3
+    changed = signal(c, phase='decoding', remaining_s=30)
+    assert changed['phase_changed'] and changed['should_recheck_pressure']
+    assert len(notifications) == 4
+    assert signal(c, remaining_s=1)['should_prewarm']
+    assert len(notifications) == 5
+    metrics = c.gpu_signal_metrics()
+    assert metrics['progress_notifications'] == len(notifications)
+    assert metrics['policy_log_records_suppressed'] >= 40
+
+
+def test_queue_invalidation_and_forecast_thresholds_remain_effective(monkeypatch):
+    now = [100.]
+    monkeypatch.setattr('clawbox.experiments.policy.time.monotonic', lambda: now[0])
+    c = coordinator(gpu_reclaim_min_remaining_seconds=3)
+    waiting(c)
+    signal(c, event='queued', layer='queue')
+    signal(c, phase='queued', remaining_s=30)
+    # Even an unchanged queue phase retains the existing native-boundary
+    # invalidation rule; diagnostics must record this eligibility crossing.
+    queued = signal(c, event='queued', layer='queue')
+    assert not queued['phase_changed'] and queued['should_log']
+    assert queued['estimated_response_remaining_seconds'] is None
+    refreshed = signal(c, phase='queued', remaining_s=30)
+    assert not refreshed['phase_changed'] and refreshed['should_recheck_pressure']
+    assert c.victim_for_restore('other') is not None
+
+
 def test_next_use_deadline_is_age_adjusted_and_published_to_both_vms(monkeypatch):
     now = [100.0]
     monkeypatch.setattr("clawbox.experiments.policy.time.monotonic", lambda: now[0])

@@ -768,20 +768,30 @@ export default definePluginEntry({
       runtimeRepo,
     );
     completion.resource_scope = buildToolResourceScope(event, context, toolName);
-    try {
-      completion.resource_scope = await preferExecutionResourceScope(
-        completion.resource_scope,
-        completion.execution_id,
-        client,
-      );
-    } catch (error) {
-      logger.warn("ClawTune execution scope lookup failed", classifyError(error));
+    // Envelope IDs belong to the host Tool bridge, not this sidecar's
+    // execution registry. Keep the completion/ID for tracing, but avoid
+    // serial lookups which cannot return host measurements.
+    const hostExecution = config.executionBackend === "hook-only" && config.sandboxExecEnvelope;
+    let completionOverheadNs = 0n;
+    if (!hostExecution) {
+      const tScope = monotonicNowNs();
+      try {
+        completion.resource_scope = await preferExecutionResourceScope(
+          completion.resource_scope,
+          completion.execution_id,
+          client,
+        );
+      } catch (error) {
+        logger.warn("ClawTune execution scope lookup failed", classifyError(error));
+      } finally {
+        completionOverheadNs += monotonicNowNs() - tScope;
+      }
     }
     // Precise tool-time split: separate the OpenClaw-reported tool action
     // from the plugin's own sidecar/plugin round-trip overhead.
     //   completion.duration_ms        = OpenClaw-reported tool action duration
     //   decisionOverheadNs            = before-hook sidecar RTT (decide + instrument)
-    //   completionOverheadNs          = after-hook sidecar RTT (report + telemetry)
+    //   completionOverheadNs          = after-hook RTT (scope + report + telemetry)
     // Fields set before reportCompletion reach the sidecar trace.  The
     // completion RTT is only known after the report is sent, so
     // sidecar_overhead_ns (what the sidecar records) is the before-hook
@@ -806,22 +816,23 @@ export default definePluginEntry({
       : "openclaw_plugin_process_monotonic";
     completion.decision_duration_ns = decisionOverheadNs.toString();
     completion.sidecar_overhead_ns = decisionOverheadNs.toString();
-    let completionOverheadNs = 0n;
     let toolResourceTelemetry: unknown | null = null;
+    const tReport = monotonicNowNs();
     try {
-      const tReport = monotonicNowNs();
       await client.reportCompletion(completion);
-      completionOverheadNs += monotonicNowNs() - tReport;
     } catch (error) {
       logger.warn("ClawTune completion report failed", classifyError(error));
+    } finally {
+      completionOverheadNs += monotonicNowNs() - tReport;
     }
-    if (completion.execution_id !== null) {
+    if (!hostExecution && completion.execution_id !== null) {
+      const tTel = monotonicNowNs();
       try {
-        const tTel = monotonicNowNs();
         toolResourceTelemetry = await client.getExecutionTelemetry(completion.execution_id);
-        completionOverheadNs += monotonicNowNs() - tTel;
       } catch (error) {
         logger.warn("ClawTune execution telemetry lookup failed", classifyError(error));
+      } finally {
+        completionOverheadNs += monotonicNowNs() - tTel;
       }
     }
     completion.completion_duration_ns = completionOverheadNs.toString();

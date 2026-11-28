@@ -31,7 +31,8 @@ class Pausable(Protocol):
 @dataclass(slots=True)
 class ModelWait:
     started_monotonic_s: float
-    gpu_phase: str | None = None
+    gpu_native_phase: tuple | None = None
+    gpu_forecast_phase: tuple | None = None
     gpu_response_estimate_s: float | None = None
     gpu_response_observed_monotonic_s: float | None = None
     gpu_response_valid_for_s: float = 0.0
@@ -287,6 +288,7 @@ class PolicyCoordinator:
         self._gpu_policy_log_count = 0
         self._gpu_policy_log_suppressed_total = 0
         self._gpu_pressure_recheck_count = 0
+        self._gpu_progress_notification_count = 0
 
     def set_new_session_admission_blocked(self, blocked: bool) -> None:
         """Latch only new VM-pair admission; existing sessions must make progress."""
@@ -373,10 +375,20 @@ class PolicyCoordinator:
                     return {**result, "reason": "duplicate_or_stale_signal"}
                 wait.gpu_signal_sequences[engine] = sequence
             now = time.monotonic()
-            previous_phase = wait.gpu_phase
             previous_remaining = self._gpu_response_remaining(wait, now)
             previously_protected = self._gpu_prewarm_protected(wait, now)
-            wait.gpu_phase = str(phase)
+            previously_requested = wait.gpu_prewarm_requested
+            # Native queue refreshes and response forecasts are independent
+            # streams. Alternating message names do not mean the request changed
+            # phase, and must not wake all admission waiters or recheck pressure.
+            if phase == 'response_forecast':
+                signature = (role, engine, event.get('phase'))
+                phase_changed = wait.gpu_forecast_phase != signature
+                wait.gpu_forecast_phase = signature
+            else:
+                signature = (role, engine, str(phase), event.get('layer'))
+                phase_changed = wait.gpu_native_phase != signature
+                wait.gpu_native_phase = signature
             if phase == "response_forecast":
                 estimate, validity = event.get("remaining_s"), event.get("valid_for_s")
                 age = event.get("signal_age_seconds", 0.)
@@ -417,11 +429,12 @@ class PolicyCoordinator:
                                      and previous_remaining >= threshold)
             reclaimable = (not self._gpu_prewarm_protected(wait, now) and remaining is not None
                            and remaining >= threshold)
-            phase_changed = previous_phase != str(phase)
+            eligibility_changed = previously_reclaimable != reclaimable
+            protection_changed = previously_protected != self._gpu_prewarm_protected(wait, now)
             should_recheck_pressure = phase == "response_forecast" and (
-                phase_changed or previously_reclaimable != reclaimable)
+                phase_changed or eligibility_changed)
             frequent = phase in {"queued", "response_forecast"}
-            should_log = (not frequent or phase_changed or should_recheck_pressure
+            should_log = (not frequent or phase_changed or eligibility_changed or protection_changed
                           or due or now - self._gpu_last_queued_log_monotonic_s >= 1.)
             suppressed = 0
             if should_log:
@@ -434,7 +447,10 @@ class PolicyCoordinator:
             self._gpu_policy_log_count += int(should_log)
             self._gpu_policy_log_suppressed_total += int(not should_log)
             self._gpu_pressure_recheck_count += int(should_recheck_pressure)
-            self._condition.notify_all()
+            if (phase_changed or eligibility_changed or protection_changed
+                    or previously_requested != wait.gpu_prewarm_requested):
+                self._gpu_progress_notification_count += 1
+                self._condition.notify_all()
             response = {**result, "accepted": True, "phase": phase,
                         "phase_changed": phase_changed,
                         "should_recheck_pressure": should_recheck_pressure,
@@ -459,6 +475,7 @@ class PolicyCoordinator:
                 "policy_log_records_suppressed": self._gpu_policy_log_suppressed_total,
                 "queued_suppressed_since_last_record": self._gpu_queued_logs_suppressed,
                 "pressure_rechecks": self._gpu_pressure_recheck_count,
+                "progress_notifications": self._gpu_progress_notification_count,
             }
 
     def wait_for_gpu_prewarm(self, session_id: str, wait_id: str, *, claim: bool = False) -> bool:

@@ -78,6 +78,33 @@ def test_borrow_ranking_skips_unaffordable_vms_before_residency_reads():
     assert reads == []
 
 
+def test_borrow_ranking_survives_quarantine_after_registry_snapshot():
+    from threading import RLock
+    from clawbox.cube.lifecycle import CubeSandboxLifecycle, SandboxState
+
+    c, _, _ = controller('joint')
+    c.shared_pool = WarmSnapshotPool(10, borrow_capacity_bytes=10)
+    c.borrower.borrowed = lambda: ()
+    quarantined = object.__new__(CubeSandboxLifecycle)
+    quarantined._lock = RLock()
+    quarantined._state = SandboxState.RUNNING
+    quarantined.sandbox_id = 'failed-migration'
+    quarantined.configured_memory_bytes = 1
+
+    def observe_first():
+        # Both were resident when the controller built its candidate list.
+        # A concurrent admission can quarantine the second before its read.
+        assert quarantined.quarantine_incomplete_rebind()
+        return SimpleNamespace(local_bytes=10)
+
+    healthy = SimpleNamespace(sandbox_id='healthy', resident=True,
+                              configured_memory_bytes=1,
+                              observe_borrow_candidate=observe_first)
+    c.register('one', healthy, quarantined)
+    assert c._next_borrow_candidate() is healthy
+    assert quarantined.state is SandboxState.UNKNOWN
+
+
 def test_shared_guard_counts_current_cache_once_and_preexisting_warm_files():
     c, _, _ = controller('joint', idle=True)
     c.shared_pool = WarmSnapshotPool(

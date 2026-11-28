@@ -11,17 +11,76 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Progress metadata is sent by the authenticated Runtime SSH wrapper. It does
 // not alter the command or its profiling digest and is never persisted in logs.
 type progressControl struct {
-	URL            string         `json:"url"`
-	Token          string         `json:"token"`
-	Request        map[string]any `json:"request"`
-	TimeoutSeconds float64        `json:"timeout_seconds"`
+	URL            string           `json:"url"`
+	Token          string           `json:"token"`
+	Request        map[string]any   `json:"request"`
+	TimeoutSeconds float64          `json:"timeout_seconds"`
+	Timings        []progressTiming `json:"-"`
+}
+
+// Offsets are relative to this attempt, measured with the guest monotonic
+// clock. A missing offset means that stage was never reached. Never record
+// endpoint addresses, credentials, response bodies or transport error text.
+type progressTiming struct {
+	Phase                 string   `json:"phase"`
+	Attempt               int      `json:"attempt"`
+	StartedUnixNS         int64    `json:"started_unix_ns"`
+	Seconds               float64  `json:"seconds"`
+	ConnectionSeconds     *float64 `json:"connection_seconds,omitempty"`
+	RequestWrittenSeconds *float64 `json:"request_written_seconds,omitempty"`
+	FirstByteSeconds      *float64 `json:"first_byte_seconds,omitempty"`
+	Reused                bool     `json:"reused"`
+	Status                int      `json:"status,omitempty"`
+	TransportError        bool     `json:"transport_error,omitempty"`
+}
+
+func (p *progressControl) tracedRequest(request *http.Request, phase string, attempt int) (*http.Response, []byte, error) {
+	started := time.Now()
+	row := progressTiming{Phase: phase, Attempt: attempt, StartedUnixNS: started.UnixNano()}
+	var mu sync.Mutex
+	offset := func(target **float64) {
+		mu.Lock()
+		defer mu.Unlock()
+		seconds := time.Since(started).Seconds()
+		*target = &seconds
+	}
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			mu.Lock()
+			defer mu.Unlock()
+			seconds := time.Since(started).Seconds()
+			row.ConnectionSeconds, row.Reused = &seconds, info.Reused
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				offset(&row.RequestWrittenSeconds)
+			}
+		},
+		GotFirstResponseByte: func() { offset(&row.FirstByteSeconds) },
+	}
+	response, err := progressClient.Do(request.WithContext(httptrace.WithClientTrace(request.Context(), trace)))
+	var payload []byte
+	if err == nil {
+		payload, err = io.ReadAll(io.LimitReader(response.Body, 65537))
+		response.Body.Close()
+	}
+	mu.Lock()
+	row.Seconds, row.TransportError = time.Since(started).Seconds(), err != nil
+	if response != nil {
+		row.Status = response.StatusCode
+	}
+	p.Timings = append(p.Timings, row)
+	mu.Unlock()
+	return response, payload, err
 }
 
 // Reuse the transport across boundaries and executions. Reading the small
@@ -86,16 +145,14 @@ func (p *progressControl) report(phase string) error {
 		}
 		request.Header.Set("Authorization", "Bearer "+p.Token)
 		request.Header.Set("Content-Type", "application/json")
-		response, err := progressClient.Do(request)
-		if err == nil {
-			payload, readError := io.ReadAll(io.LimitReader(response.Body, 65537))
-			response.Body.Close()
+		response, payload, err := p.tracedRequest(request, phase, attempts)
+		if response != nil {
 			cancel()
 			if response.StatusCode != http.StatusOK {
 				// A policy rejection is authoritative, not a transport retry.
 				return fmt.Errorf("progress %s status %d", phase, response.StatusCode)
 			}
-			if readError == nil {
+			if err == nil {
 				var ack struct {
 					Status      string `json:"status"`
 					SessionID   string `json:"session_id"`
@@ -106,7 +163,6 @@ func (p *progressControl) report(phase string) error {
 				}
 				return nil
 			}
-			err = readError
 		} else {
 			cancel()
 		}

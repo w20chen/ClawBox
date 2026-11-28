@@ -361,6 +361,20 @@ new run ID; `launch` reuses qualification when its capability inputs still match
 | Trained KB's environment, measurement semantics, or training data | Train new immutable artifacts against the matching environment. A cold-start seed is selected explicitly and does not require workload-specific training. |
 | Only timing diagnostics, arrivals, concurrency, or scheduler parameters | Validate the new specification and use a new run ID. No image rebuild or retraining. |
 
+For a Cubelet-only repair, the existing installer also accepts
+`sudo bash scripts/install-incremental-cubesandbox.sh --cubelet-only /absolute/path/to/tested/cubelet`.
+It requires an empty VM pool, preserves a backup, replaces only Cubelet, and
+restarts Cubelet/egress. Repeating the command with an identical binary and
+active services does not restart them. To roll back, use the same command with
+the printed backup's `cubelet` file. API, Master, Shim, SDK and templates remain
+unchanged. Run the real VM storage gate and experiment qualification before a
+new experiment; service startup alone is not validation.
+
+The paused-snapshot dispatch patch fixes WARM-to-COLD relocation after the VM
+has exited: relocation uses the snapshot catalog under the lifecycle lock,
+without first requiring a live VM registry entry. Install the patched Cubelet
+before running experiments that may fill WARM storage.
+
 ### Refresh the Runtime predictor and KB
 
 The Python dependency is pinned to unchanged ClawTune
@@ -414,6 +428,11 @@ After the small experiment passes, use the
 [Tool collector corpus refresh](workloads.md#refresh-tool-collectors), preserving
 each task's workspace and dependencies. Further host-only KB sharing-policy
 changes within the same wire protocol require no Runtime or Tool rebuild.
+
+To deploy only the remote filesystem batching and Read reuse improvements,
+run the Runtime refresh above with the current ClawBox source. Preserve the
+Tool template and seed, select the new Runtime template in the host plan, and
+qualify a new run. Both Runtime image build paths apply the same OpenClaw patch.
 
 ### Apply SDK timeout patches
 

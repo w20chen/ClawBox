@@ -19,6 +19,7 @@ from clawbox.experiments.host import HostConfig, apply, init_config, load_config
     {"cube_proxy_connect_timeout_seconds": 2},
     {"cube_proxy_connect_timeout_seconds": True},
     {"cubelet_tap_init_num": 0}, {"cubelet_tap_init_num": True},
+    {"cubelet_numa_policy": "bind"}, {"cubelet_numa_policy": False},
     {"cube_master_db_timeout_seconds": 4},
     {"cube_master_db_timeout_seconds": True},
     {"snapshot_compression_binary": "clawbox-zstd-page-snapshot"},
@@ -33,6 +34,7 @@ def test_host_init_never_overwrites(tmp_path):
     init_config(path)
     before = path.read_bytes()
     assert load_config(path).local_node == 0
+    assert load_config(path).cubelet_numa_policy == "local"
     assert load_config(path).snapshot_compression_binary == (
         "/usr/local/bin/clawbox-zstd-page-snapshot"
     )
@@ -217,6 +219,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
         "ip_local_port_range": [10000, 65535],
         "cube_proxy_connect_timeout_seconds": 30,
         "cubelet_tap_init_num": 1536,
+        "cubelet_numa_policy": "local",
         "cube_master_log_level": "warn",
         "cube_master_db_timeout_seconds": 30,
     }))
@@ -230,6 +233,7 @@ def test_profile_import_preserves_host_resources(tmp_path):
     assert config.ip_local_port_range == [10000, 65535]
     assert config.cube_proxy_connect_timeout_seconds == 30
     assert config.cubelet_tap_init_num == 1536
+    assert config.cubelet_numa_policy == "local"
     assert config.cube_master_log_level == "warn"
     assert config.cube_master_db_timeout_seconds == 30
 

@@ -549,6 +549,7 @@ p.write_text(text.rstrip() + '\n' + key + '=' + shlex.quote(sys.argv[1]) + '\n')
         args, 'cube_proxy_connect_timeout_seconds', None
     )
     profile['cubelet_tap_init_num'] = getattr(args, 'cubelet_tap_init_num', None)
+    profile['cubelet_numa_policy'] = getattr(args, 'cubelet_numa_policy', None)
     for key in ('cube_api_nofile', 'cubelet_tap_url', 'required_kernel', 'required_boot_parameters'):
         profile[key] = getattr(args, key, None)
     profile['cube_scheduler_overcommit'] = getattr(args, 'cube_scheduler_overcommit', None)

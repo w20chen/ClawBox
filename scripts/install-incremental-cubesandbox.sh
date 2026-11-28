@@ -1,6 +1,61 @@
 #!/usr/bin/env bash
 # Install a tested four-component CubeSandbox build on an idle standalone host.
 set -Eeuo pipefail
+if [[ ${1:-} == --cubelet-only ]]; then
+  (( $# == 2 )) || { echo 'usage: sudo bash scripts/install-incremental-cubesandbox.sh --cubelet-only BUILT_CUBELET' >&2; exit 64; }
+  (( EUID == 0 )) || { echo 'run as root' >&2; exit 1; }
+  source_cubelet=$(realpath "$2")
+  target_cubelet=/usr/local/services/cubetoolbox/Cubelet/bin/cubelet
+  [[ -x "$source_cubelet" && -x "$target_cubelet" && "$source_cubelet" != "$target_cubelet" ]] || {
+    echo 'supply a distinct tested Cubelet executable; install CubeSandbox first' >&2; exit 1;
+  }
+  install -d -m 700 /run/clawbox
+  exec 9>/run/clawbox/base-cache.lock
+  flock -n 9 || { echo 'experiment/cache maintenance is active' >&2; exit 1; }
+  grep -qx 'populated 0' /sys/fs/cgroup/cube_sandbox/sandbox/cgroup.events || {
+    echo 'finish or abort owned experiments before replacing Cubelet' >&2; exit 1;
+  }
+  python3 - <<'PY'
+from pathlib import Path
+for entry in Path('/proc').iterdir():
+    if not entry.name.isdigit(): continue
+    try: name = Path((entry/'cmdline').read_bytes().split(b'\0')[0].decode()).name
+    except (FileNotFoundError, ProcessLookupError): continue
+    if name in {'containerd-shim-cube-rs', 'cloud-hypervisor', 'cube-hypervisor'}:
+        raise SystemExit('live VM process ' + entry.name + '; finish/clean VMs before installation')
+PY
+  if cmp -s "$source_cubelet" "$target_cubelet" &&
+      systemctl is-active --quiet cube-sandbox-cubelet.service cube-sandbox-cube-egress.service; then
+    echo 'Cubelet binary already installed and services active; no restart.'
+    exit 0
+  fi
+  install -d -m 700 /data/clawbox-backend-backups
+  backup=$(mktemp -d /data/clawbox-backend-backups/cubelet-XXXXXXXX)
+  cp -p "$target_cubelet" "$backup/cubelet"
+  sha256sum "$source_cubelet" "$backup/cubelet" > "$backup/before.sha256"
+  rollback_cubelet() {
+    trap - ERR
+    systemctl stop cube-sandbox-cube-egress.service
+    systemctl stop cube-sandbox-cubelet.service
+    install -m 755 "$backup/cubelet" "$target_cubelet.rollback"
+    mv -f "$target_cubelet.rollback" "$target_cubelet"
+    systemctl start cube-sandbox-cubelet.service
+    systemctl start cube-sandbox-cube-egress.service
+    echo "Cubelet installation failed; restored $backup/cubelet" >&2
+  }
+  trap rollback_cubelet ERR
+  systemctl stop cube-sandbox-cube-egress.service
+  systemctl stop cube-sandbox-cubelet.service
+  install -m 755 "$source_cubelet" "$target_cubelet.clawbox-new"
+  mv -f "$target_cubelet.clawbox-new" "$target_cubelet"
+  systemctl start cube-sandbox-cubelet.service
+  systemctl start cube-sandbox-cube-egress.service
+  systemctl is-active --quiet cube-sandbox-cubelet.service cube-sandbox-cube-egress.service
+  sha256sum "$target_cubelet" > "$backup/installed.sha256"
+  trap - ERR
+  echo "Cubelet installed; verify real VM checkpoint/spill/restore before experiments. Backup: $backup"
+  exit 0
+fi
 if [[ ${1:-} == --lifecycle-components ]]; then
   (( $# == 5 )) || { echo 'usage: sudo bash scripts/install-incremental-cubesandbox.sh --lifecycle-components CUBE_SOURCE CLAWBOX_DIR WARM_ROOT COLD_ROOT' >&2; exit 64; }
   (( EUID == 0 )) || { echo 'run as root' >&2; exit 1; }

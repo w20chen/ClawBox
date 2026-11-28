@@ -72,7 +72,16 @@ def test_process_ownership_commit_retry_recovery_and_equivalence(tmp_path):
         assert {v['scope_generation'] for v in acknowledgements} == {1}
         assert manager.scope_summary('b')['generation'] == 0
         assert manager.summary()['scopes']['a']['generation'] == 1
-        assert any(v['operation']=='journal_wait' for v in manager.metrics)
+        metrics = manager.metrics
+        assert any(v['operation']=='journal_wait' for v in metrics)
+        queues = [v for v in metrics if v['operation'] == 'owner_queue']
+        assert queues
+        for row in queues:
+            stages = [row[key] for key in ('parent_outbox_seconds', 'ipc_seconds',
+                'child_inbox_seconds', 'session_serial_seconds')]
+            assert all(value >= 0 for value in stages)
+            assert sum(stages) == pytest.approx(row['seconds'], abs=1e-8)
+            assert row['request_operation'] and row['request_sequence'] > 0
     finally:
         manager.close()
     assert all(not owner.process.is_alive() for owner in manager.owners)
@@ -146,9 +155,15 @@ def test_journal_wait_blocks_own_pair_but_not_another_pair(tmp_path):
         other = manager.submit('predict','b',prediction_payload('b')).result(timeout=3)
         assert other['scope_generation']==0
         assert not same_pair.done() and not claim.done()
+        held_at = time.monotonic()
+        time.sleep(.05)
         marker.with_suffix('.release').touch()
         claim.result(timeout=3)
         same_pair.result(timeout=3)
+        rows = [row for row in manager.metrics if row['operation'] == 'owner_queue'
+                and row['session_id'] == 'a' and row['request_operation'] == 'predict']
+        assert rows[-1]['session_serial_seconds'] >= .05
+        assert rows[-1]['started_monotonic'] < held_at
     finally:
         marker.with_suffix('.release').touch()
         manager.close()

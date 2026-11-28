@@ -26,6 +26,32 @@ def _bundle(tmp_path: Path, *, no_op: bool = True) -> Path:
     # shape independently from unrelated workspace/skills transformations.
     source = '''
 const ssh = { remoteWorkspaceDir: workspaceRoot };
+const pinnedReadFixture = `DIR_FLAGS |= os.O_NOFOLLOW
+READ_FLAGS |= os.O_NOFOLLOW
+file_stat.st_nlink > 1:
+parent_fd = walk_dir(root_fd, sys.argv[3], False)`;
+var RemoteShellSandboxFsBridge = class {
+\tasync readFile(params) { throw new Error('fixture'); }
+\tasync stat(params) {
+\t\tthrow new Error('unpatched stat');
+\t}
+\tgetMounts() { return []; }
+};
+function buildRemoteProtectedSkillMounts() { return []; }
+function createSandboxedReadTool(params) {
+\treturn createOpenClawReadTool(createReadTool(params.root, { operations: createSandboxReadOperations(params) }), {
+\t\tmodelContextWindowTokens: params.modelContextWindowTokens,
+\t\timageSanitization: params.imageSanitization
+\t});
+}
+function createSandboxReadOperations(params) {
+  return {
+    readFile: absolutePath => params.bridge.readFile({filePath: absolutePath, cwd: params.root}),
+    access: (absolutePath) => assertSandboxFileExists(params, absolutePath),
+    detectImageMimeType: absolutePath => params.bridge.readFile({filePath: absolutePath, cwd: params.root})
+  };
+}
+function createSandboxWriteOperations(params) { return {}; }
 class Backend {
 \tconstructor() {
 \t\tthis.ensurePromise = null;

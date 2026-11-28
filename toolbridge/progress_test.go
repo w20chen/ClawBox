@@ -124,6 +124,14 @@ func TestProgressRetriesLostAcknowledgementAndReusesConnection(t *testing.T) {
 	if len(addresses) != 2 || addresses[0] != addresses[1] {
 		t.Fatalf("connection not reused: %v", addresses)
 	}
+	if len(p.Timings) != 3 || !p.Timings[0].TransportError || !p.Timings[2].Reused {
+		t.Fatalf("retry/connection timing lost: %+v", p.Timings)
+	}
+	for _, row := range p.Timings[1:] {
+		if row.ConnectionSeconds == nil || row.RequestWrittenSeconds == nil || row.FirstByteSeconds == nil || row.Status != 200 || row.Seconds < *row.FirstByteSeconds {
+			t.Fatalf("incomplete successful timing: %+v", row)
+		}
+	}
 }
 
 func TestProgressDoesNotAcceptWrongAcknowledgement(t *testing.T) {
@@ -159,5 +167,17 @@ func TestProgressDeadlineIsBoundedAndDoesNotLeakCredentials(t *testing.T) {
 	}
 	if time.Since(began) > time.Second {
 		t.Fatal("progress exceeded bounded deadline")
+	}
+	if len(p.Timings) != 3 {
+		t.Fatalf("timeout attempts missing: %+v", p.Timings)
+	}
+	for _, row := range p.Timings {
+		if !row.TransportError || row.FirstByteSeconds != nil || row.RequestWrittenSeconds == nil {
+			t.Fatalf("timeout stage misreported: %+v", row)
+		}
+	}
+	encoded, _ := json.Marshal(p.Timings)
+	if strings.Contains(string(encoded), p.Token) || strings.Contains(string(encoded), server.URL) {
+		t.Fatal("timing leaked credentials or endpoint")
 	}
 }

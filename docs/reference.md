@@ -317,6 +317,7 @@ VM pool and writes a profile only after checks succeed.
 | `ip_local_port_range` | `null` | Preserve the current host ephemeral TCP range; explicit `[LOW, HIGH]` applies inclusive port bounds until reboot. Large-concurrency Cube command streams should use a reviewed wide range such as `[10000, 65535]`. |
 | `cube_proxy_connect_timeout_seconds` | `null` | Preserve Cube default; explicit 3–300 seconds bounds guest connection setup |
 | `cubelet_tap_init_num` | `2560` in new `host init` plans; `null` when omitted | Number of TAP devices to preallocate; 2560 covers 1280 Runtime/Tool pairs. Size for the planned live VM count. `null` preserves Cube's target; profile imports preserve saved settings. Changing the target requires host apply on an idle VM pool and may restart Cubelet/egress. Preparation increases service startup time. Use a new run ID; no image rebuild or retraining. This is a preallocation target, not a VM limit. |
+| `cubelet_numa_policy` | `local` in new plans; `null` when omitted | `local` sets an explicit local-allocation task policy for Cubelet and inherited VM processes, suppressing automatic NUMA fault migration while retaining VM cpusets, explicit borrowing/return and WARM placement. `default` restores kernel default task policy; `null` preserves the service setting. Requires Linux NUMA and systemd `NUMAPolicy` support. Host apply on an idle VM pool backs up its dedicated drop-in, restarts Cubelet/egress if needed and verifies the live process. New run ID required; no image rebuild/retraining. Record separately from the creation baseline. Other services and the global NUMA balancing switch are unchanged. |
 | `cubelet_tap_url` | `http://127.0.0.1:9998/v1/network/taps` | Read-only Cubelet inventory endpoint for preflight. Counts distinct Ready devices without an owner; changing this URL only selects the probe endpoint. |
 | `cube_api_nofile` | `65536` in new plans; `null` when omitted/imported without a value | Minimum descriptors per CubeAPI process. Requires installed systemd service and util-linux. Host apply uses the maintained NOFILE helper without restarting CubeAPI and preserves higher limits. `null` leaves configuration unchanged; readiness still checks the actual process. No image rebuild/retraining. |
 | `required_kernel` | `null` | Exact host kernel release required by check/apply/preflight when this plan is selected. Does not install or boot a kernel. |
@@ -829,14 +830,20 @@ sudo bash scripts/build-zstd-page-snapshot.sh /usr/local/bin/clawbox-zstd-page-s
 ```
 
 WARM and COLD use the same format and parameters. ClawBox restores Cube's native
-sparse files before resume or relocation, and does not compress external template
+sparse files before resume. WARM-to-COLD relocation decodes owned layers directly
+on COLD and publishes them through the native catalog before retiring WARM;
+it needs no WARM expansion reservation. Install the matching Cubelet with
+`scripts/install-incremental-cubesandbox.sh` on an idle host before running this
+version. The configured compression helper path is saved in each snapshot and
+must be executable by Cubelet. ClawBox does not compress external template
 layers or an inode with references outside the snapshot. Compression changes need
 a new run ID and fresh qualification, but no VM image rebuild or KB retraining.
 Allocated all-zero chunks count as `zstd_chunks`; `hole_chunks` counts skipped
 filesystem holes. Decompression still omits zero-page writes to retain sparsity.
 WARM allocated-byte savings are released tmpfs DRAM while parked;
-COLD allocated-byte savings are disk savings only. Pool admission remains charged
-at the conservative native allocation because restore temporarily recreates it.
+COLD allocated-byte savings are disk savings only. Pool admission reserves the
+conservative native allocation, then charges committed compressed allocation;
+WARM restore separately reserves the additional raw expansion space.
 
 ## Prediction and evidence
 
@@ -933,11 +940,13 @@ Fields below are under baseline `execution` except the rows explicitly prefixed
 | `pypi_cache_index_url` | `null` | Explicit Tool-only `http://host:port/.../+simple/` pip index, with either internet policy. Requires a reachable cache; change requires a new run ID, no image rebuild. |
 | `cube_request_timeout_seconds` | 130 | Per-request Cube HTTP deadline and total retry budget for an idempotent sandbox resume, seconds. A new run ID is required; no host apply, image rebuild or retraining. |
 | `policy_progress_timeout_seconds` | 30 | Total deadline in seconds for each Tool start/end acknowledgement; at most three idempotent notification attempts share it. Commands are never retried and policy rejection remains fatal. Requires the matching Runtime shim and Tool bridge images; a changed value needs a new run ID. |
+| `policy_forecast_workers` | 16 | Positive number of host threads for admission ETA snapshots, isolated from Tool acknowledgements. At capacity, return an unavailable ETA (`forecast_capacity_busy`) immediately without queuing stale predictions. Does not limit command admission or execution. Changing it needs a new run ID, but no host apply, image rebuild or retraining. |
+| `policy_http_loop` | `auto` | `auto` uses uvloop on Linux and asyncio elsewhere; `asyncio`/`uvloop` explicitly select the host policy HTTP event loop. Linux uvloop is a host package dependency; missing dependencies fail with an installation remedy. The resolved loop is saved in host-knowledge evidence. Changes require a new run ID and updated host Python dependencies, without host apply, VM image rebuild or retraining. |
 | `cube_create_capacity_retry_seconds` | 60 | Retry window for definite Cube `130597` rejection; 0 disables retries |
 | `worker_thread_switch_interval_seconds` | 0.001 | Python handoff interval, `(0,0.1]` seconds |
 | `worker_cyclic_gc_enabled` | false | Experiment worker and KB owners: defer automatic cyclic garbage collection until the worker finishes. Reference-counted objects are still released immediately; unreachable cycles may use extra host memory during the run. Set true to use Python's automatic cyclic collector. Changes require a new run ID, but no host apply, image rebuild, retraining, or repeated template qualification. |
 | `randomized_order`, `random_seed` | `true`, 0 | Arm-order randomization and reproducible seed |
-| `arm_timeout_seconds` | 3600 | Arm execution deadline, seconds |
+| `arm_timeout_seconds` | 3600 | Arm execution deadline, seconds. Tool admission HTTP waits use at least this duration plus 60 seconds (minimum 3600), so policy queueing cannot hit a shorter transport deadline. An explicit Tool placement study control timeout retains precedence. Changing this field requires a new run ID. |
 | `arm_finalization_timeout_seconds` | 300 | Additional supervisor allowance for cleanup/results, seconds. Failed-session cleanup cancels pending model responses/replay waits and preserves their error records. |
 | `command_timeout_seconds` | 300 | Tool command deadline, seconds. Each admitted invocation uses a fresh SSH connection so earlier calls cannot consume its connection lifetime. Changing the deadline requires a new run ID, not an image rebuild. |
 | `replay_tool_timeout_multiplier` | 1.0 | Unitless multiplier, 1.0–100.0, applied only to recorded replay Tool deadlines after admission. Fast commands do not wait longer; only expiry is extended. Use a new run ID after changing it. |
@@ -947,10 +956,13 @@ Fields below are under baseline `execution` except the rows explicitly prefixed
 | `submission.poisson_arrival_window_fraction` | 2.0 | Expected window divided by median scaled trace duration |
 | `submission.poisson_arrival_window_seconds` | `null` | Positive explicit expected window in seconds; overrides the fraction without reading recorded durations. A single arrival group starts at zero without duration inputs. |
 | `submission.session_arrival_offsets_seconds` | `null` | Explicit nondecreasing finite offsets, in seconds from arm start; one per offered session, with exactly one concurrency level. Overrides generated arrival times. Grouped rollouts of the same case must have identical offsets. Preserve each LS case's offset when removing BE for a no-BE reference. Changing offsets requires a new run ID; no host apply, image rebuild, or retraining. |
-| `control_timing_details` | `false` | Enable nested control spans, GC tracing, raw lifecycle dumps, duplicate payloads, and Runtime working-KB exports |
+| `control_timing_details` | `false` | Enable nested control spans, GC tracing, raw lifecycle dumps, duplicate payloads, and Runtime working-KB exports. Compact `policy_http_timing` events and ToolBridge `progress_timings` remain enabled independently: durations/offsets are in seconds, wall-clock stamps in Unix nanoseconds. Host timing covers body reception, callback queue/body and response readiness; guest timing covers each connection/write/first-byte/total attempt. Guest timings require an updated Tool image and new run ID; host timings require updated worker code and a new run ID. No host apply or retraining. |
 | `guest_collector_drain_ms` | 1 | Nonnegative integer milliseconds to wait after a Tool command exits before requesting collector finalization. Positive values, including `1`, work with existing ToolBridge binaries supporting `CLAWBOX_GUEST_COLLECTOR_DRAIN_MS`, without rebuilding templates. `0` requires `collector_drain_zero: true` in ToolBridge's `--self-test`; rebuild the selected Tool image if that capability is absent, or use `1`. Any wait inside the installed collector remains. Applied at creation and restart. Use a new run ID and qualify the selected value. No host apply or retraining is required. Tool concurrency and telemetry validation are unchanged. |
 | `runtime_trace_content_retention` | `failures` | `failures` keeps structured trace identities and measurements, failed/timeout Tool output, and content needed for replay completeness, but omits raw hook payloads, LLM messages/model bodies, and successful Tool output. `all` restores those bodies with the 64 MiB full-audit limits. Use a new run ID; no host apply, image rebuild, or retraining is required unless the packaged ClawTune source itself changed. |
 | `runtime_log_retention` | `failures` | On successful sessions, keep only whitelisted `host_kb_client_prediction` records in `sidecar-client-timing.jsonl`; omit full Agent stderr, sidecar, policy-SSH, gateway, and model-relay logs. Agent failure, replay invalidity, or any failed Tool call retains full Runtime logs. `all` retains them for every session. |
+| `runtime_trace_flush_span_start` | `false` | Boolean. The OpenClaw plugin appends the same trace records and drains its write queue at agent/session end. `true` additionally calls `fsync` on trace metadata and every span start for host-crash durability; this can build an I/O backlog that delays final response. Independent of trace content/log retention. Requires a new run ID, without host apply, image rebuild, or retraining. |
+| `runtime_fast_module_resolution` | `true` | Boolean. Cache module-format resolution for regular direct `dist/*.js` chunks of the immutable installed OpenClaw module package; other imports and package layouts retain Node resolution. Requires `module.registerHooks` (supported Runtime: Node 22.23.2). `false` disables the shortcut for comparison. Requires a new run ID, without host apply, image rebuild, or retraining. |
+| `runtime_node_compile_cache` | `false` | Boolean. Whether the Runtime agent uses Node's on-disk module compile cache. Disabled by default because each fresh session VM launches one agent and cannot reuse the cache it generates. Set `true` for cache comparisons or a Runtime template with a prepared compatible cache; the prepared cache requires an image/template refresh. Changing only this field requires a new run ID, without host apply, image rebuild, or retraining. |
 | `retain_standalone_pmu_artifacts` | `false` | Do not write duplicate `pmu-profile-*.json` files. PMU profiles remain embedded in required cgroup-resource evidence. Set `true` only for compatibility or a directed PMU audit. |
 | `retain_tool_resource_timelines` | `false` | Omit per-poll Tool resource timelines after online observation/label construction. CPU and memory peaks, baseline/delta, PMU, sample count/quality, coverage, and execution identity remain. Set `true` only when raw points must be audited or labels must later be reconstructed from archived artifacts. |
 | `prediction_record_detail` | `compact` | `compact` retains prediction point values, source/fallback, reservation, actual/error/coverage, telemetry validity, identities, and hashes of the omitted full model structures. `all` retains repeated backend models and Runtime metadata. |
@@ -984,6 +996,56 @@ only for failed sessions or `runtime_log_retention: all`. Durations use seconds
 and include the client request/response path; see [results](results.md) for scope.
 This launcher instrumentation needs a new run to collect data, with no host
 apply, image rebuild, or retraining.
+
+The host HTTP ledger separates `callback_queue_seconds` (executor waiting)
+from `callback_seconds` (callback execution, including locks and policy waits).
+Both are included in `latency_seconds`. The Runtime `policy-ssh.jsonl` records
+`bootstrap_seconds` from Python module initialization through shim entry,
+`ssh_reaped_at` as Unix seconds, and `completion_post_seconds` for the complete
+HTTP exchange including retries. Interpreter startup is outside the bootstrap
+measurement. These fields require a new run, without host apply or image rebuild.
+
+The Runtime image patch batches remote filesystem `stat` into an existence and
+canonical-path request, followed by a combined hardlink-count and attribute
+request. The local mount-boundary check runs between them. Existing files use
+two SSH calls (previously four); missing files still use one. The Read tool
+reuses content between MIME detection and result construction within one
+invocation only. For a mount root directly under `/` (for example `/testbed`),
+an ordinary Read uses one remote call instead of six: the pinned read opens
+each path component without following symlinks and checks the opened file's
+type and hardlink count. Nested mount roots retain the canonical-path check
+and use three calls. Failed filesystem reads retain the original access
+checks; cancellation, policy rejection, timeout and transport errors propagate
+without another call. Concurrent and subsequent Read invocations read independently. These automatic
+optimizations have no configuration switch. They require a refreshed
+Runtime image/template, qualification, and a new run ID; no Tool image rebuild,
+host apply, or retraining is needed.
+
+Compact `policy_http_timing` also covers KB preview, prediction and observation.
+`knowledge_seconds` measures the awaited KB round trip (including a claim on
+admission), even on failure; it is part of request latency. Host-KB operation
+journals partition `owner_queue.seconds` into `parent_outbox_seconds` (enqueue
+to sender), `ipc_seconds` (serialization, transfer and receiver scheduling),
+`child_inbox_seconds` (receipt to first dequeue), and `session_serial_seconds`
+(first dequeue to execution, including any same-session commit wait). These
+durations use host monotonic seconds, exclude prediction computation and sum
+to the queue total. `request_operation` and owner-local `request_sequence`
+identify the queued operation. They are always recorded with updated host code
+and a new run ID; no host apply, image rebuild or retraining is required.
+
+Host knowledge updates share identical coverage and parent-search results across
+resource targets for that update only. Target statistics, node membership and
+ordering, and committed generations are unchanged. This automatic optimization
+requires updated host source and a new run ID, not a seed rebuild or retraining.
+
+Native plugin `completion_duration_ns` includes scope lookup, completion report,
+and telemetry lookup time, including failed requests. Host bridge executions
+(`executionBackend: hook-only`, `sandboxExecEnvelope: true`) omit the two local
+lookups and retain the completion report and exact execution ID; their Tool
+measurements come from the host. ClawTune skips its 750 ms scope grace period
+only for execution IDs absent from its local registry. These fixes require
+current ClawBox and ClawTune sources, a refreshed Runtime image/template, and
+a new run ID; no Tool image rebuild, host apply, or retraining is needed.
 
 ## Inference and measurement
 
@@ -1029,11 +1091,12 @@ uses ordinary corpus smokes without its formal fixed slots.
 | `serving_sim_catalog_manifest` | Required for `serving_sim` | Absolute path to the version-2 CPU `manifest.json` produced by `prepare-serving-sim`; set workload `tasks.input` to its `workload.json` and clear `tasks.cases`. CPU runtime does not read replay/catalog files. The simulator must serve the matching `catalog.json` and `traces/`. |
 | `serving_sim_topology_digest` | Unset | Expected `topology_digest` returned by the ClawBox adapter's `/v1/clawbox/simulator/info`. Set this to reject a changed topology during matched comparisons; when unset, the actual digest is recorded without an equality requirement. |
 | `serving_sim_diagnostic_interval_seconds` | 1.0 seconds | Positive finite interval for client process/FD/event-loop samples, and managed server samples. Request diagnostics retain stages and exception chains without extra prompt/response copies. |
-| `serving_sim_diagnostic_detail` | `full` | `compact` omits verbose native signal payloads and repeated full pool snapshots/cost provenance. With GPU-aware reclaim, it retains phase changes, reclaim-threshold crossings, actions and at most one repeated queued summary per second across the coordinator; suppressed counts are retained in aggregate result metrics. Every signal still updates the live estimate and policy state. Request stages, errors and lifecycle events remain recorded. Diagnostics are buffered, flushed at process samples/errors and closed normally. Use a new run ID when changing this field. |
+| `serving_sim_diagnostic_detail` | `full` | `compact` omits verbose native signal payloads and repeated full pool snapshots/cost provenance. With GPU-aware reclaim, it retains phase changes, reclaim-threshold crossings, actions and at most one repeated queued summary per second across the coordinator; suppressed counts are retained in aggregate result metrics. Native and forecast phases are tracked independently, so alternating message types alone do not count as transitions. `gpu_signal_metrics.pressure_rechecks` and `progress_notifications` count pressure callbacks requested and shared-condition notifications. Every signal still updates the live estimate and policy state. Request stages, errors and lifecycle events remain recorded. Diagnostics are buffered, flushed at process samples/errors and closed normally. Use a new run ID when changing this field. |
 | `serving_sim_keepalive_expiry_seconds` | 2.0 seconds | Idle HTTP connection reuse lifetime; nonnegative and finite, 0 disables idle reuse. Keep below the server's idle timeout (Uvicorn default: 5 seconds) to avoid racing server-side close. Active model/signal streams are unaffected; failed model requests are not automatically resubmitted. |
 | `serving_sim_launch` | Required for `serving_sim` | Managed local simulator configuration below. Qualification and each formal arm launch a fresh service; success, failure and timeout all finalize it. The experiment workflow does not support omitting launch settings for an externally managed service. All `serving_sim_*` keys require the simulator backend. |
 | `runtime_startup_timeout_seconds` | 60 | Integer 1–3600; Runtime setup and sidecar readiness deadline |
-| `runtime_completion_watch_seconds` | 10 | 1–60 seconds per completion notification wait; events wake it immediately |
+| `runtime_completion_watch_seconds` | 10 | Integer 1–60 seconds. With Runtime completion notifications, the interval between exit-file checks when no usable wakeup arrives. With notifications disabled, bounds each directory-watch attempt. A delivered wakeup is checked immediately. Requires a new run ID; no host apply, image rebuild or retraining. |
+| `runtime_completion_notifications` | `true` | For snapshot-enabled OpenClaw Runtime VMs, send an authenticated wakeup after the exit file is written, replacing repeated directory-watch connections with local waits and bounded file reconciliation. The exit file and task validator remain authoritative. `false` selects directory watching for comparison. Requires updated host code and a new run ID; the helper is installed during Runtime setup, so no image rebuild, host apply or retraining is needed. `runtime_completion_wait` events record notification reception, file-check count and wait seconds. |
 | `openclaw_bin` | `openclaw` | Guest executable |
 | `openclaw_exec_yield_ms` | Unset | Optional integer from 10 to 120000 milliseconds for background-capable OpenClaw exec calls. Synchronous replay recordings disable automatic background execution; see [workloads](workloads.md). |
 | `openclaw_tool_home` | `/root` | Absolute home directory inside the Tool VM. OpenClaw shell commands use it to find the image's Git and Conda configuration. Change for a custom Tool user; takes effect with a new run ID, without host apply or retraining. |

@@ -902,6 +902,7 @@ def test_snapshot_roundtrip_uses_configured_mechanism_and_cleans(
             self.snapshot_key = SnapshotKey('qualification', self.role, self.generation)
             self.pool.reserve(self.snapshot_key, 128)
             def spill(_manifest):
+                assert self.pool.accounted_bytes == self.pool.capacity_bytes
                 calls.append('spill')
                 if fail_spill:
                     raise LookupError('external Base unavailable')

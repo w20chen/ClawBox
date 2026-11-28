@@ -70,6 +70,26 @@ def test_pressure_shift_and_cold_history_are_unknown():
     assert f.snapshot('s', ['different'])['tools']['different']['remaining_ms'] is None
 
 
+def test_observation_snapshots_are_bounded_immutable_and_keep_pre_start_history():
+    f, now, _, _ = setup_forecaster()
+    begin(f, 'tool')
+    item = f.pending[('s', 'tool')]
+    original = item.observations
+    assert len(original) == 1
+    for _ in range(40):
+        now[0] += 1
+        f._observe(item)
+    assert len(item.observations) == 32
+    assert len(original) == 1 and original[0][0] == 100.
+    assert item.observations[0][0] == 109.
+    before_start = item.observations
+    f.start('s', 'tool')
+    now[0] += 1
+    f._observe(item)
+    assert f.history[-1][1] == before_start
+    assert item.observations == before_start
+
+
 def test_wait_estimator_distinguishes_short_and_long_queues():
     f, now, load, _ = setup_forecaster()
     for depth in (1, 4, 12):

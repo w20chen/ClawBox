@@ -27,6 +27,50 @@ def compile_pair(b, w):
     return compile_configuration(BaselineConfig.model_validate(b), WorkloadConfig.model_validate(w))
 
 
+@pytest.mark.parametrize('enabled', [False, True])
+@pytest.mark.parametrize('field,default', [('runtime_trace_flush_span_start', False), ('runtime_fast_module_resolution', True), ('runtime_node_compile_cache', False)])
+def test_runtime_setting_survives_freeze_and_qualification(tmp_path, enabled, field, default):
+    b, w = documents()
+    assert getattr(compile_pair(b, w).execution, field) is default
+    b.setdefault('execution', {})[field] = enabled
+    path = tmp_path / 'experiment.yaml'
+    path.write_text(dump_experiment(compile_pair(b, w)), encoding='utf-8')
+    frozen = load_experiment(path)
+    assert getattr(expand_matrix(frozen)[0].execution, field) is enabled
+    assert getattr(qualification_spec(frozen).execution, field) is enabled
+
+
+@pytest.mark.parametrize('enabled', ['false', 0, None])
+@pytest.mark.parametrize('field', ['runtime_trace_flush_span_start', 'runtime_fast_module_resolution', 'runtime_node_compile_cache'])
+def test_runtime_setting_requires_boolean(enabled, field):
+    b, w = documents()
+    b.setdefault('execution', {})[field] = enabled
+    with pytest.raises(ValueError, match=field):
+        compile_pair(b, w)
+
+
+@pytest.mark.parametrize('loop', ['auto', 'asyncio', 'uvloop'])
+def test_policy_http_loop_survives_freeze_and_qualification(tmp_path, loop):
+    b, w = documents()
+    b.setdefault('execution', {})['policy_http_loop'] = loop
+    path = tmp_path / 'experiment.yaml'
+    path.write_text(dump_experiment(compile_pair(b, w)), encoding='utf-8')
+    frozen = load_experiment(path)
+    assert expand_matrix(frozen)[0].execution.policy_http_loop == loop
+    assert qualification_spec(frozen).execution.policy_http_loop == loop
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_runtime_completion_notifications_survive_freeze_and_qualification(tmp_path, enabled):
+    b, w = documents()
+    b['inference'].setdefault('configuration', {})['runtime_completion_notifications'] = enabled
+    path = tmp_path / 'experiment.yaml'
+    path.write_text(dump_experiment(compile_pair(b, w)), encoding='utf-8')
+    frozen = load_experiment(path)
+    assert expand_matrix(frozen)[0].inference.configuration['runtime_completion_notifications'] is enabled
+    assert qualification_spec(frozen).inference.configuration['runtime_completion_notifications'] is enabled
+
+
 @pytest.mark.parametrize('delay', [0, 1, 10, 50])
 def test_guest_collector_delay_survives_resolve_freeze_and_qualification(tmp_path, delay):
     b, w = documents()

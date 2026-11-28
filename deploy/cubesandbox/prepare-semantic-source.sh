@@ -45,6 +45,8 @@ PEER_DOMAIN_PATCH_FILE=$SCRIPT_DIR/peer-local-storage-domain.patch
 CROSS_TIER_PATCH_FILE=$SCRIPT_DIR/cross-tier-managed-lineage.patch
 LIFECYCLE_IDENTITY_PATCH_FILE=$SCRIPT_DIR/lifecycle-identity-query.patch
 BIDIRECTIONAL_RELOCATION_PATCH_FILE=$SCRIPT_DIR/bidirectional-snapshot-relocation.patch
+PAUSED_DISPATCH_PATCH_FILE=$SCRIPT_DIR/paused-snapshot-dispatch.patch
+COMPRESSED_RELOCATION_PATCH_FILE=$SCRIPT_DIR/compressed-cold-relocation.patch
 SOURCE_DIR=${CUBE_SOURCE_DIR:-$SCRIPT_DIR/../../.cubesandbox}
 PATCHSET_STAMP=$SOURCE_DIR/.clawbox-patchset.sha256
 PATCHSET_PENDING=$SOURCE_DIR/.clawbox-patchset.pending
@@ -82,6 +84,8 @@ PATCH_FILES=(
   "$CROSS_TIER_PATCH_FILE"
   "$LIFECYCLE_IDENTITY_PATCH_FILE"
   "$BIDIRECTIONAL_RELOCATION_PATCH_FILE"
+  "$PAUSED_DISPATCH_PATCH_FILE"
+  "$COMPRESSED_RELOCATION_PATCH_FILE"
 )
 for patch_file in "${PATCH_FILES[@]}"; do
   [[ -f "$patch_file" ]] || { echo "missing CubeSandbox patch: $patch_file" >&2; exit 1; }
@@ -112,9 +116,11 @@ require_current_patchset() {
 # interrupted.
 if [[ -d "$SOURCE_DIR/.git" ]]; then
   if [[ -f "$PATCHSET_STAMP" ]] && [[ "$(cat "$PATCHSET_STAMP")" == "$PATCHSET_ID" ]]; then
-    git -C "$SOURCE_DIR" apply --reverse --check "$CROSS_TIER_PATCH_FILE"
+    # The final compression patch overlaps cross-tier/bidirectional relocation.
+    # The matching complete stamp plus final reverse check owns that sequence.
+    git -C "$SOURCE_DIR" apply --reverse --check "$COMPRESSED_RELOCATION_PATCH_FILE"
     git -C "$SOURCE_DIR" apply --reverse --check "$LIFECYCLE_IDENTITY_PATCH_FILE"
-    git -C "$SOURCE_DIR" apply --reverse --check "$BIDIRECTIONAL_RELOCATION_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply --reverse --check "$PAUSED_DISPATCH_PATCH_FILE"
     git -C "$SOURCE_DIR" diff --check
     echo "standalone patch set already prepared: $SOURCE_DIR"
     exit 0
@@ -124,6 +130,14 @@ if [[ -d "$SOURCE_DIR/.git" ]]; then
     if ! git -C "$SOURCE_DIR" apply --reverse --check "$LIFECYCLE_IDENTITY_PATCH_FILE" >/dev/null 2>&1; then
       git -C "$SOURCE_DIR" apply --check "$LIFECYCLE_IDENTITY_PATCH_FILE"
       git -C "$SOURCE_DIR" apply "$LIFECYCLE_IDENTITY_PATCH_FILE"
+    fi
+    if ! git -C "$SOURCE_DIR" apply --reverse --check "$PAUSED_DISPATCH_PATCH_FILE" >/dev/null 2>&1; then
+      git -C "$SOURCE_DIR" apply --check "$PAUSED_DISPATCH_PATCH_FILE"
+      git -C "$SOURCE_DIR" apply "$PAUSED_DISPATCH_PATCH_FILE"
+    fi
+    if ! git -C "$SOURCE_DIR" apply --reverse --check "$COMPRESSED_RELOCATION_PATCH_FILE" >/dev/null 2>&1; then
+      git -C "$SOURCE_DIR" apply --check "$COMPRESSED_RELOCATION_PATCH_FILE"
+      git -C "$SOURCE_DIR" apply "$COMPRESSED_RELOCATION_PATCH_FILE"
     fi
     git -C "$SOURCE_DIR" diff --check
     printf '%s\n' "$PATCHSET_ID" > "$PATCHSET_STAMP"
@@ -218,6 +232,14 @@ apply_cross_tier_patch() {
   if ! git -C "$SOURCE_DIR" apply --reverse --check "$BIDIRECTIONAL_RELOCATION_PATCH_FILE" >/dev/null 2>&1; then
     git -C "$SOURCE_DIR" apply --check "$BIDIRECTIONAL_RELOCATION_PATCH_FILE"
     git -C "$SOURCE_DIR" apply "$BIDIRECTIONAL_RELOCATION_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$PAUSED_DISPATCH_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$PAUSED_DISPATCH_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$PAUSED_DISPATCH_PATCH_FILE"
+  fi
+  if ! git -C "$SOURCE_DIR" apply --reverse --check "$COMPRESSED_RELOCATION_PATCH_FILE" >/dev/null 2>&1; then
+    git -C "$SOURCE_DIR" apply --check "$COMPRESSED_RELOCATION_PATCH_FILE"
+    git -C "$SOURCE_DIR" apply "$COMPRESSED_RELOCATION_PATCH_FILE"
   fi
 }
 

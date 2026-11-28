@@ -2133,7 +2133,7 @@ def test_compressed_restore_failure_after_expansion_keeps_raw_charged(
     assert pool.accounted_bytes == 0
 
 
-def test_compressed_spill_reserves_raw_then_retires_warm_manifest(
+def test_compressed_spill_from_full_warm_does_not_reserve_raw(
     tmp_path, monkeypatch,
 ) -> None:
     import clawbox.cube.snapshot as snapshot_module
@@ -2161,8 +2161,7 @@ def test_compressed_spill_reserves_raw_then_retires_warm_manifest(
         }
 
     def decompress(_path, *, binary):
-        assert pool.expansion_reserved_bytes == 900
-        return {"wall_seconds": 0.1}
+        pytest.fail("spill must decode on COLD, never expand WARM")
 
     monkeypatch.setattr(compression_module, "compress_snapshot", compression)
     monkeypatch.setattr(compression_module, "decompress_snapshot", decompress)
@@ -2173,7 +2172,11 @@ def test_compressed_spill_reserves_raw_then_retires_warm_manifest(
 
     lifecycle.start()
     lifecycle.checkpoint_and_evict(tier=SnapshotTier.WARM)
-    spilled = pool.spill_for_admission(pool.capacity_bytes)
+    from clawbox.experiments.snapshot_pool import SnapshotKey
+    other = SnapshotKey("other-writer", "tool", 1)
+    pool.reserve(other, pool.capacity_bytes - pool.accounted_bytes)
+    assert pool.accounted_bytes == pool.capacity_bytes
+    spilled = pool.spill_for_admission(1)
 
     assert [item.key for item in spilled] == [lifecycle._snapshot_key] or (
         len(spilled) == 1 and spilled[0].generation == 1
@@ -2183,10 +2186,11 @@ def test_compressed_spill_reserves_raw_then_retires_warm_manifest(
     assert pool.expansion_reserved_bytes == 0
     event = next(item for item in lifecycle.timings if item["operation"] == "spill")
     assert event["snapshot_metrics"]["compression"]["baseline_allocated_bytes"] == 900
+    pool.abort(other)
     lifecycle.close()
 
 
-def test_compressed_spill_retry_reuses_already_expanded_raw(
+def test_compressed_spill_retry_keeps_original_compressed_charge(
     tmp_path, monkeypatch,
 ) -> None:
     import clawbox.cube.snapshot as snapshot_module
@@ -2218,8 +2222,7 @@ def test_compressed_spill_retry_reuses_already_expanded_raw(
     def decompress(_path, *, binary):
         nonlocal decompress_calls
         decompress_calls += 1
-        assert pool.expansion_reserved_bytes == 900
-        return {"wall_seconds": 0.1}
+        pytest.fail("spill must not expand on WARM")
 
     monkeypatch.setattr(compression_module, "decompress_snapshot", decompress)
     monkeypatch.setattr(
@@ -2243,15 +2246,15 @@ def test_compressed_spill_retry_reuses_already_expanded_raw(
         pool.spill_for_admission(pool.capacity_bytes)
 
     manifest = pool.manifest(lifecycle._snapshot_key)
-    assert manifest.expanded
-    assert manifest.allocated_bytes == 1024
-    assert manifest.expansion_allocated_bytes == 0
+    assert not manifest.expanded
+    assert manifest.allocated_bytes == 144
+    assert manifest.expansion_allocated_bytes == 900
     assert pool.expansion_reserved_bytes == 0
     assert lifecycle.state.value == "swapped"
 
     spilled = pool.spill_for_admission(pool.capacity_bytes)
     assert len(spilled) == 1
-    assert decompress_calls == 1
+    assert decompress_calls == 0
     assert relocate_calls == 2
     assert lifecycle.tier is SnapshotTier.COLD
     assert pool.committed_bytes == 0
@@ -2546,7 +2549,7 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
                           policy_control, runtime_executor, output_dir,
                           timeout_seconds, model_gateway, prediction_manifest=None,
                           resident_poll=None, checkpoint_relay=False, diagnostic_artifacts=False,
-                          resident_file_nonempty=None,
+                          resident_file_nonempty=None, resident_file_check=None, completion_wait=None,
                           startup_begin=None, startup_wait=None, startup_event=None,
                           cancelled=None):
         # Pair creation must release its own claim before the Agent runs,
@@ -2561,6 +2564,8 @@ def test_openclaw_snapshot_pauses_runtime_and_restores_it_before_model_response(
         assert tool_vm.create_kwargs["env_vars"]["CLAWBOX_GUEST_COLLECTOR_DRAIN_MS"] == "0"
         assert resident_poll is not None
         assert callable(resident_file_nonempty)
+        assert callable(resident_file_check)
+        assert callable(completion_wait)
         assert checkpoint_relay is True
         assert callable(startup_wait)
         assert callable(startup_begin)

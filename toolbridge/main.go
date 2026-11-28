@@ -28,42 +28,43 @@ import (
 const version = "0.1.0"
 
 type executionLog struct {
-	KBPostSeconds      float64        `json:"kb_post_seconds,omitempty"`
-	TelemetryEvidence  map[string]any `json:"telemetry_evidence,omitempty"`
-	KBStatus           string         `json:"kb_status,omitempty"`
-	KBGeneration       int64          `json:"kb_generation,omitempty"`
-	KBError            string         `json:"kb_error,omitempty"`
-	Timestamp          string         `json:"timestamp"`
-	CellID             string         `json:"cell_id"`
-	TaskID             string         `json:"task_id"`
-	ExecutionID        string         `json:"execution_id"`
-	ExecutionSource    string         `json:"execution_source"`
-	CommandSHA256      string         `json:"command_sha256"`
-	CommandBytes       int            `json:"command_bytes"`
-	EffectiveSHA256    string         `json:"effective_command_sha256"`
-	EffectiveBytes     int            `json:"effective_command_bytes"`
-	DurationMS         int64          `json:"duration_ms"`
-	ExitCode           int            `json:"exit_code"`
-	TimedOut           bool           `json:"timed_out"`
-	Cancelled          bool           `json:"cancelled"`
-	StdoutBytes        int64          `json:"stdout_bytes"`
-	StderrBytes        int64          `json:"stderr_bytes"`
-	OutputTruncated    bool           `json:"output_truncated"`
-	UserCPUMS          int64          `json:"user_cpu_ms"`
-	SystemCPUMS        int64          `json:"system_cpu_ms"`
-	MaxRSSKiB          int64          `json:"max_rss_kib"`
-	TelemetryState     string         `json:"telemetry_state"`
-	TelemetryError     string         `json:"telemetry_error,omitempty"`
-	TelemetryArtifact  string         `json:"telemetry_artifact,omitempty"`
-	TelemetryEligible  bool           `json:"telemetry_eligible_for_kb"`
-	TelemetryQuality   string         `json:"telemetry_quality,omitempty"`
-	TelemetryValidity  string         `json:"telemetry_collection_validity,omitempty"`
-	TelemetryCleanup   string         `json:"telemetry_cleanup,omitempty"`
-	TelemetryLossTotal int64          `json:"telemetry_loss_total"`
-	PMUState           string         `json:"pmu_state,omitempty"`
-	PMUQuality         string         `json:"pmu_quality,omitempty"`
-	PMUError           string         `json:"pmu_error,omitempty"`
-	PMUArtifact        string         `json:"pmu_artifact,omitempty"`
+	ProgressTimings    []progressTiming `json:"progress_timings,omitempty"`
+	KBPostSeconds      float64          `json:"kb_post_seconds,omitempty"`
+	TelemetryEvidence  map[string]any   `json:"telemetry_evidence,omitempty"`
+	KBStatus           string           `json:"kb_status,omitempty"`
+	KBGeneration       int64            `json:"kb_generation,omitempty"`
+	KBError            string           `json:"kb_error,omitempty"`
+	Timestamp          string           `json:"timestamp"`
+	CellID             string           `json:"cell_id"`
+	TaskID             string           `json:"task_id"`
+	ExecutionID        string           `json:"execution_id"`
+	ExecutionSource    string           `json:"execution_source"`
+	CommandSHA256      string           `json:"command_sha256"`
+	CommandBytes       int              `json:"command_bytes"`
+	EffectiveSHA256    string           `json:"effective_command_sha256"`
+	EffectiveBytes     int              `json:"effective_command_bytes"`
+	DurationMS         int64            `json:"duration_ms"`
+	ExitCode           int              `json:"exit_code"`
+	TimedOut           bool             `json:"timed_out"`
+	Cancelled          bool             `json:"cancelled"`
+	StdoutBytes        int64            `json:"stdout_bytes"`
+	StderrBytes        int64            `json:"stderr_bytes"`
+	OutputTruncated    bool             `json:"output_truncated"`
+	UserCPUMS          int64            `json:"user_cpu_ms"`
+	SystemCPUMS        int64            `json:"system_cpu_ms"`
+	MaxRSSKiB          int64            `json:"max_rss_kib"`
+	TelemetryState     string           `json:"telemetry_state"`
+	TelemetryError     string           `json:"telemetry_error,omitempty"`
+	TelemetryArtifact  string           `json:"telemetry_artifact,omitempty"`
+	TelemetryEligible  bool             `json:"telemetry_eligible_for_kb"`
+	TelemetryQuality   string           `json:"telemetry_quality,omitempty"`
+	TelemetryValidity  string           `json:"telemetry_collection_validity,omitempty"`
+	TelemetryCleanup   string           `json:"telemetry_cleanup,omitempty"`
+	TelemetryLossTotal int64            `json:"telemetry_loss_total"`
+	PMUState           string           `json:"pmu_state,omitempty"`
+	PMUQuality         string           `json:"pmu_quality,omitempty"`
+	PMUError           string           `json:"pmu_error,omitempty"`
+	PMUArtifact        string           `json:"pmu_artifact,omitempty"`
 }
 
 var executionLogMu sync.Mutex
@@ -618,6 +619,9 @@ func runCommand(channel ssh.Channel, rawCommand, workdir string, timeout time.Du
 	if progressError != "" {
 		record.TelemetryError = progressError
 		record.ExitCode = 125
+	}
+	if progress != nil {
+		record.ProgressTimings = progress.Timings
 	}
 	if cmd.Process == nil {
 		record.ExitCode = commandExitCode(err, record.TimedOut)

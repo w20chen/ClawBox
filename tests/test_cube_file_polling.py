@@ -109,6 +109,17 @@ def test_executor_file_poll_uses_restored_handle():
     assert calls[1] == (current[0], "/state/agent.exit", {"timeout_s": 10})
 
 
+def test_completion_hint_reconciliation_does_not_multiply_socket_timeouts(native_filesystem):
+    import httpx
+    calls = []
+    def stat(path, *, timeout):
+        calls.append((path, timeout))
+        raise httpx.ReadTimeout('read timed out')
+    sandbox = SimpleNamespace(files=SimpleNamespace(stat=stat))
+    assert not CubeSandboxClient.file_nonempty(sandbox, '/completion/agent.exit', timeout_s=2, retry=False)
+    assert calls == [('/completion/agent.exit', 2)]
+
+
 @pytest.mark.parametrize("sizes", [[2], [0, 2], [0, 0, 0, 2]])
 def test_completion_watch_handles_existing_file_subscribe_race_and_empty_create(
     native_filesystem, sizes,

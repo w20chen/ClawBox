@@ -74,6 +74,7 @@ class HostConfig(BaseModel):
     ip_local_port_range: list[int] | None = Field(default=None, min_length=2, max_length=2)
     cube_proxy_connect_timeout_seconds: int | None = Field(default=None, ge=3, le=300)
     cubelet_tap_init_num: int | None = Field(default=None, ge=1)
+    cubelet_numa_policy: Literal["default", "local"] | None = None
     cubelet_tap_url: str = 'http://127.0.0.1:9998/v1/network/taps'
     cube_api_nofile: int | None = Field(default=None, ge=1024)
     required_kernel: str | None = None
@@ -451,7 +452,7 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
     if not profile_path:
         values.update(compute_nodes=[HostComputeNode(node_id=f"node{i}", numa_node=i).model_dump() for i in (0, 1)],
                       warm_node=2, warm_root="/mnt/clawbox-pool", cubelet_tap_init_num=2560,
-                      cube_api_nofile=65536)
+                      cube_api_nofile=65536, cubelet_numa_policy="local")
     if detect:
         nodes = [n for n in inventory()['numa_nodes'] if n['cpus'] and n['total_mib'] >= 16 * 1024]
         if not nodes:
@@ -497,6 +498,8 @@ def init_config(path: Path, profile_path: Path | None = None, *, detect: bool = 
             values['cube_proxy_connect_timeout_seconds'] = profile['cube_proxy_connect_timeout_seconds']
         if profile.get('cubelet_tap_init_num') is not None:
             values['cubelet_tap_init_num'] = profile['cubelet_tap_init_num']
+        if profile.get('cubelet_numa_policy') is not None:
+            values['cubelet_numa_policy'] = profile['cubelet_numa_policy']
         if profile.get('cube_scheduler_overcommit') is not None:
             values['cube_scheduler_overcommit'] = profile['cube_scheduler_overcommit']
         if profile.get('cube_scheduler_vm_count_ratio') is not None:
@@ -594,6 +597,10 @@ def check(config: HostConfig) -> dict:
             'requested': config.cubelet_tap_init_num,
             'required_vms': 'runtime and tool VMs combined',
         }, 'Install CubeSandbox with a readable Cubelet config containing tap_init_num, or set cubelet_tap_init_num: null to leave it unchanged.')
+    if config.cubelet_numa_policy is not None:
+        from .numa_policy import state as numa_policy_state
+        probe('Cubelet NUMA policy', lambda: dict(numa_policy_state(), requested=config.cubelet_numa_policy),
+              'Install/start the Cubelet systemd service and allow sudo to read its numa_maps; host apply changes the policy on an idle VM pool.')
     if config.cube_scheduler_overcommit is not None:
         from .cube_capacity import scheduler_settings
         probe('Cube configured-VM overcommit', lambda: {
@@ -740,9 +747,13 @@ def apply(config: HostConfig, profile: Path) -> dict:
     if restart_cubemaster:
         lab.command('sudo', '-n', 'systemctl', 'restart', 'cube-sandbox-cubemaster', timeout=120)
     restart_cubelet = apply_cubelet_tap_pool(config)
+    from .numa_policy import configure as configure_numa_policy, verify as verify_numa_policy
+    restart_cubelet = configure_numa_policy(config.cubelet_numa_policy) or restart_cubelet
     if restart_cubelet:
         lab.command("sudo", "-n", "systemctl", "restart", "cube-sandbox-cubelet", timeout=120)
         lab.command("sudo", "-n", "systemctl", "restart", "cube-sandbox-cube-egress", timeout=120)
+    if config.cubelet_numa_policy is not None:
+        verify_numa_policy(config.cubelet_numa_policy)
     domains = [n.resolved().model_dump() for n in config.compute_nodes]
     local_gib = sum(n.memory_gib for n in config.compute_nodes) if domains else config.local_gib
     local_node = config.compute_nodes[0].numa_node if domains else config.local_node

@@ -55,7 +55,7 @@ def _owner(connection, options, scheduling):
         try:
             while True:
                 item = connection.recv()
-                inbox.put(('request', item))
+                inbox.put(('request', (*item, time.monotonic())))
                 if item[1] == 'close':
                     return
         except (EOFError, OSError):
@@ -65,7 +65,7 @@ def _owner(connection, options, scheduling):
     connection.send(('ready', manager.identity))
 
     def reply(job, value=None, error=None):
-        ident, operation, args, enqueued = job
+        ident, operation, args = job[:3]
         connection.send((ident, value, None if error is None else (type(error).__name__, str(error))))
         if args and operation not in {'summary', 'metrics', 'process_sample'}:
             session = args[0]
@@ -115,7 +115,9 @@ def _owner(connection, options, scheduling):
                 advance(job, transaction, started, cpu_used, future.exception())
                 continue
             job = item
-            ident, operation, args, enqueued = job
+            if kind == 'request':
+                job = (*job, time.monotonic())
+            ident, operation, args, enqueued, sent, received, dequeued = job
             if operation == 'close':
                 stopping = job
                 continue
@@ -125,8 +127,14 @@ def _owner(connection, options, scheduling):
                     pending[session].append(job)
                     continue
                 busy.add(session)
+            started = time.monotonic()
             manager.metrics.append(dict(operation='owner_queue', session_id=session,
-                seconds=time.monotonic()-enqueued, status='ok'))
+                request_operation=operation, request_sequence=ident,
+                started_monotonic=enqueued, seconds=started-enqueued, status='ok',
+                parent_outbox_seconds=sent-enqueued,
+                ipc_seconds=received-sent,
+                child_inbox_seconds=dequeued-received,
+                session_serial_seconds=started-dequeued))
             try:
                 if operation == 'metrics':
                     reply(job, list(manager.metrics))
@@ -183,7 +191,10 @@ class _Owner:
                 job = self.outbox.get()
                 if job is None:
                     return
-                self.connection.send(job)
+                # The send stamp precedes serialization/pipe transfer. The child
+                # stamps receipt and first dequeue, retaining both while a
+                # same-session transaction waits for its durable commit.
+                self.connection.send((*job, time.monotonic()))
                 if job[1] == 'close':
                     return
         except (EOFError, OSError):

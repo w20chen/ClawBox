@@ -952,7 +952,15 @@ class WarmSnapshotPool:
                     raise WarmAdmissionRejected(
                         "no strictly later-use WARM snapshots can cover the admission deficit"
                     )
-                raise WarmCapacityError("WARM capacity has no spillable LRU prefix")
+                raise WarmCapacityError(
+                    "WARM capacity has no spillable LRU prefix: "
+                    f"deficit_bytes={deficit}, reclaimable_bytes={reclaimed}, "
+                    f"candidates={len(candidates)}, "
+                    f"pinned={sum(item.pinned > 0 for item in self._manifests.values())}, "
+                    f"retained_by_vm={sum(item.retained_by_vm for item in self._manifests.values())}, "
+                    f"writer_reserved_bytes={sum(self._reservations.values())}, "
+                    f"expansion_reserved_bytes={sum(self._expansion_reservations.values())}"
+                )
             if (self.snapshot_aware and enforce_admission_policy
                     and candidate_retention_value_seconds <= sum(
                 item.retention_value_seconds for item in victims

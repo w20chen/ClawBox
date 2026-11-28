@@ -1188,7 +1188,6 @@ class CubeSandboxLifecycle:
             try:
                 if self.snapshot_compression == "zstd-page":
                     from .snapshot import read_snapshot_metadata
-                    from .snapshot_compression import decompress_snapshot
                     if manifest.expanded:
                         raw_metrics = read_snapshot_metadata(
                             manifest.path,
@@ -1198,26 +1197,9 @@ class CubeSandboxLifecycle:
                             self.snapshot_pool.validate_expanded(
                                 manifest.key, int(raw_metrics["allocated_bytes"]),
                             )
-                    else:
-                        if (self.snapshot_pool is not None
-                                and manifest.expansion_allocated_bytes > 0):
-                            runtime_extra = (
-                                manifest.owned_materialization_headroom_bytes
-                            )
-                            self.snapshot_pool.reserve_selected_expansion(
-                                manifest.key,
-                                manifest.expansion_allocated_bytes + runtime_extra,
-                            )
-                        decompress_snapshot(
-                            manifest.path, binary=self.snapshot_compression_binary,
-                        )
-                        if (self.snapshot_pool is not None
-                                and manifest.expansion_allocated_bytes > 0):
-                            raw_metrics = read_snapshot_metadata(
-                                manifest.path,
-                                require_lineage=self.snapshot_mechanism == "incremental-cow",
-                            )
-                            self._finish_pool_expansion(manifest.key, raw_metrics)
+                    # Native relocation decodes compressed owned layers on
+                    # COLD. Expanding the victim on full WARM would require the
+                    # very capacity this spill is supposed to reclaim.
                 with self._transfer("spill"):
                     self.client.relocate_snapshot(
                         self.sandbox, tier=SnapshotTier.COLD.value,
@@ -1227,7 +1209,8 @@ class CubeSandboxLifecycle:
                     )
                 if self.snapshot_compression == "zstd-page":
                     from .snapshot import read_snapshot_metadata
-                    from .snapshot_compression import compress_snapshot
+                    from .snapshot_compression import compress_snapshot, remove_compressed_snapshot
+                    remove_compressed_snapshot(manifest.path)
                     native_metrics = read_snapshot_metadata(
                         destination,
                         require_lineage=self.snapshot_mechanism == "incremental-cow",
@@ -1966,7 +1949,10 @@ class CubeSandboxLifecycle:
     def observe_borrow_candidate(self):
         """Keep checkpoint/cleanup from removing the VM during residency reads."""
         with self._lock:
-            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED}:
+            # Candidate lists are snapshots. A failed migration can quarantine
+            # this VM after enumeration; it is no longer eligible, just as
+            # when checkpoint or cleanup won the lock. Keep its reservation.
+            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED, SandboxState.UNKNOWN}:
                 return None
             if self._state is not SandboxState.RUNNING or self.sandbox_id is None:
                 raise LifecycleError("only a running sandbox has borrow-candidate residency")
@@ -1976,8 +1962,8 @@ class CubeSandboxLifecycle:
 
     def borrow_shared(self):
         with self._lock:
-            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED}:
-                return None  # a checkpoint/cleanup won the lifecycle lock
+            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED, SandboxState.UNKNOWN}:
+                return None  # checkpoint, cleanup or quarantine won the lock
             if self._state is not SandboxState.RUNNING or self.sandbox_id is None:
                 raise LifecycleError("only a running sandbox can borrow shared memory")
             if self.numa_borrower is None or self.configured_memory_bytes is None:
@@ -2004,8 +1990,8 @@ class CubeSandboxLifecycle:
 
     def return_local_memory(self):
         with self._lock:
-            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED}:
-                return None  # checkpoint/cleanup released the live borrower
+            if self._state in {SandboxState.SWAPPED, SandboxState.CLOSED, SandboxState.UNKNOWN}:
+                return None  # no verified live borrower; retain any reservation
             if self._state is not SandboxState.RUNNING or self.sandbox_id is None:
                 raise LifecycleError("only a running sandbox can return LOCAL memory")
             if self.numa_borrower is None:

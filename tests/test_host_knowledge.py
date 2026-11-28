@@ -137,3 +137,41 @@ def test_append_record_index_matches_full_index_and_keeps_old_generation():
     for features in [(), ('a',), ('a','b'), ('c',), ('missing',)]:
         assert current.supersets(features) == reference.supersets(features)
     assert original.supersets(()) == {0}
+
+
+def test_resource_geometry_reuse_preserves_targets_and_published_views(tmp_path, monkeypatch):
+    from clawbox.experiments.knowledge.incremental import _View
+
+    seed = seed_at(tmp_path)
+    cached, reference = seed.open(), seed.open()
+    extend = _View.extend
+
+    def uncached(self, *args, **kwargs):
+        kwargs['structural_cache'] = None
+        return extend(self, *args, **kwargs)
+
+    updates = [
+        observation(20, argv=('python', '-m', 'pytest', '-q', '-x', '-v', 'tests/new.py')),
+        observation(30, argv=('python', '-m', 'pytest', '-q', '-x', 'tests/other.py'),
+                    cpu_ns_cumulative=None, cpu_peak_cores=None, latency_ms=0.),
+        observation(40, argv=('python', '-m', 'pytest', '-q', '-v', 'tests/new.py'),
+                    memory_measurement='different_measurement', memory_total_peak_bytes=0),
+    ]
+    for row in updates:
+        previous = cached
+        before = {name: {fs: node.__dict__.copy() for fs, node in view.nodes.items()}
+                  for name, view in previous.maintenance.views.items()}
+        cached = cached.successor(None, [row])
+        with monkeypatch.context() as patch:
+            patch.setattr(_View, 'extend', uncached)
+            reference = reference.successor(None, [row])
+        assert cached.maintenance.views.keys() == reference.maintenance.views.keys()
+        for name, actual in cached.maintenance.views.items():
+            expected = reference.maintenance.views[name]
+            assert list(actual.nodes) == list(expected.nodes)
+            assert actual.parents == expected.parents
+            assert actual.std == expected.std
+            for fs in actual.nodes:
+                assert actual.nodes[fs].__dict__ == expected.nodes[fs].__dict__
+        for name, view in previous.maintenance.views.items():
+            assert {fs: node.__dict__ for fs, node in view.nodes.items()} == before[name]

@@ -22,6 +22,7 @@ from clawbox.experiments.openclaw_driver import (
     openclaw_real_ssh_path,
     OPENCLAW_SSH_RUNTIME_ROOT,
     OPENCLAW_AUTH_PRELOAD,
+    openclaw_auth_preload,
     native_tool_workspace_setup_command,
     native_ssh_route,
     native_ssh_target,
@@ -196,8 +197,9 @@ def test_policy_archive_omits_repeated_command_and_prediction_payloads() -> None
 
 @pytest.mark.parametrize("auth_saved", [True, False])
 @pytest.mark.parametrize("inherited_options", [None, "--no-warnings"])
+@pytest.mark.parametrize("fast_module_resolution", [False, True])
 def test_auth_preload_uses_exported_store_in_agent_process(
-    tmp_path, auth_saved, inherited_options,
+    tmp_path, auth_saved, inherited_options, fast_module_resolution,
 ):
     node = shutil.which("node")
     if node is None:
@@ -219,7 +221,7 @@ export async function upsertAuthProfileWithLock(value) {
     agent = package / "openclaw.mjs"
     agent.write_text("console.log(JSON.stringify({agentPid: process.pid}));")
     preload = tmp_path / "auth.mjs"
-    preload.write_text(OPENCLAW_AUTH_PRELOAD)
+    preload.write_text(openclaw_auth_preload(fast_module_resolution=fast_module_resolution))
     environment = dict(os.environ)
     environment.update({
         "NODE_OPTIONS": f'--import="{preload.as_uri()}"',
@@ -365,7 +367,10 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     result = run_openclaw(
         prompt="Create /workspace/result.txt", session_id="session-a",
         configuration={"base_url": "http://model.test/v1", "model": "test-model",
-                       "openclaw_exec_yield_ms": 120000, "repository": "repo-a"},
+                       "openclaw_exec_yield_ms": 120000, "repository": "repo-a",
+                       "runtime_trace_flush_span_start": diagnostic_artifacts,
+                       "runtime_node_compile_cache": diagnostic_artifacts,
+                       "runtime_fast_module_resolution": not diagnostic_artifacts},
         ssh=NativeSSHConfig(
             target="executor@2222-tool.cube.local:2222",
             identity_private_key="PRIVATE KEY\n",
@@ -384,6 +389,10 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     patch_command = next(command for command in commands if "set -eu; umask 077" in command)
     encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command).group(1)
     config = json.loads(base64.b64decode(encoded))
+    preloads = re.findall(r"printf %s ([A-Za-z0-9+/=]+) \|", patch_command)
+    assert base64.b64decode(preloads[1]).decode() == openclaw_auth_preload(
+        fast_module_resolution=not diagnostic_artifacts,
+    )
     sandbox = config["agents"]["defaults"]["sandbox"]
     assert sandbox["backend"] == "ssh"
     assert sandbox["ssh"]["target"] == "executor@2222-tool.cube.local:2222"
@@ -404,6 +413,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         "/opt/clawtune/packages/clawtune-plugin"
     ]
     clawtune = config["plugins"]["entries"]["clawtune"]["config"]
+    assert clawtune['trace']['flush_span_start'] is diagnostic_artifacts
     assert clawtune["failOpen"] is False
     assert clawtune["trace"]["redact_sensitive_data"] is False
     assert clawtune["trace"] | {"trace_dir": None} == {
@@ -414,7 +424,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
         "include_tool_outputs": True,
         "tool_output_retention": "failures",
         "redact_sensitive_data": False,
-        "flush_span_start": True,
+        "flush_span_start": diagnostic_artifacts,
         "max_messages_bytes": 131072,
         "max_string_bytes": 16384,
         "max_tool_output_bytes": 65536,
@@ -497,6 +507,10 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert "CLAWTUNE_RUNTIME_ID=session-a" in agent_command
     assert "CLAWTUNE_GATEWAY_ID=session-a" in agent_command
     assert "--import=/state/openclaw/session-a/bin/openclaw-auth.mjs" in agent_command
+    cache_setting = ('unset NODE_DISABLE_COMPILE_CACHE;' if diagnostic_artifacts
+                     else 'export NODE_DISABLE_COMPILE_CACHE=1;')
+    assert cache_setting in agent_command
+    assert agent_command.index('--disable-warning=ExperimentalWarning') < agent_command.index('CLAWBOX_OPENCLAW_NODE_OPTIONS_SET=')
     assert "OPENCLAW_STATE_DIR=/state/openclaw/session-a/.openclaw/.openclaw" in agent_command
     assert not any(" onboard " in command or "config patch" in command for command in commands)
     assert "--message 'Create /workspace/result.txt'" in agent_command
@@ -599,10 +613,11 @@ def test_openclaw_full_audit_or_failure_retains_runtime_logs(
     assert result["retained_full_runtime_logs"] is True
 
 
-@pytest.mark.parametrize("timeout_seconds", [60, None])
-@pytest.mark.parametrize("native_stat", [False, True])
+@pytest.mark.parametrize("timeout_seconds", [60, 21600, None])
+@pytest.mark.parametrize("placement_timeout", [None, 86400])
+@pytest.mark.parametrize("native_stat", [False, True, 'notification'])
 def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
-    monkeypatch, tmp_path: Path, timeout_seconds, native_stat,
+    monkeypatch, tmp_path: Path, timeout_seconds, placement_timeout, native_stat,
 ) -> None:
     commands: list[str] = []
     probes = []
@@ -610,7 +625,7 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
 
     def file_nonempty(path, timeout):
         probes.append((path, timeout))
-        return next(readiness)
+        return True if native_stat == 'notification' else next(readiness)
 
     monkeypatch.setattr("clawbox.experiments.openclaw_driver.time.sleep", lambda _: None)
 
@@ -632,7 +647,8 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
     monkeypatch.setenv("OPENCLAW_API_KEY", "secret")
     result = run_openclaw(
         prompt="Create /workspace/result.txt", session_id="session-a",
-        configuration={"base_url": "http://model.test/v1", "model": "test-model"},
+        configuration={"base_url": "http://model.test/v1", "model": "test-model",
+                       "tool_placement_control_timeout_seconds": placement_timeout},
         ssh=NativeSSHConfig(
             target="executor@192.0.2.20:2222",
             identity_private_key="PRIVATE KEY\n",
@@ -642,16 +658,26 @@ def test_openclaw_runner_detaches_agent_when_runtime_can_pause(
         policy_control=PolicySession(), runtime_executor=RuntimeExecutor(),
         output_dir=tmp_path, timeout_seconds=timeout_seconds,
         resident_poll=resident_poll,
-        resident_file_nonempty=file_nonempty if native_stat else None,
+        resident_file_nonempty=(lambda *_: pytest.fail('notification mode must not establish directory watches'))
+            if native_stat == 'notification' else file_nonempty if native_stat else None,
+        resident_file_check=file_nonempty if native_stat == 'notification' else None,
+        completion_wait=(lambda phase, _seconds: phase == 'agent') if native_stat == 'notification' else None,
     )
 
     launch = next(command for command in commands if "nohup /bin/sh" in command)
     assert "agent.exit" in launch
     assert "agent.pid" in launch
+    admission_timeout = placement_timeout or max(3600, (timeout_seconds or 0) + 60)
+    assert f"CLAWBOX_POLICY_ADMISSION_TIMEOUT_SECONDS={admission_timeout} " in launch
+    assert "CLAWBOX_TOOL_TIMEOUT_SECONDS=300 " in launch
     assert "--import=/state/openclaw/session-a/bin/openclaw-auth.mjs" in launch
     assert f"--timeout {timeout_seconds if timeout_seconds is not None else 0}" in launch
     assert result["stdout"] == '{"ok":true}\n'
-    if native_stat:
+    if native_stat == 'notification':
+        assert len(probes) == 1
+        assert 'runtime-complete.py agent' in launch
+        assert launch.index('completion/agent.exit') < launch.rindex('runtime-complete.py agent')
+    elif native_stat:
         assert probes == [("/state/openclaw/session-a/completion/agent.exit", 10)] * 3
         assert not any(item.startswith("POLL test -s ") for item in commands)
 

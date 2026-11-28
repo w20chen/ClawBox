@@ -31,6 +31,7 @@ class SessionLifecycle(str, Enum):
 class _Execution:
     request_blob: bytes
     command_sha256: str
+    forecasted: bool = False
     admission: dict[str, Any] | None = None
     admission_error: dict[str, str] | None = None
     completion: dict[str, Any] | None = None
@@ -62,6 +63,25 @@ class _Session:
     forecaster: Any = None
     logical_sessions: set[str] = field(default_factory=set)
     shared_runtime: Callable[[], None] | None = None
+    request_timing: Callable[[dict[str, Any]], None] | None = None
+    runtime_completed: set[str] = field(default_factory=set)
+    runtime_notifications: dict[str, threading.Event] = field(
+        default_factory=lambda: {phase: threading.Event() for phase in ('agent', 'subagents')})
+
+    def notify_runtime_completion(self, request: dict[str, Any]) -> dict:
+        if not isinstance(request, dict) or request.get('session_id') != self.session_id:
+            raise ValueError('wrong-session Runtime completion')
+        phase = request.get('phase')
+        if phase not in self.runtime_notifications:
+            raise ValueError('invalid Runtime completion phase')
+        with self.condition:
+            if self.lifecycle is SessionLifecycle.CLOSED:
+                raise RuntimeError('pair is no longer active')
+            duplicate = phase in self.runtime_completed
+            if not duplicate:
+                self.runtime_completed.add(phase)
+                self.runtime_notifications[phase].set()
+        return {'status': 'NOTIFIED', 'phase': phase, 'duplicate': duplicate}
 
     def register_logical_session(self, key: str) -> dict:
         with self.condition:
@@ -87,6 +107,7 @@ class _Session:
                 execution = _Execution(
                     request_blob=zlib.compress(json.dumps(request, separators=(',', ':')).encode(), level=1),
                     command_sha256=request['command_sha256'], admitting=True,
+                    forecasted=bool(request.get('prediction_receipt')),
                     admission_started_monotonic_s=time.monotonic(),
                 )
                 self.executions[execution_id] = execution
@@ -108,7 +129,7 @@ class _Session:
                 if response["decision"] != "ADMIT":
                     raise RuntimeError("admission callback must block or return ADMIT")
             except Exception as exc:
-                if self.forecaster is not None:
+                if self.forecaster is not None and execution.forecasted:
                     self.forecaster.finish(self.session_id, execution_id)
                 with self.condition:
                     execution.admission_error = {"type": type(exc).__name__, "message": str(exc)}
@@ -144,7 +165,7 @@ class _Session:
                     self.start(dict(request))
                 execution.started = True
                 execution.guest_finished = phase == 'end'
-                if self.forecaster is not None:
+                if self.forecaster is not None and execution.forecasted:
                     if phase == 'start':
                         self.forecaster.start(self.session_id, request['execution_id'])
                     else:
@@ -182,7 +203,7 @@ class _Session:
             # endpoint fields prove that completion followed process reap and
             # used the route admitted for this execution.
             execution.completion = {**request, **response}
-            if self.forecaster is not None:
+            if self.forecaster is not None and execution.forecasted:
                 self.forecaster.finish(self.session_id, execution_id)
             execution.completing = False
             execution.completion_completed_monotonic_s = time.monotonic()
@@ -218,7 +239,7 @@ class _Session:
         with self.condition:
             if self.executions.get(execution_id) is execution:
                 self.executions.pop(execution_id)
-                if self.forecaster is not None:
+                if self.forecaster is not None and execution.forecasted:
                     self.forecaster.finish(self.session_id, execution_id)
             execution.admitting = False
             self.condition.notify_all()
@@ -262,6 +283,13 @@ class PolicyControlSession:
         """Forget an already-failed session after its VMs are destroyed."""
         self._server.discard(self.token)
 
+    def wait_runtime_completion(self, phase: str, timeout: float) -> bool:
+        notification = self._state.runtime_notifications[phase]
+        if notification.wait(timeout):
+            notification.clear()
+            return True
+        return False
+
     def records(self) -> list[dict[str, Any]]:
         with self._state.condition:
             return [
@@ -298,7 +326,8 @@ class PolicyControlServer:
 
     def __init__(self, *, advertise_host: str, advertised_port: int,
                  bind_host: str = "0.0.0.0", bind_port: int = 18080,
-                 admission_workers: int = 1280) -> None:
+                 admission_workers: int = 1280, forecast_workers: int = 16,
+                 event_loop: str = 'auto') -> None:
         self.advertise_host = advertise_host
         self.advertised_port = advertised_port
         self.bind_host = bind_host
@@ -312,7 +341,8 @@ class PolicyControlServer:
         self.forecaster = AdmissionForecaster()
         from .policy_http import PolicyHTTPServer
         self.server = PolicyHTTPServer((bind_host, bind_port), self,
-                                       admission_workers=admission_workers)
+                                       admission_workers=admission_workers, forecast_workers=forecast_workers,
+                                       event_loop=event_loop)
         self.actual_port = int(self.server.server_address[1])
         if self.advertised_port == 0:
             self.advertised_port = self.actual_port
@@ -348,6 +378,7 @@ class PolicyControlServer:
                  abandon: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
                  start: Callable[[dict[str, Any]], None] | None = None,
                  shared_runtime: Callable[[], None] | None = None,
+                 request_timing: Callable[[dict[str, Any]], None] | None = None,
                  ) -> PolicyControlSession:
         if not _IDENTITY.fullmatch(session_id):
             raise ValueError("invalid session_id")
@@ -355,6 +386,7 @@ class PolicyControlServer:
         state = _Session(session_id, token, admit, complete, abandon, start)
         state.forecaster = self.forecaster
         state.shared_runtime = shared_runtime
+        state.request_timing = request_timing
         with self._lock:
             if not self._started:
                 raise RuntimeError("PolicyControlServer is not started")
@@ -366,13 +398,14 @@ class PolicyControlServer:
             raise RuntimeError('pair policy callbacks are not attached yet')
         return self.register(session_id, admit=pending, complete=pending)
 
-    def attach(self, session: PolicyControlSession, *, admit, complete, abandon=None, start=None, shared_runtime=None):
+    def attach(self, session: PolicyControlSession, *, admit, complete, abandon=None, start=None, shared_runtime=None, request_timing=None):
         state = self._lookup(session.token)
         if state is None:
             raise RuntimeError('reserved pair binding is no longer active')
         with state.condition:
             state.admit, state.complete, state.abandon, state.start = admit, complete, abandon, start
             state.shared_runtime = shared_runtime
+            state.request_timing = request_timing
         if len(state.logical_sessions) > 1 and shared_runtime is not None:
             shared_runtime()
         return session

@@ -1,0 +1,74 @@
+diff --git a/Cubelet/services/cubebox/update.go b/Cubelet/services/cubebox/update.go
+--- a/Cubelet/services/cubebox/update.go
++++ b/Cubelet/services/cubebox/update.go
+@@ -85,6 +85,12 @@
+ 		rsp.Ret.RetCode = errorcode.ErrorCode_Unknown
+ 	})
+ 
++	// Relocation operates on an immutable pause snapshot after the VM exits.
++	// Keep the lifecycle lock, but do not require a live sandbox registry entry.
++	if action == constants.UpdateActionRelocateSnapshot {
++		return s.relocatePauseSnapshot(ctx, req, rsp)
++	}
++
+ 	sb, err := s.cubeboxMgr.cubeboxManger.Get(ctx, req.SandboxID)
+ 	if err != nil {
+ 		if action == constants.UpdateActionResume {
+@@ -112,8 +118,6 @@
+ 		return s.updateWithPauseCow(ctx, req, sb)
+ 	case constants.UpdateActionNetwork:
+ 		return s.updateNetworkPolicy(ctx, req, sb, rsp)
+-	case constants.UpdateActionRelocateSnapshot:
+-		return s.relocatePauseSnapshot(ctx, req, rsp)
+ 	case constants.UpdateActionResume:
+ 		// Resume is Master Create(same sandboxID from pause snap), not Update(resume).
+ 		rsp.Ret.RetMsg = "pause resume is owned by CubeMaster Create; Update(resume) is not supported"
+diff --git a/Cubelet/services/cubebox/relocate_dispatch_test.go b/Cubelet/services/cubebox/relocate_dispatch_test.go
+new file mode 100644
+--- /dev/null
++++ b/Cubelet/services/cubebox/relocate_dispatch_test.go
+@@ -0,0 +1,44 @@
++// Copyright (c) 2026 Tencent Inc.
++// SPDX-License-Identifier: Apache-2.0
++package cubebox
++
++import (
++    "context"
++    "errors"
++    "strings"
++    "testing"
++
++    "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
++    "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
++    cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
++)
++
++type missingRelocationSandbox struct { fakeCubeboxAPI }
++func (m *missingRelocationSandbox) Get(context.Context, string) (*cubeboxstore.CubeBox, error) {
++    m.getCalls++
++    return nil, errors.New("key not found")
++}
++
++func TestRelocateSnapshotDoesNotRequireLiveSandbox(t *testing.T) {
++    s, _, _ := newDestroyLifecycleServiceForTest(nil)
++    manager := &missingRelocationSandbox{}
++    s.cubeboxMgr.cubeboxManger = manager
++    // A paused VM has left the live sandbox registry. The relocation request
++    // must reach its own validation/catalog even when live lookup would fail.
++    req := &cubebox.UpdateCubeSandboxRequest{SandboxID: "paused-vm", Annotations: map[string]string{
++        constants.MasterAnnotationsUpdateAction: constants.UpdateActionRelocateSnapshot,
++        "clawbox.snapshot.tier": "cold",
++        "clawbox.snapshot.memory.path": "relative-path",
++    }}
++    rsp, err := s.Update(context.Background(), req)
++    if err != nil || !strings.Contains(rsp.GetRet().GetRetMsg(), "must be absolute") {
++        t.Fatalf("relocation validation was not reached: response=%v error=%v", rsp, err)
++    }
++    if manager.getCalls != 0 { t.Fatalf("relocation performed %d live lookups", manager.getCalls) }
++    // Ordinary VM operations must retain their live-sandbox requirement.
++    req.Annotations[constants.MasterAnnotationsUpdateAction] = constants.UpdateActionPause
++    rsp, err = s.Update(context.Background(), req)
++    if err != nil || rsp.GetRet().GetRetMsg() != "key not found" || manager.getCalls != 1 {
++        t.Fatalf("pause lost live-sandbox validation: response=%v error=%v calls=%d", rsp, err, manager.getCalls)
++    }
++}

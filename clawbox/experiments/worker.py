@@ -1152,6 +1152,12 @@ class RuntimeStatusPoller:
         return self.executor.execute(command, timeout)
 
     def watch_file_nonempty(self, path: str, timeout: float) -> bool | None:
+        return self._observe_file(path, timeout, watch=True)
+
+    def check_file_nonempty(self, path: str, timeout: float) -> bool | None:
+        return self._observe_file(path, timeout, watch=False)
+
+    def _observe_file(self, path: str, timeout: float, *, watch: bool) -> bool | None:
         # Capture a resident generation, then release the lifecycle lock for
         # the whole watch. Holding it would prevent LLM delivery/checkpoint.
         with self.lifecycle_lock:
@@ -1159,8 +1165,11 @@ class RuntimeStatusPoller:
                 return None
             sandbox = self.lifecycle.sandbox
         try:
-            ready = self.executor.client.wait_file_nonempty(
+            observe = (self.executor.client.wait_file_nonempty if watch
+                       else self.executor.client.file_nonempty)
+            ready = observe(
                 sandbox, path, timeout_s=timeout,
+                **({} if watch else {'retry': False}),
             )
         except Exception:
             with self.lifecycle_lock:
@@ -2228,7 +2237,9 @@ class ExperimentWorker:
         policy_context = (
             PolicyControlServer(advertise_host=control_host, advertised_port=policy_port,
                                 bind_port=policy_port,
-                                admission_workers=max(64, max(arm.concurrency for arm in arms)))
+                                admission_workers=max(64, max(arm.concurrency for arm in arms)),
+                                forecast_workers=self.spec.execution.policy_forecast_workers,
+                                event_loop=self.spec.execution.policy_http_loop)
             if requires_control else nullcontext(None)
         )
         gateway_context = (
@@ -3325,6 +3336,7 @@ class ExperimentWorker:
                 'summary': self.host_knowledge.summary(),
                 'operations': self.host_knowledge.metrics,
                 'requests': self.policy_control.requests[self._kb_request_start:],
+                'policy_http_loop': self.policy_control.server.event_loop,
             })
         duration = time.monotonic() - started
         session_durations = [float(item.get("agent_jct_seconds", item["duration_seconds"]))
@@ -5520,6 +5532,7 @@ class ExperimentWorker:
                     complete=complete_openclaw_tool,
                     abandon=abandon_openclaw_tool,
                     start=record_tool_progress, shared_runtime=protect_shared_runtime,
+                    request_timing=events.write,
                 )
                 # The Tool VM is authoritative for mutable state. Mark the
                 # installed shared SSH runtime as initialized so OpenClaw does
@@ -5671,6 +5684,9 @@ class ExperimentWorker:
                                     arm.execution.runtime_trace_content_retention
                                 ),
                                 "runtime_log_retention": arm.execution.runtime_log_retention,
+                                "runtime_trace_flush_span_start": arm.execution.runtime_trace_flush_span_start,
+                                "runtime_fast_module_resolution": arm.execution.runtime_fast_module_resolution,
+                                "runtime_node_compile_cache": arm.execution.runtime_node_compile_cache,
                                 "retain_tool_resource_timelines": (
                                     arm.execution.retain_tool_resource_timelines
                                 ),
@@ -5692,6 +5708,8 @@ class ExperimentWorker:
                             **({"resident_wait": poll_resident_runtime.wait_for_file}
                                if not runtime_snapshot_enabled else {
                                    "resident_file_nonempty": poll_resident_runtime.watch_file_nonempty,
+                                   "resident_file_check": poll_resident_runtime.check_file_nonempty,
+                                   "completion_wait": policy_session.wait_runtime_completion,
                                }),
                         )
                     except BaseException:

@@ -419,6 +419,7 @@ def compress_snapshot(
         aggregate = _refresh_manifest_accounting(aggregate, 0)
         document = {
             "schema_version": 1,
+            "decompression_binary": str(Path(shutil.which(binary) or binary).resolve()),
             "snapshot_path": str(snapshot),
             "groups": records,
             "metrics": aggregate,
@@ -432,6 +433,7 @@ def compress_snapshot(
         )
         document = {
             "schema_version": 1,
+            "decompression_binary": str(Path(shutil.which(binary) or binary).resolve()),
             "snapshot_path": str(snapshot),
             "groups": records,
             "metrics": aggregate,

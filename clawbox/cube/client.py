@@ -698,7 +698,7 @@ class CubeSandboxClient:
         return "[Errno 99] Cannot assign requested address" in str(exc)
 
     @staticmethod
-    def file_nonempty(sandbox: Any, path: str, *, timeout_s: float) -> bool:
+    def file_nonempty(sandbox: Any, path: str, *, timeout_s: float, retry: bool = True) -> bool:
         """Probe completion through Cube's bounded native filesystem RPC."""
         from cubesandbox import FilesystemNotFoundError
 
@@ -713,6 +713,14 @@ class CubeSandboxClient:
             # existing but empty exit file is still being written by the Agent.
             return int(entry.get("size", 0)) > 0
 
+        if not retry:
+            import httpx
+            try:
+                return probe()
+            except (httpx.ReadTimeout, httpx.ConnectError):
+                # A completion hint is reconciled again on the next bounded
+                # wait. Never turn one idle check into eight socket deadlines.
+                return False
         # Match the former read-only command poll's bounded transport retries.
         return read_with_backoff(
             probe, label=f"stat {path}", attempts=8,

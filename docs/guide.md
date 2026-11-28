@@ -135,6 +135,27 @@ their settings; `null` leaves Cube's target unchanged. Apply a changed target
 on an idle host before launching a new run ID. No image rebuild or retraining
 is required.
 
+New host plans also propose `cubelet_numa_policy: local`. This sets systemd
+`NUMAPolicy=local` for Cubelet and its future VM processes. Allocations still
+follow each VM's cpuset; explicit borrow/return migrations and the WARM tmpfs
+policy remain effective. The explicit task policy prevents Linux automatic
+NUMA fault balancing from repeatedly migrating pages shared by many VMs.
+It leaves the host-wide NUMA balancing switch and unrelated services unchanged.
+For an existing host, add this field to a copy of its reviewed host plan, then:
+
+```bash
+bash scripts/clawbox experiment host check "$HOME/.config/clawbox/host.yaml"
+# Run only after the current experiment finishes and the VM pool is idle.
+bash scripts/clawbox experiment host apply "$HOME/.config/clawbox/host.yaml" --profile "$HOME/.config/clawbox/host.json"
+```
+
+Apply restarts Cubelet/egress when necessary and verifies the running Cubelet's
+policy. Launch with this host plan and a new run ID; record this setting as a
+host-policy change when comparing against the creation baseline. No template
+rebuild or retraining is needed. `default` restores the kernel default task
+policy; `null` leaves the service unchanged. Imported profiles retain their
+saved value. This requires systemd with `NUMAPolicy` support and Linux NUMA.
+
 For high-concurrency lifecycle runs, set
 `cube_master_db_timeout_seconds: 30` in the reviewed host plan when the
 CubeMaster journal shows MySQL read/write operations crossing its default
@@ -265,6 +286,10 @@ refreshes host state and runs real VM qualification. Use a new run ID and retain
 `environment.resources.snapshot_compression: zstd-page`. No guest rebuild,
 kernel change or predictor retraining is needed. This update does not enable
 crash rollback or peer storage; those require their matching API/Master setup.
+The matching Cubelet also decodes compressed WARM victims directly on COLD,
+so a full WARM pool can spill without first reserving raw expansion space.
+Keep the configured compression helper installed at its absolute path on the
+host; do not replace Cubelet while an experiment is running.
 
 ## 2. Run a smoke experiment
 
@@ -315,6 +340,12 @@ that did not execute a configured Runtime check.
 `launch` uses the existing qualification and worker path. It freezes the complete
 resolved settings under the run ID. Repeated launch of the same unchanged run
 returns its status or resumes it; changed settings require a new run ID.
+For long replay runs, set `execution.arm_timeout_seconds` to the intended overall
+deadline. Tool admission HTTP waits inherit that deadline with 60 seconds of
+transport allowance (minimum 3600 seconds); ordinary callbacks keep their existing
+timeout. `execution.command_timeout_seconds` still starts after admission and is
+not consumed by policy queueing. This requires a new run ID, without an image
+rebuild, host apply or retraining.
 
 To inspect every default or save a resolved snapshot without launching VMs:
 
@@ -712,6 +743,15 @@ growth between samples before reducing it further.
 Keep `execution.control_timing_details: false` for normal throughput runs.
 Required traces, errors, resource measurements, and compact timings remain
 enabled; expensive diagnostic detail is opt-in.
+For progress acknowledgement delays, join `policy_http_timing` events with the
+ToolBridge log's `progress_timings` by session/execution ID and phase. Host
+events cover admission, progress and completion boundaries, separating
+request-body reception, callback queueing, the full callback,
+and response readiness. Guest attempts record connection acquisition, request
+write, first response byte and total duration, including retries. These compact
+timings remain enabled without detailed tracing. Updated Tool images and a new
+run ID are needed for guest timings; host timings only need updated worker code
+and a new run ID. Neither requires retraining or host apply.
 
 To compare Tool collector finalization delays, set the baseline field
 `execution.guest_collector_drain_ms` to `1` (the default) or `50` (the former
@@ -948,6 +988,99 @@ the deadline retries notifications only. Changes to images, replay behavior or
 sampling settings require a new run ID and fresh qualification when requested
 by `launch`.
 
+Keep `execution.policy_http_loop: auto` for the supported Linux host: it uses
+uvloop to reduce policy HTTP socket handling and Python interpreter contention.
+Install the updated host Python dependencies before the next run; the Linux
+default requires uvloop. `asyncio` is available for a controlled comparison,
+and `auto` selects asyncio on other platforms. The resolved loop is recorded
+in host-knowledge evidence. This needs a new run ID, without host apply, VM
+image rebuild, or retraining.
+
+For snapshot-enabled Runtime VMs, keep
+`inference.configuration.runtime_completion_notifications: true` (default).
+The Runtime sends a completion wakeup through the same authenticated policy
+endpoint after writing its exit file. The worker waits locally and confirms
+the file before collecting results, instead of repeatedly opening directory
+notification streams. `runtime_completion_watch_seconds` (default 10, range
+1–60 seconds) bounds file reconciliation when a wakeup is lost or the Runtime
+changes residency. Cancellation is checked at least once per second between
+bounded file checks. Set notifications to `false` for a directory-watch
+comparison. These settings require a new run ID and updated host code, without
+host apply, image rebuild or retraining; the worker installs its notifier in
+the Runtime during setup. `runtime_completion_wait` records whether a wakeup
+was observed, how many file checks ran, and the wait duration. Completion
+wakeups do not release Tool reservations or determine task success.
+
+Admission ETA polling uses a separate host pool controlled by
+`execution.policy_forecast_workers` (default 16 threads, minimum 1). When all
+workers are busy, the host returns an unavailable ETA with reason
+`forecast_capacity_busy`; the next normal poll can retry. Tool start/end and
+completion acknowledgements do not queue behind these forecasts. This setting
+requires a new run ID, but no host apply, image rebuild or retraining.
+In the host request ledger, `callback_queue_seconds` measures executor waiting
+and `callback_seconds` measures callback execution, including its internal locks
+and policy waits. Both are parts of `latency_seconds`, not additional time;
+the latter still includes genuine admission waiting on the admission route.
+For knowledge delays, inspect the compact `policy_http_timing` events for
+`/v1/kb/preview`, `/v1/kb/predict` and `/v1/kb/observe`. Their `knowledge_seconds` includes
+request dispatch, owner work and return delivery; admission also records this
+field for its knowledge claim. In host-KB `operations/owner-*.jsonl`, each
+`owner_queue` row partitions waiting into `parent_outbox_seconds`, `ipc_seconds`,
+`child_inbox_seconds` and `session_serial_seconds`. These four parts sum to
+`seconds`; prediction computation follows them. Collecting these fields needs
+updated host code and a new run ID, without an image rebuild or host apply.
+
+Host knowledge learning reuses identical feature coverage and parent searches
+across resource targets within each update. It retains each target's measurements
+and predictions; existing seeds need no retraining. Deploy this improvement with
+updated host code and a new run ID, without changing templates or host settings.
+
+The Runtime launcher supplies OpenClaw's usual Node warning option before
+startup to avoid an extra CLI process restart. On Linux, the SSH shim waits
+for process-exit notifications instead of timed polling; command deadlines
+and cancellation still apply. Both changes ship with the host source and need
+only a new run ID, without rebuilding existing templates. In `policy-ssh.jsonl`,
+`bootstrap_seconds` covers Python module initialization through shim entry
+(not interpreter startup), and `completion_post_seconds` covers the completion
+HTTP request, including any retry. These are diagnostic portions of the
+existing end-to-end intervals, not extra time to add to the total.
+
+Runtime image builds batch OpenClaw's remote file attribute checks into two
+SSH calls instead of four for existing files. Each Read invocation also reuses
+its file content for MIME detection and the result. For a mount root directly
+under `/`, such as `/testbed`, the pinned read also performs the access checks,
+reducing an ordinary Read from six remote calls to one. Nested mount roots
+retain canonical-path validation and use three calls. Mount-boundary and hardlink checks still apply;
+file attributes and content are never reused across Read invocations. Deploy this change through
+the [Runtime refresh workflow](installation.md#refresh-the-runtime-predictor-and-kb),
+select the refreshed template, qualify it, and use a new run ID. No Tool image
+rebuild, host apply, or KB retraining is required.
+
+Keep `execution.runtime_trace_flush_span_start: false` (default) for normal
+performance runs. Native trace records are still appended and the plugin waits
+for all queued writes before closing at agent/session end. Set it to `true`
+only when each span start needs a host-crash durability barrier: it adds an
+`fsync` to metadata and every span start, which can accumulate I/O and delay
+agent completion at high concurrency. This setting does not change trace
+content or log retention. It needs a new run ID, without host apply, image
+rebuild, or retraining.
+
+Keep `execution.runtime_node_compile_cache: false` (default) for fresh session
+VMs. This avoids writing a Node module compile cache that the single agent
+process cannot reuse. Set it to `true` when comparing cache behavior or using
+a Runtime template with a prepared compatible cache. Changing the field needs
+a new run ID; it does not require host apply, an image rebuild or retraining.
+Preparing a cache inside a template does require a Runtime image refresh.
+
+Keep `execution.runtime_fast_module_resolution: true` (default) to avoid
+repeated parsing of OpenClaw's package exports while loading ordinary ESM
+chunks. This requires Node with `module.registerHooks` (the supported Runtime
+uses Node 22.23.2). Only regular `.js` files directly in the installed module
+package's `dist` directory use the shortcut; package imports, symlinks, nested
+packages and a separate `dist/package.json` use Node's normal resolution.
+Set `false` for a resolver comparison. Changes need a new run ID, without
+host apply, image rebuild, or retraining.
+
 For repeated package downloads, set `execution.apt_cache_proxy_url` and
 `execution.pypi_cache_index_url` to your reachable host caches. Explicit cache
 settings apply even with `sandbox.allow_internet_access: true`; other network
@@ -955,6 +1088,15 @@ access follows that policy. Omit the cache fields to use direct package access
 in open VMs. Verify an actual APT update/install and pip install before a large
 run. See [package network setup](installation.md#package-network-setup).
 Changing these fields requires a new run ID, but no image rebuild or retraining.
+
+The supported host Tool bridge reports execution measurements on the host.
+Its Runtime plugin keeps completion signals and execution IDs, but skips
+local execution-scope and telemetry queries. The matching ClawTune sidecar
+does not wait for a local launcher scope for an unregistered execution ID;
+registered local launches retain their scope grace period. Deploying these
+completion-path fixes requires refreshing the Runtime image/template from
+both current source trees and using a new run ID. No Tool image rebuild,
+host apply, or retraining is required. Keep an active run's templates frozen.
 
 For high-concurrency runs, leave `execution.worker_cyclic_gc_enabled: false`
 (the default) to defer host-worker cyclic garbage collection until execution
@@ -1556,6 +1698,14 @@ every request ID and submit/header/first-SSE/terminal/DONE times. Under GPU-awar
 reclaim, signal records keep every phase/decision edge plus a global one-second
 summary of repeated queued updates; result metrics retain accepted and suppressed
 counts. Every queued estimate still updates scheduling state. Retained records
+distinguish native queue/boundary transitions from forecast-phase transitions;
+alternating `queued` and `response_forecast` messages alone do not trigger a
+phase change or repeated pressure work. Native queue events still invalidate
+the preceding estimate; each forecast updates its value and expiry. Real phase,
+eligibility and prewarm changes wake policy waiters. `gpu_signal_metrics`
+includes `pressure_rechecks` and `progress_notifications` counts to audit this
+work. Updated host code and a new run ID are required, without host apply,
+image rebuild or retraining. Retained records
 include virtual/scheduled/emitted/received times and callback duration. Join CPU
 `serving-sim/ARM_ID/requests.jsonl` and `observations.jsonl` with the managed GPU's
 `output/clawbox-diagnostics.jsonl`, or each multi-cluster

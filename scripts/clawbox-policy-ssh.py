@@ -6,6 +6,10 @@ client exactly once after admission.  HTTP carries control metadata only.
 """
 from __future__ import annotations
 
+import time
+
+_IMPORT_STARTED = time.monotonic()
+
 import base64
 import hashlib
 import ipaddress
@@ -18,7 +22,6 @@ import signal
 import subprocess
 import sys
 import threading
-import time
 import urllib.error
 import urllib.request
 import uuid
@@ -242,9 +245,14 @@ def _post(path: str, body: dict[str, Any], *, attempts: int) -> dict[str, Any]:
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
     last_error: Exception | None = None
+    timeout = float(os.environ.get("CLAWBOX_POLICY_TIMEOUT_SECONDS", "3600"))
+    if path == "/v1/tool/admit":
+        # Admission includes policy queueing, which can outlast the ordinary
+        # callback timeout. The driver derives this limit from the arm deadline.
+        timeout = float(os.environ.get("CLAWBOX_POLICY_ADMISSION_TIMEOUT_SECONDS", timeout))
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(request, timeout=float(os.environ.get('CLAWBOX_POLICY_TIMEOUT_SECONDS', '3600'))) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.load(response)
         except urllib.error.HTTPError:
             raise
@@ -285,6 +293,23 @@ def _admission_route(admission: dict[str, Any]) -> dict[str, Any]:
         "sandbox_id": sandbox_id, "epoch": epoch, "host": host,
         "port": port, "host_key_alias": alias,
     }
+
+
+def _wait_for_exit(child: subprocess.Popen, timeout: float) -> int:
+    """Wake on Linux process exit, without Popen's up-to-50ms timed polling."""
+    if not hasattr(os, "pidfd_open"):
+        return child.wait(timeout=timeout)
+    try:
+        descriptor = os.pidfd_open(child.pid)
+    except ProcessLookupError:
+        # A cancellation handler may already have reaped this child.
+        return child.wait()
+    try:
+        if not select.select([descriptor], [], [], timeout)[0]:
+            raise subprocess.TimeoutExpired(child.args, timeout)
+        return child.wait()
+    finally:
+        os.close(descriptor)
 
 
 def _wait_for_ssh(argv: list[str], execution_id: str,
@@ -364,7 +389,7 @@ def _wait_for_ssh(argv: list[str], execution_id: str,
         if timeout_seconds is None:
             return child.wait()
         try:
-            return child.wait(timeout=timeout_seconds)
+            return _wait_for_exit(child, timeout_seconds)
         except TypeError:
             # Lightweight test doubles may expose only wait(); production
             # subprocess.Popen always supports the timeout keyword.
@@ -463,7 +488,8 @@ def _main() -> int:
         or os.environ.get("CLAWBOX_POLICY_CONTROL_TOKEN")
     )
     session_id = os.environ.get("CLAWBOX_POLICY_SESSION_ID")
-    _audit("invoked", argument_count=len(ssh_argv), envelope=parsed is not None)
+    _audit("invoked", argument_count=len(ssh_argv), envelope=parsed is not None,
+           bootstrap_seconds=time.monotonic() - _IMPORT_STARTED)
     if parsed is None:
         if os.environ.get("CLAWBOX_POLICY_REQUIRE_ENVELOPE") == "1":
             parsed = _openclaw_unenveloped(ssh_argv)
@@ -598,8 +624,11 @@ def _main() -> int:
         "ssh_reaped_at": ssh_reaped_at,
     }
     try:
+        completion_post_started = time.monotonic()
         _post("/v1/tool/complete", completion, attempts=3)
-        _audit("completed", execution_id=execution_id, exit_code=return_code)
+        _audit("completed", execution_id=execution_id, exit_code=return_code,
+               ssh_reaped_at=ssh_reaped_at,
+               completion_post_seconds=time.monotonic() - completion_post_started)
     except Exception as exc:
         # The command has already run. Never retry it to repair a missing
         # completion; fail the caller and let exact-ID acceptance reject the run.

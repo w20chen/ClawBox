@@ -267,6 +267,8 @@ class InferenceConfiguration(TypedDict, total=False):
                                                          json_schema_extra={'default': 60})]
     runtime_completion_watch_seconds: Annotated[int, Field(ge=1, le=60, strict=True,
                                                           json_schema_extra={'default': 10})]
+    runtime_completion_notifications: Annotated[bool, Field(strict=True,
+                                                           json_schema_extra={'default': True})]
     openclaw_exec_yield_ms: Annotated[int, Field(ge=10, le=120000, strict=True)]
     repo_fingerprint: Annotated[str, Field(min_length=1)]
     serving_sim_catalog_manifest: Annotated[str, Field(min_length=1)]
@@ -321,6 +323,10 @@ class InferenceSpec(StrictFrozenModel):
             'kb_http_timeout_seconds': 'execution.kb_http_timeout_seconds',
             'repository': 'workload.tasks.cases[].repository',
             'runtime_trace_content_retention': 'execution.runtime_trace_content_retention',
+            'runtime_trace_flush_span_start': 'execution.runtime_trace_flush_span_start',
+            'runtime_fast_module_resolution': 'execution.runtime_fast_module_resolution',
+            'runtime_node_compile_cache': 'execution.runtime_node_compile_cache',
+            'policy_http_loop': 'execution.policy_http_loop',
             'runtime_log_retention': 'execution.runtime_log_retention',
             'retain_tool_resource_timelines': 'execution.retain_tool_resource_timelines',
         }
@@ -688,6 +694,11 @@ class ExecutionSpec(StrictFrozenModel):
     # payloads, but omit successful conversation/tool content. ``all`` is an
     # explicit full-audit mode.
     runtime_trace_content_retention: Literal["failures", "all"] = "failures"
+    # Native trace writes still drain at agent end. Per-span fsync is an
+    # optional host-crash durability barrier, not part of event delivery.
+    runtime_trace_flush_span_start: bool = Field(default=False, strict=True)
+    runtime_fast_module_resolution: bool = Field(default=True, strict=True)
+    runtime_node_compile_cache: bool = Field(default=False, strict=True)
     # Successful sessions normally retain only compact sidecar client timing.
     # Full Runtime stderr/relay/policy logs remain mandatory on failures.
     runtime_log_retention: Literal["failures", "all"] = "failures"
@@ -754,6 +765,8 @@ class ExecutionSpec(StrictFrozenModel):
     # Progress acknowledgements may queue under high fan-out. Retry only the
     # idempotent notification within this total deadline, never the Tool command.
     policy_progress_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    policy_forecast_workers: int = Field(default=16, ge=1, strict=True)
+    policy_http_loop: Literal['auto', 'asyncio', 'uvloop'] = 'auto'
     # CubeMaster 130597 is a definite scheduler rejection, so create can wait
     # and retry without risking a duplicate VM. Zero disables this retry.
     cube_create_capacity_retry_seconds: float = Field(
