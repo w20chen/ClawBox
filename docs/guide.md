@@ -1646,9 +1646,11 @@ consumed GPU service cannot resume. After reboot, restore and verify the saved
 host configuration before starting the new run. External services remain
 manually managed when `serving_sim_launch` is absent.
 
-To approximate an effectively unconstrained LLM tier, launch independent native
-clusters instead of changing one cluster's topology. For example, 16 independent
-`8A` clusters expose 128 A-role engines:
+The default Full1280 baseline uses 16 independent `8A` clusters, exposing 128
+A-role engines with native calibrated token timing. Capacity is still finite;
+check observed queueing before describing the LLM tier as unconstrained. This
+explicit baseline setting does not change the generic single-cluster schema
+default or existing frozen experiments:
 
 ```yaml
     base_url: http://127.0.0.1:18096
@@ -1658,9 +1660,20 @@ clusters instead of changing one cluster's topology. For example, 16 independent
       cores: 8
       topology: 8A
       cluster_count: 16
+      decode_time_scale: null
+      tpot_ms: null
       routing: sticky_balanced_by_case
       startup_timeout_seconds: 600
 ```
+
+On kunpeng, the saved default baseline and matching workload are
+`/home/weitianc/.config/clawbox/standards/full1280-128engine-20261129/baseline.yaml`
+and `workload.yaml` in the same directory. Use these as `--baseline` and
+`--workload` in the preparation workflow above, retain the creation standard,
+and use a new run ID. `launch` qualifies the changed inputs before running;
+configuration validation alone does not qualify the 128-engine baseline.
+Leave both decode override fields null to use the simulator's native model;
+there is no fixed milliseconds-per-token value under varying load.
 
 `base_url` is the first of 16 consecutive local ports. `cores` is the total real
 CPU budget for the pool: cluster 0 uses the first CPU, cluster 1 the second, and
