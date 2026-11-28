@@ -1,5 +1,6 @@
 """Runtime event adapter: all prediction and learning state belongs to the host."""
 import threading
+import time
 from collections import OrderedDict
 
 import httpx
@@ -40,6 +41,17 @@ class RemoteKnowledgeClient:
         self.provenance = None
         self.receipts = {}
         self.forecast_receipts = OrderedDict()
+        self._prediction_timing = threading.local()
+
+    def prediction_timing(self):
+        return dict(getattr(self._prediction_timing, 'values', {}))
+
+    def _timed_prediction_step(self, name, operation, *args, **kwargs):
+        started = time.monotonic()
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            self._prediction_timing.values[name] = time.monotonic() - started
 
     def _payload(self, request):
         command = _command_for_request(request)
@@ -75,15 +87,18 @@ class RemoteKnowledgeClient:
         return (request.gateway_id, request.runtime_id, request.event_id)
 
     def predict(self, request):
-        payload = self._payload(request)
+        self._prediction_timing.values = {}
+        payload = self._timed_prediction_step('payload_seconds', self._payload, request)
         if payload is None:
             return self._unavailable()
-        response = self.client.post('/v1/kb/predict', json=payload)
+        response = self._timed_prediction_step('http_seconds', self.client.post,
+                                              '/v1/kb/predict', json=payload)
         response.raise_for_status()
-        value = response.json()
-        validate_message(value, 'prediction')
+        value = self._timed_prediction_step('decode_seconds', response.json)
+        self._timed_prediction_step('schema_seconds', validate_message, value, 'prediction')
         self.provenance = {key: value[key] for key in ('seed_sha256', 'mapping_policy_sha256', 'scope_generation', 'view_revision')}
-        prediction = ToolPrediction.model_validate(value['prediction'])
+        prediction = self._timed_prediction_step('model_validation_seconds',
+                                                ToolPrediction.model_validate, value['prediction'])
         self.receipts[self._key(request)] = {
             'prediction_receipt': value['prediction_receipt'], 'view_revision': value['view_revision'],
             'tool_name': request.tool_name}

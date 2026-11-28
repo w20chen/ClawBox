@@ -208,6 +208,7 @@ export default definePluginEntry({
   // first provider request, eliminating the startup race with the local proxy.
   const client = new SidecarClient(config);
   api.on("before_agent_start", async (event, context) => {
+    sessionObservations.start();
     await waitForAutoStartedSidecar();
     const identity = hookIdentity(event, context, runtimeId, gatewayId);
     await client.registerLogicalSession(identity.sessionKey ?? identity.sessionId);

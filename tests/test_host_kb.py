@@ -215,6 +215,10 @@ def test_runtime_client_uses_authenticated_host_prediction_and_rejects_missing_r
             )}, command_context={})
         try:
             prediction = client.predict(request)
+            timings = client.prediction_timing()
+            assert set(timings) == {'payload_seconds', 'http_seconds', 'decode_seconds',
+                                    'schema_seconds', 'model_validation_seconds'}
+            assert all(value >= 0 for value in timings.values())
             receipt = client.receipts[client._key(request)]['prediction_receipt']
             assert set(prediction.model_dump()) == {'tool', 'trie', 'lattice'}
             body = dict(session_id='a', execution_id='exec', command='sleep 1', command_sha256=command_digest('sleep 1'))

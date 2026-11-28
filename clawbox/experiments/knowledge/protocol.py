@@ -5,8 +5,7 @@ from dataclasses import fields
 
 from functools import lru_cache
 from pathlib import Path
-from jsonschema import Draft202012Validator, ValidationError
-from referencing import Registry, Resource
+from jsonschema_rs import Draft202012Validator, Registry, ValidationError
 from clawtune_kb.contracts import data_root
 
 
@@ -17,8 +16,11 @@ def _validator(name):
         for path in root.glob('*.schema.json'):
             schema = json.loads(path.read_text(encoding='utf-8'))
             schemas[path.name] = schema
-    registry = Registry().with_resources((s['$id'], Resource.from_contents(s)) for s in schemas.values())
-    return Draft202012Validator(schemas[name], registry=registry)
+    registry = Registry([(s['$id'], s) for s in schemas.values()])
+    # Compile the unchanged Draft 2020-12 contract once, including local refs.
+    # Match jsonschema's previous non-format-checking behavior; never fetch refs.
+    return Draft202012Validator(schemas[name], registry=registry,
+                               validate_formats=False, offline=True)
 
 PROTOCOL = 'clawtune.host-kb.v1'
 MAX_BODY_BYTES = 1024 * 1024

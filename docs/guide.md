@@ -328,6 +328,19 @@ bash "$HOME/src/ClawBox/scripts/clawbox" --sudo experiment report smoke-01
 
 The smoke creates `/workspace/result.txt` and checks its content. Template shapes
 must match registered images; editing YAML does not resize or rebuild them.
+The worker installs its current SSH policy shim in each Runtime and compiles it
+once with the guest Python interpreter. Updating this shim requires updated
+worker code and a new run ID, but no template rebuild, host apply or retraining.
+The image build also installs the compiled shim for standalone Runtime use.
+The session observer subscribes when an execution hook activates the plugin;
+discovery-only registrations do not send previews or heartbeat snapshots.
+Deploy plugin changes with `experiment images --role runtime --profile HOST.json`,
+then use the registered Runtime template in a new run. No KB retraining is needed.
+Host-KB wire validation uses the compiled Draft 2020-12 validator installed by
+the project's dependencies (`jsonschema-rs==0.63.2`). When upgrading this path,
+update the host Python environment with `scripts/bootstrap-python.sh` using
+the matching saved ClawTune/SDK sources (see [installation](installation.md)), and
+rebuild the Runtime image; the contracts and KB data do not change.
 To check guest prerequisites before the Agent starts, set
 `environment.runtime.preflight_command` and/or `environment.sandbox.preflight_command`
 in the baseline (a case Tool template may supply its own command). Runtime's

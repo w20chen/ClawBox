@@ -220,7 +220,7 @@ COPY clawbox /opt/clawbox/clawbox
 ENV PYTHONPATH=/opt/clawbox:{target}/services/sidecar/src
 COPY contracts {target}/contracts
 COPY seeds {target}/seeds
-RUN {pip} install --index-url {args.pip_index} --upgrade jsonschema setuptools wheel && {pip} install --index-url {args.pip_index} --no-build-isolation {target}/services/sidecar
+RUN {pip} install --index-url {args.pip_index} --upgrade jsonschema jsonschema-rs==0.63.2 setuptools wheel && {pip} install --index-url {args.pip_index} --no-build-isolation {target}/services/sidecar
 ENV XDG_CACHE_HOME=/opt/clawtune/cache
 COPY {mvdan_binary_name} /opt/clawtune/cache/agent-sched-bench/{mvdan_binary_name}
 RUN chmod 755 /opt/clawtune/cache/agent-sched-bench/{mvdan_binary_name} && /opt/clawtune/cache/agent-sched-bench/{mvdan_binary_name} </dev/null >/dev/null
@@ -237,7 +237,9 @@ COPY selected-seed /opt/clawtune/cold-start/tool-resource
 ENV CLAWTUNE_KB_SEED=/opt/clawtune/cold-start/tool-resource
 RUN /opt/clawtune/venv/bin/python -m clawtune_sidecar.predictors.startup_cache \
     --artifact-dir /opt/clawtune/cold-start/tool-resource
-COPY scripts/clawbox-policy-ssh.py /usr/local/bin/ssh
+COPY scripts/clawbox-policy-ssh.py /usr/local/lib/clawbox/policy-ssh.py
+COPY scripts/compile-policy-ssh.py /usr/local/lib/clawbox/compile-policy-ssh.py
+RUN python3 -S /usr/local/lib/clawbox/compile-policy-ssh.py /usr/local/lib/clawbox/policy-ssh.py /usr/local/bin/ssh
 COPY scripts/initialize-clawtune-state.py /usr/local/bin/initialize-clawtune-state.py
 COPY scripts/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
 COPY scripts/clawtune-sidecar-entrypoint.sh /usr/local/bin/clawtune-sidecar-entrypoint

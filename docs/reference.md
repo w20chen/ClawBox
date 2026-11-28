@@ -29,6 +29,23 @@ The worker module is internal to the supervisor.
 All commands in this table follow `bash scripts/clawbox experiment`.
 Use wrapper option `--sudo` before `experiment` for privileged VM/host operations.
 Root option `--output-root DIRECTORY` also precedes `experiment`.
+SSH policy admission and completion reuse one HTTP connection per invocation
+when it remains open; each request retains its own timeout. A closed idle
+connection is replaced, and transport retries retain the same execution ID.
+HTTP rejections are not retried or redirected. The worker precompiles the
+stdlib-only shim once per Runtime using that guest's Python; compilation failure
+fails setup. These are internal transport optimizations with no policy or
+prediction-setting changes. Deploy worker changes with a new run ID; existing
+templates can be reused without host apply or retraining.
+Session observers activate on the first execution hook, so unused plugin
+registrations do not create additional preview requests or heartbeat snapshots.
+This plugin change requires a Runtime image rebuild and a new run ID; it does
+not change the prediction model or require retraining.
+Host-KB messages retain full schema, body-size and command-digest validation.
+The compiled validator is cached per schema and resolves only bundled schemas;
+`jsonschema-rs==0.63.2` is installed by the project and image build. Upgrades to
+this path require updated host dependencies, a Runtime image rebuild and a new
+run ID, but no host apply or KB retraining.
 Use `--sudo` for `collect` and `report` when the run was launched as root, because
 they rewrite result artifacts.
 

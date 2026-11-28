@@ -353,6 +353,7 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
                          b'not json\n'
                          b'{"event":"host_kb_client_prediction","event_id":"e-1",'
                          b'"tool_call_id":"t-1","status":"ok","seconds":0.25,'
+                         b'"http_seconds":0.2,"schema_seconds":0.001,'
                          b'"large_detail":"omitted"}\n'
                          b'{"event":"unrelated","payload":"omitted"}\n'),
                     ):
@@ -535,7 +536,8 @@ def test_openclaw_runner_uses_native_ssh_for_all_workspace_tools(
     assert not (tmp_path / "openclaw/session-a/policy-ssh.jsonl").exists()
     assert (tmp_path / "openclaw/session-a/sidecar-client-timing.jsonl").read_text() == (
         '{"event":"host_kb_client_prediction","event_id":"e-1",'
-        '"tool_call_id":"t-1","status":"ok","seconds":0.25}\n'
+        '"tool_call_id":"t-1","status":"ok","seconds":0.25,'
+        '"http_seconds":0.2,"schema_seconds":0.001}\n'
     )
     assert "CLAWTUNE_TRACE_INCLUDE_RESOURCE_TIMELINE=false" in "\n".join(commands)
     assert result["retained_full_runtime_logs"] is False

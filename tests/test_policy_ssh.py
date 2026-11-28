@@ -24,6 +24,13 @@ policy_ssh = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(policy_ssh)
 
 
+@pytest.fixture(autouse=True)
+def close_control_connection():
+    policy_ssh._close_control_connection()
+    yield
+    policy_ssh._close_control_connection()
+
+
 @pytest.mark.skipif(not hasattr(os, 'pidfd_open'), reason='Linux process exit notification')
 def test_process_exit_notification_reaps_status_without_timed_polling(monkeypatch):
     with subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(.05); raise SystemExit(7)']) as child:
@@ -87,14 +94,27 @@ def test_post_accepts_sanitizer_safe_policy_auth(
     monkeypatch.delenv("CLAWBOX_POLICY_CONTROL_TOKEN", raising=False)
     requests = []
 
-    def urlopen(request, timeout):
-        requests.append((request, timeout))
-        return io.BytesIO(b'{"status":"ok"}')
+    class Connection:
+        sock = None
 
-    monkeypatch.setattr(policy_ssh.urllib.request, "urlopen", urlopen)
+        def __init__(self, host, port, timeout):
+            self.timeout = timeout
+
+        def request(self, method, path, body, headers):
+            requests.append((method, path, json.loads(body), headers))
+
+        def getresponse(self):
+            from types import SimpleNamespace
+            return SimpleNamespace(status=200, read=lambda: b'{"status":"ok"}')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(policy_ssh.http.client, "HTTPConnection", Connection)
 
     assert policy_ssh._post("/v1/tool/admit", {"x": 1}, attempts=1) == {"status": "ok"}
-    assert requests[0][0].get_header("Authorization") == "Bearer auth-token"
+    assert requests == [("POST", "/v1/tool/admit", {"x": 1},
+                         {"Authorization": "Bearer auth-token", "Content-Type": "application/json"})]
 
 
 def _argv(tool_name: str = "exec") -> list[str]:
@@ -179,14 +199,33 @@ def test_admission_timeout_does_not_change_callback_timeout(monkeypatch):
     monkeypatch.setenv("CLAWBOX_POLICY_ADMISSION_TIMEOUT_SECONDS", "21660")
     timeouts = []
 
-    def urlopen(_request, timeout):
-        timeouts.append(timeout)
-        return io.BytesIO(b'{}')
+    instances = []
 
-    monkeypatch.setattr(policy_ssh.urllib.request, "urlopen", urlopen)
+    class Connection:
+        def __init__(self, host, port, timeout):
+            self.timeout = timeout
+            self.sock = self
+            instances.append(self)
+
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
+        def request(self, *args, **kwargs):
+            assert self.timeout == timeouts[-1]
+
+        def getresponse(self):
+            from types import SimpleNamespace
+            return SimpleNamespace(status=200, read=lambda: b'{}')
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(policy_ssh.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(policy_ssh.select, "select", lambda *args: ([], [], []))
     for path in ("/v1/tool/admit", "/v1/tool/start", "/v1/tool/complete"):
         policy_ssh._post(path, {}, attempts=1)
     assert timeouts == [21660, 3600, 3600]
+    assert len(instances) == 1
 
 
 def test_clawtune_prediction_crosses_ssh_envelope(monkeypatch: pytest.MonkeyPatch) -> None:

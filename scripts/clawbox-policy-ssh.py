@@ -22,20 +22,20 @@ import signal
 import subprocess
 import sys
 import threading
-import urllib.error
-import urllib.request
+import http.client
+from urllib.parse import urlsplit
 import uuid
-from pathlib import Path
-from typing import Any
 
 
 PREFIX = "__CBX_EXEC_1__"
 CANCEL_PREFIX = "__CLAWBOX_CANCEL__ "
 DEFERRED_TIMEOUT_PREFIX = "CLAWBOX_DEFERRED_TOOL_TIMEOUT_SECONDS="
 _HOST_KEY_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_CONTROL_CONNECTION = None
+_CONTROL_ORIGIN = None
 
 
-def _audit(stage: str, **fields: Any) -> None:
+def _audit(stage: str, **fields: object) -> None:
     """Append a bounded, credential-free lifecycle record for this SSH call."""
     target = os.environ.get("CLAWBOX_POLICY_AUDIT_FILE")
     if not target:
@@ -59,7 +59,7 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def _bridge_header(metadata: dict[str, Any], profile_command: str) -> str:
+def _bridge_header(metadata: dict[str, object], profile_command: str) -> str:
     bridge_metadata = {
         **metadata,
         "profile_command_b64": base64.urlsafe_b64encode(
@@ -127,7 +127,7 @@ def _collector_visible_launcher(command: str, execution_id: str) -> str:
     return 'export ' + ' '.join(shlex.quote(word) for word in assignments) + '\n' + words[-1]
 
 
-def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
+def _envelope(argv: list[str]) -> tuple[dict[str, object], str, str] | None:
     for index, argument in enumerate(argv):
         marker = argument.find(PREFIX)
         if marker < 0:
@@ -178,7 +178,7 @@ def _envelope(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
     return None
 
 
-def _openclaw_unenveloped(argv: list[str]) -> tuple[dict[str, Any], str, str] | None:
+def _openclaw_unenveloped(argv: list[str]) -> tuple[dict[str, object], str, str] | None:
     """Adopt OpenClaw SSH-backend calls which cannot carry an exec envelope.
 
     ClawTune can put an execution envelope in the ``exec`` tool's command.
@@ -206,19 +206,20 @@ def _openclaw_unenveloped(argv: list[str]) -> tuple[dict[str, Any], str, str] | 
     return metadata, command, command
 
 
-def _prediction(command_sha256: str) -> dict[str, Any] | None:
+def _prediction(command_sha256: str) -> dict[str, object] | None:
     source = os.environ.get("CLAWBOX_RUNTIME_PREDICTION_FILE", "")
     if not source:
         return None
     try:
-        value = json.loads(Path(source).read_text(encoding="utf-8"))
+        with open(source, encoding="utf-8") as stream:
+            value = json.load(stream)
         prediction = value.get(command_sha256)
         return prediction if isinstance(prediction, dict) else None
     except (OSError, ValueError, TypeError):
         return None
 
 
-def _tool_timeout_seconds(metadata: dict[str, Any]) -> float:
+def _tool_timeout_seconds(metadata: dict[str, object]) -> float:
     """Return the execution deadline which begins only after admission."""
     configured = float(os.environ.get("CLAWBOX_TOOL_TIMEOUT_SECONDS", "300"))
     if not configured > 0:
@@ -233,17 +234,26 @@ def _tool_timeout_seconds(metadata: dict[str, Any]) -> float:
     return min(configured, float(requested))
 
 
-def _post(path: str, body: dict[str, Any], *, attempts: int) -> dict[str, Any]:
+def _close_control_connection() -> None:
+    global _CONTROL_CONNECTION, _CONTROL_ORIGIN
+    if _CONTROL_CONNECTION is not None:
+        _CONTROL_CONNECTION.close()
+    _CONTROL_CONNECTION = _CONTROL_ORIGIN = None
+
+
+def _post(path: str, body: dict[str, object], *, attempts: int) -> dict[str, object]:
+    global _CONTROL_CONNECTION, _CONTROL_ORIGIN
     base = os.environ["CLAWBOX_POLICY_CONTROL_URL"].rstrip("/")
+    endpoint = urlsplit(base)
+    if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname
+            or endpoint.username is not None or endpoint.password is not None
+            or endpoint.query or endpoint.fragment):
+        raise ValueError("CLAWBOX_POLICY_CONTROL_URL must be an HTTP(S) endpoint without credentials, query or fragment")
     token = (
         os.environ.get("CLAWBOX_POLICY_CONTROL_AUTH")
         or os.environ["CLAWBOX_POLICY_CONTROL_TOKEN"]
     )
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    request = urllib.request.Request(
-        base + path, data=encoded, method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-    )
     last_error: Exception | None = None
     timeout = float(os.environ.get("CLAWBOX_POLICY_TIMEOUT_SECONDS", "3600"))
     if path == "/v1/tool/admit":
@@ -252,18 +262,44 @@ def _post(path: str, body: dict[str, Any], *, attempts: int) -> dict[str, Any]:
         timeout = float(os.environ.get("CLAWBOX_POLICY_ADMISSION_TIMEOUT_SECONDS", timeout))
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.load(response)
-        except urllib.error.HTTPError:
-            raise
-        except (OSError, urllib.error.URLError) as exc:
+            if (_CONTROL_CONNECTION is not None and _CONTROL_CONNECTION.sock is not None
+                    and select.select([_CONTROL_CONNECTION.sock], [], [], 0)[0]):
+                # A Tool may outlive the server's keepalive timeout. With the
+                # prior response drained, readability means EOF or unsolicited
+                # data: reconnect now instead of paying a failed-request retry.
+                _close_control_connection()
+            if _CONTROL_CONNECTION is None or _CONTROL_ORIGIN != base:
+                _close_control_connection()
+                connection_type = (http.client.HTTPSConnection if endpoint.scheme == "https"
+                                   else http.client.HTTPConnection)
+                _CONTROL_CONNECTION = connection_type(endpoint.hostname, endpoint.port, timeout=timeout)
+                _CONTROL_ORIGIN = base
+            connection = _CONTROL_CONNECTION
+            # Admission can queue much longer than completion. A reused socket
+            # must receive the timeout for this request, not its predecessor.
+            connection.timeout = timeout
+            if connection.sock is not None:
+                connection.sock.settimeout(timeout)
+            connection.request("POST", endpoint.path + path, body=encoded,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+            response = connection.getresponse()
+            payload = response.read()  # Drain before reusing HTTP/1.1.
+            if not 200 <= response.status < 300:
+                status = response.status
+                _close_control_connection()
+                # Rejections are authoritative, including 5xx. Only transport
+                # failures retry, with the same execution ID as before.
+                raise RuntimeError(f"policy control HTTP {status}")
+            return json.loads(payload)
+        except (OSError, http.client.HTTPException) as exc:
+            _close_control_connection()
             last_error = exc
             if attempt + 1 < attempts:
                 time.sleep(0.1 * (2 ** attempt))
     raise RuntimeError(f"policy control unavailable: {last_error}")
 
 
-def _admission_route(admission: dict[str, Any]) -> dict[str, Any]:
+def _admission_route(admission: dict[str, object]) -> dict[str, object]:
     """Validate the endpoint returned for this one admitted invocation."""
     expected_sandbox_id = os.environ.get("CLAWBOX_TOOL_SANDBOX_ID", "").strip()
     sandbox_id = str(admission.get("sandbox_id") or "").strip()
@@ -412,7 +448,7 @@ def _wait_for_ssh(argv: list[str], execution_id: str,
             signal.signal(sig, handler)
 
 
-def _ssh_args_for_route(argv: list[str], route: dict[str, Any]) -> list[str]:
+def _ssh_args_for_route(argv: list[str], route: dict[str, object]) -> list[str]:
     """Override only destination routing for the current OpenSSH invocation.
 
     OpenClaw supplies a generated SSH config and the final two arguments are
@@ -541,6 +577,7 @@ def _main() -> int:
     capture_path = None
     capture_root = os.environ.get('CLAWBOX_PLACEMENT_CAPTURE_ROOT')
     if capture_root and request['execution_scope'] == 'agent-tool':
+        from pathlib import Path
         if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', execution_id):
             raise ValueError('unsafe placement capture identity')
         capture_path = Path(capture_root) / (execution_id + '.json')
@@ -639,18 +676,26 @@ def _main() -> int:
     return return_code
 
 
-def main() -> int:
+def _run() -> int:
     capture_root = os.environ.get('CLAWBOX_PLACEMENT_CAPTURE_ROOT')
     if not capture_root:
         return _main()
     # Serializing the entire SSH lifecycle also prevents a later prefix command
     # from competing with replicas while the preceding completion is measured.
     import fcntl
+    from pathlib import Path
     root = Path(capture_root)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (root / 'session.lock').open('a') as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         return _main()
+
+
+def main() -> int:
+    try:
+        return _run()
+    finally:
+        _close_control_connection()
 
 
 if __name__ == "__main__":

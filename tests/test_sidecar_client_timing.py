@@ -35,6 +35,7 @@ def test_client_timing_preserves_prediction_and_failure(failure, capsys, monkeyp
         predict=predict,
         receipts={receipt_key: {'prediction_receipt': 'present'}},
         _key=lambda _request: receipt_key,
+        prediction_timing=lambda: {"http_seconds": 2., "schema_seconds": .1},
     )
     launcher._time_host_predictions(predictor)
     if failure:
@@ -48,6 +49,8 @@ def test_client_timing_preserves_prediction_and_failure(failure, capsys, monkeyp
     assert "secret" not in output
     row = json.loads(output)
     assert row["seconds"] == 2.5
+    assert row["http_seconds"] == 2.
+    assert row["schema_seconds"] == .1
     assert row["status"] == ("error" if failure else "ok")
     if not failure:
         assert row["remote_prediction"] is True

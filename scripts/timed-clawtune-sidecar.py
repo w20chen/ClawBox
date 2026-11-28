@@ -48,6 +48,7 @@ def _time_host_predictions(predictor: Any) -> None:
             raise
         finally:
             record["seconds"] = time.monotonic() - started
+            record.update(predictor.prediction_timing())
             print(json.dumps(record, separators=(",", ":")), flush=True)
 
     predictor.predict = measured

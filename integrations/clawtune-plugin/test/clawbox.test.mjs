@@ -232,6 +232,39 @@ test("delivered session observer previews full batches and settles logical retur
   } finally { await observer.close(); }
 });
 
+test("inactive plugin registrations do not subscribe, preview or publish heartbeats", async () => {
+  const owner = {gatewayId: "g", runtimeId: "r", sessionId: "s", sessionKey: "key", runId: "run", agentId: "a"};
+  const agents = new Set(), transcripts = new Set(), sent = [], previewed = [];
+  const events = {
+    onAgentEvent(handler) { agents.add(handler); return () => agents.delete(handler); },
+    onSessionTranscriptUpdate(handler) { transcripts.add(handler); return () => transcripts.delete(handler); },
+  };
+  const make = name => new SessionObservations(() => owner,
+    async value => sent.push({name, value}), events, true,
+    async call => { previewed.push({name, id: call.id}); return {durationMs: 100, source: "lattice"}; });
+  const unused = make("discovery"), active = make("active");
+  try {
+    assert.equal(agents.size, 0);
+    assert.equal(transcripts.size, 0);
+    active.start();
+    active.start();
+    assert.equal(agents.size, 1);
+    assert.equal(transcripts.size, 1);
+    for (const listener of agents) listener({stream: "lifecycle", data: {phase: "start"}});
+    for (const listener of transcripts) listener({sessionKey: "key", messageId: "assistant", message: {
+      role: "assistant", content: [{type: "toolCall", id: "one", name: "exec"}]}});
+    active.beforeTool({toolName: "exec", toolCallId: "one"}, {});
+    active.afterTool({toolName: "exec", toolCallId: "one"}, {});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(previewed, [{name: "active", id: "one"}]);
+    assert.ok(sent.length > 0 && sent.every(row => row.name === "active"));
+    assert.equal(sent.at(-1).value.payload.batch.tools[0].settled, true);
+  } finally { await unused.close(); await active.close(); }
+  active.start();
+  assert.equal(agents.size, 0);
+  assert.equal(transcripts.size, 0);
+});
+
 test("completion observations use the unified protocol and retain decision identity", () => {
   const signal = eventSignal({event_id: "event", decision_id: "decision", tool_call_id: "tool",
     occurred_at: "2026-11-21T00:00:00Z"});

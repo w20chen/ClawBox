@@ -38,16 +38,22 @@ export class SessionObservations {
   private children = new Map<string, Map<string, Child>>();
   private pending = new Map<Entry, unknown>();
   private unsubscribe: Array<() => void> = [];
-  private timer: ReturnType<typeof setInterval>;
+  private timer: ReturnType<typeof setInterval> | null = null;
   private sending: Promise<void> | null = null;
   private closed = false;
   private observerId = randomUUID();
   private observerStartedAt = Date.now() / 1000;
 
   constructor(private resolve: (event: unknown, context: unknown) => Owner,
-    private send: (message: unknown) => Promise<void>, events?: Events,
+    private send: (message: unknown) => Promise<void>, private events?: Events,
     private foregroundExec = false,
-    private preview?: (toolCall: unknown, owner: Owner) => Promise<DurationPrediction | null>) {
+    private preview?: (toolCall: unknown, owner: Owner) => Promise<DurationPrediction | null>) {}
+
+  // Plugin discovery can register an instance whose hooks never execute.
+  // Subscribe only when this instance is used by the active hook registry.
+  start(): void {
+    if (this.closed || this.timer !== null) return;
+    const events = this.events;
     if (events?.onAgentEvent) this.unsubscribe.push(events.onAgentEvent(e => this.lifecycle(e)));
     if (events?.onSessionTranscriptUpdate) this.unsubscribe.push(
       events.onSessionTranscriptUpdate(e => this.transcript(e)));
@@ -95,6 +101,7 @@ export class SessionObservations {
   }
 
   model(event: unknown, context: unknown, started: boolean): void {
+    if (started) this.start();
     const entry = this.entry(event, context, started);
     const e = record(event);
     const callId = string(e.call_id, e.callId, e.id);
@@ -365,7 +372,7 @@ export class SessionObservations {
 
   async close(): Promise<void> {
     this.closed = true;
-    clearInterval(this.timer);
+    if (this.timer !== null) clearInterval(this.timer);
     for (const unsubscribe of this.unsubscribe) unsubscribe();
     await this.sending;
   }

@@ -702,6 +702,9 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         "\r\n", "\n"
     ).encode()
     launcher_b64 = base64.b64encode(launcher_source).decode()
+    compiler_source = Path(__file__).resolve().parents[2] / 'scripts/compile-policy-ssh.py'
+    compiler_b64 = base64.b64encode(compiler_source.read_bytes()).decode()
+    compiler_file = launcher_dir + '/compile-policy-ssh.py'
     completion_setup = ''
     if notify_completion:
         notify_source = Path(__file__).resolve().parents[2] / 'scripts/clawbox-runtime-complete.py'
@@ -739,7 +742,10 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
         + f"{shlex.quote(home + '/logs')} {shlex.quote(ssh_dir)}; "
         + f"printf %s {shlex.quote(private_b64)} | base64 -d > {shlex.quote(identity_file)}; "
         + f"printf %s {shlex.quote(known_b64)} | base64 -d > {shlex.quote(known_hosts_file)}; "
-        + f"printf %s {shlex.quote(launcher_b64)} | base64 -d > {shlex.quote(ssh_launcher)}; "
+        + f"printf %s {shlex.quote(launcher_b64)} | base64 -d > {shlex.quote(ssh_launcher + '.py')}; "
+        + f"printf %s {shlex.quote(compiler_b64)} | base64 -d > {shlex.quote(compiler_file)}; "
+        + f"python3 -S {shlex.quote(compiler_file)} {shlex.quote(ssh_launcher + '.py')} "
+          f"{shlex.quote(ssh_launcher)} || exit $?; "
         + completion_setup
         # OpenClaw uses two SSH paths: backend preparation resolves
         # /usr/local/bin/ssh, while Agent exec calls resolve /usr/bin/ssh.
@@ -1341,6 +1347,8 @@ def run_openclaw(*, prompt: str, session_id: str, configuration: dict,
                             fields = (
                                 "event", "event_id", "tool_call_id", "status",
                                 "remote_prediction", "error_type", "seconds",
+                                "payload_seconds", "http_seconds", "decode_seconds",
+                                "schema_seconds", "model_validation_seconds",
                             )
                             compact_records = []
                             for line in content.decode("utf-8", errors="replace").splitlines():
